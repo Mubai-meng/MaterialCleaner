@@ -78,6 +78,19 @@ class AppListFragment : BaseServiceSettingsFragment() {
             statusController = StatusCardController(
                 strings = StatusStrings { id, args -> requireContext().getString(id, *args) },
                 guard = { isAdded },
+                appVersionCode = { me.gm.cleaner.BuildConfig.VERSION_CODE.toLong() },
+                installedVersionCode = {
+                    runCatching {
+                        val pm = requireContext().packageManager
+                        val name = requireContext().packageName
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                            pm.getPackageInfo(name, 0).longVersionCode
+                        } else {
+                            @Suppress("DEPRECATION")
+                            pm.getPackageInfo(name, 0).versionCode.toLong()
+                        }
+                    }.getOrDefault(0L)
+                },
             )
             statusController.isExpanded = savedInstanceState?.getBoolean(
                 SAVED_STATUS_DETAILS_EXPANDED,

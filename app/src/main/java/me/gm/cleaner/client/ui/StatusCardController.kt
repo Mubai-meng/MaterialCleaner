@@ -82,6 +82,8 @@ class StatusCardController(
     private val configuredCount: () -> Int = { ConfiguredPolicyStoreProvider.instance.srPackages.size },
     private val isManuallyStopped: () -> Boolean = { ServerStateMachine.isSessionManuallyStopped },
     private val guard: () -> Boolean = { true },
+    private val appVersionCode: () -> Long = { 0L },
+    private val installedVersionCode: () -> Long = { 0L },
 ) {
     var orchestratedStatus: OrchestratedRuntimeStatus? = null
         private set
@@ -210,11 +212,20 @@ class StatusCardController(
         }
         val namedLayers: List<Pair<String, OrchestratedLayerStatus>> = layerNames.zip(layers)
         val (dotIcon, dotColor) = ServiceStatusFormatter.statusIconRes(orchestrated.health)
+        // 版本过期优先于层状态问题：静默失效比可见降级更需要用户动作（重启手机）。
+        val staleCause = ServiceStatusFormatter.staleCause(
+            s,
+            orchestrated.controlPlane.metrics,
+            orchestrated.fuseNativeHook.metrics,
+            appVersionCode(),
+            installedVersionCode(),
+            xposedConnected,
+        )
         return StatusCardViewState(
             title = ServiceStatusFormatter.orchestratedTitle(s, orchestrated.health, configured),
             subtitle = ServiceStatusFormatter.topSummary(s, orchestrated, configured),
             rows = rows,
-            cause = ServiceStatusFormatter.firstProblem(s, namedLayers),
+            cause = staleCause ?: ServiceStatusFormatter.firstProblem(s, namedLayers),
             dotIconRes = dotIcon,
             dotColorRes = dotColor,
             toggleLabel = toggleLabel,

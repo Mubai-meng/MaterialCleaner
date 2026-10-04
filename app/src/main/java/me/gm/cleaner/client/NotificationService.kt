@@ -286,7 +286,7 @@ class NotificationService : Service() {
         )
         val notification = NotificationCompat
             .Builder(context, NOTIFICATION_CHANNEL_UPDATED)
-            .setContentTitle(context.getString(R.string.service_need_upgrade))
+            .setContentTitle(context.getString(R.string.service_need_reboot))
             .setAutoCancel(true)
             .setSmallIcon(R.drawable.ic_outline_update_24)
             .setColor(context.getColor(R.color.color_primary))
@@ -295,7 +295,7 @@ class NotificationService : Service() {
         NotificationManagerCompat.from(context).run {
             val channel = NotificationChannelCompat
                 .Builder(NOTIFICATION_CHANNEL_UPDATED, NotificationManager.IMPORTANCE_MAX)
-                .setName(context.getString(R.string.service_need_upgrade))
+                .setName(context.getString(R.string.service_need_reboot))
                 .setSound(null, null)
                 .build()
             createNotificationChannel(channel)

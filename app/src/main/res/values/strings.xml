@@ -173,6 +173,7 @@
     <string name="service_status_retry_with_max">Attempt %1$d/%2$d</string>
     <string name="service_status_retry">Attempt %d</string>
     <string name="service_status_problem_detail">Issue: %1$s - %2$s</string>
+    <string name="service_status_stale_reboot">Version mismatch (%1$s), please reboot your phone</string>
     <string name="runtime_layer_vfs">VFS main redirect</string>
     <string name="runtime_layer_media_provider_hook">Media library path correction</string>
     <string name="runtime_layer_fuse_native">FUSE compatibility layer</string>
@@ -230,6 +231,7 @@
     <string name="no_root_access">Can\'t access root</string>
     <string name="confirm_exit_restart">RESTART</string>
     <string name="service_need_upgrade">SERVICE NEED UPGRADE</string>
+    <string name="service_need_reboot">Update installed, please reboot your phone</string>
     <string name="service_exception_logcat_shutdown">The logcat is shutdown, please restart the Cleaner service.</string>
     <string name="service_settings">Material Cleaner</string>
     <string name="file_picker_title">Pick file</string>

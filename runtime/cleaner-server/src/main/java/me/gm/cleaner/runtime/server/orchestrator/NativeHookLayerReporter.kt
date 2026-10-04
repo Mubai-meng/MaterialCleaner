@@ -72,6 +72,7 @@ object NativeHookLayerReporter {
             lastError = nativeError,
             metrics = linkedMapOf(
                 "nativeHookState" to nativeStatus.inlineState,
+                "hookVersionCode" to nativeStatus.hookVersionCode.toString(),
                 "nativeCapabilityLevel" to nativeStatus.capabilityLevel,
                 "nativeCoreAvailable" to nativeStatus.coreAvailable.toString(),
                 "nativeMissingSymbols" to nativeStatus.missingSymbols,
@@ -173,6 +174,7 @@ object NativeHookLayerReporter {
             val policy = root.optJSONObject("policy")
             val fuseJavaGate = root.optJSONObject("fuseJavaGate")
             NativeHookRuntimeStatus(
+                hookVersionCode = root.optInt("hookVersionCode", 0),
                 mediaProviderLoaded = mediaProvider?.optBoolean("loaded", false) ?: false,
                 policyCacheInitialized = policyCache?.optBoolean("initialized", false) ?: false,
                 inlineState = inline?.optString("state", "NOT_LOADED") ?: "NOT_LOADED",
@@ -241,6 +243,7 @@ object NativeHookLayerReporter {
     }
 
     private data class NativeHookRuntimeStatus(
+        val hookVersionCode: Int = 0,
         val mediaProviderLoaded: Boolean = false,
         val policyCacheInitialized: Boolean = false,
         val inlineState: String = "NOT_LOADED",

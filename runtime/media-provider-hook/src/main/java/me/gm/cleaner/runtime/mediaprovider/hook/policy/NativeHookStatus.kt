@@ -587,6 +587,7 @@ object NativeHookStatus {
     fun toJson(): String {
         return JSONObject().apply {
             put("schemaVersion", SCHEMA_VERSION)
+            put("hookVersionCode", HookRuntimeConfig.VERSION_CODE)
             put("createdAt", System.currentTimeMillis())
             put("publisher", "NativeHookStatus")
             put("mediaProvider", JSONObject().apply {

@@ -35,6 +35,8 @@ App（编辑意图，经 Binder 受控触发 remount）
 * 只有 Projector 决定如何变成运行时；只有各执行端决定怎么执行。
 * 记录判定归 `RuntimeBehaviorPolicy`；VFS 只做视图委托。
 * 兼容读写收拢于配置存储直读，旧适配器已删除。
+* 版本对账归状态聚合：orchestrated 状态携 installed/server/hook 三版本号，
+  App 以纯函数判定 stale 并提示重启手机（更新后只重启服务不够，Hook 住在 Zygote 里）。
 
 ## 禁止箭头（门禁 G1 文件级强制）
 
