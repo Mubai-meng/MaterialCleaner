@@ -76,6 +76,9 @@ abstract class BaseProcessObserver : BaseObserver() {
 
     fun getGateRefusalCount(): Int = mounter.getGateRefusalCount()
 
+    /** 心跳重投失败挂载（冷却内/永久失败自动跳过），返回本次投递数。 */
+    fun requeueFailedMounts(): Int = mounter.requeueFailedMounts()
+
     fun getMountedDirs(): List<String> = mounter.getMountedDirs()
 
     fun getLastMountFailure(): Mounter.MountFailure? = mounter.getLastMountFailure()

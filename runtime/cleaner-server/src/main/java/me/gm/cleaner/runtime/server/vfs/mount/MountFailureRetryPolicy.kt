@@ -33,6 +33,23 @@ internal object MountFailureRetryPolicy {
         95, // EOPNOTSUPP
     )
 
+    /**
+     * 失败目标重投判定纯函数：只重投非永久失败，且与上次失败间隔达到冷却。
+     * 永久失败（参数无效等）重投必然复现，由调用方直接跳过。
+     */
+    fun shouldRequeueFailedMount(
+        nowMs: Long,
+        lastFailedAtMs: Long,
+        permanent: Boolean,
+        cooldownMs: Long = FAILED_REQUEUE_COOLDOWN_MS,
+    ): Boolean {
+        if (permanent) return false
+        if (lastFailedAtMs <= 0L) return false
+        return nowMs - lastFailedAtMs >= cooldownMs
+    }
+
+    const val FAILED_REQUEUE_COOLDOWN_MS: Long = 300_000L
+
     fun classify(
         stage: String,
         errno: Int,

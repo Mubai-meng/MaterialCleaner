@@ -4,6 +4,7 @@ import android.util.Log
 import me.gm.cleaner.core.config.ServicePreferences
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway
 import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
+import me.gm.cleaner.runtime.server.process.BaseProcessObserver
 import me.gm.cleaner.runtime.server.storage.StorageMountObserver
 import me.gm.cleaner.runtime.server.orchestrator.EventConsumerScheduler
 import me.gm.cleaner.runtime.server.orchestrator.HookRecoveryCoordinator
@@ -46,6 +47,12 @@ class LayerOrchestrator(
     init {
         eventConsumerScheduler.onHeartbeat = {
             hookRecoveryCoordinator.nativeHookHealthCheck()
+            // 失败挂载重收敛：复用既有 2s 心跳，不另起线程；
+            // 冷却/永久分类由 Mounter 内聚，出错不影响后继发布。
+            runCatching {
+                ObserverManager.getObserver(BaseProcessObserver::class.java)
+                    ?.requeueFailedMounts()
+            }
             statusAggregator.publishStatusSnapshot()
         }
     }

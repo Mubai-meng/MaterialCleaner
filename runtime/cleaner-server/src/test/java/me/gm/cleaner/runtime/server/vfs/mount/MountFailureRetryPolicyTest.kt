@@ -25,6 +25,37 @@ class MountFailureRetryPolicyTest {
     }
 
     @Test
+    fun `永久失败不重投`() {
+        assertFalse(
+            MountFailureRetryPolicy.shouldRequeueFailedMount(
+                nowMs = 1_000_000L,
+                lastFailedAtMs = 100_000L,
+                permanent = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `冷却内不重投冷却后重投`() {
+        assertFalse(
+            MountFailureRetryPolicy.shouldRequeueFailedMount(
+                nowMs = 100_000L,
+                lastFailedAtMs = 90_000L,
+                permanent = false,
+                cooldownMs = 60_000L,
+            ),
+        )
+        assertTrue(
+            MountFailureRetryPolicy.shouldRequeueFailedMount(
+                nowMs = 200_000L,
+                lastFailedAtMs = 90_000L,
+                permanent = false,
+                cooldownMs = 60_000L,
+            ),
+        )
+    }
+
+    @Test
     fun `脏namespace且native未终止目标时要求forceStop`() {
         val disposition = MountFailureRetryPolicy.classify(
             stage = "namespace_rollback_failed",
