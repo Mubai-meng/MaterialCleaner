@@ -687,8 +687,10 @@ namespace Mount {
         if (!useSdcardFs) {
             // unmount /Android/data to intercept filesystem operations in app-specific dir.
             if (unmountDataRestriction) {
+                // FUSE 限制挂载日常必 busy，普通 umount 必然 EBUSY；
+                // 与回滚路径一致用 DETACH（异步回收语义已在回滚处论证）。
                 if (TEMP_FAILURE_RETRY(
-                        umount2(androidDataFuseDir.c_str(), UMOUNT_NOFOLLOW)) == 0) {
+                        umount2(androidDataFuseDir.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH)) == 0) {
                     dataRestrictionModified = true;
                 } else if (errno != EINVAL && errno != ENOENT) {
                     const int error = errno;
@@ -699,7 +701,7 @@ namespace Mount {
                 const std::string androidDataDir = StringPrintf(
                         "/storage/emulated/%d/Android/data"_iobfs.c_str(), user_id);
                 if (TEMP_FAILURE_RETRY(
-                        umount2(androidDataDir.c_str(), UMOUNT_NOFOLLOW)) == 0) {
+                        umount2(androidDataDir.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH)) == 0) {
                     dataRestrictionModified = true;
                 } else if (errno != EINVAL && errno != ENOENT) {
                     const int error = errno;
