@@ -49,12 +49,11 @@ class Mounter {
     /** 每 pid 重试计数，达到 MAX_MOUNT_RETRIES 后放弃 */
     private val mountRetryCount = mutableMapOf<Int, Int>()
     /**
-     * 重投候选（包级代数锚定）：包名 →（上次失败时刻，失败时代数）。
+     * 重投候选（包 + 用户复合键，内容哈希锚定）：无 pid 级状态。
      * 即时重试耗尽后，心跳按冷却经正常 remount 链重投；
-     * 代数推进（规则已变）则旧条目自动失效，由正常链路接管；
-     * 成功/重置时剪枝。pid 级状态一律不留（死/复用无残留，shared 进程无覆盖）。
+     * 计划内容一变旧条目失配作废；take 语义（取出即删，无残留可漏）。
      */
-    private val failedPackages = mutableMapOf<String, FailedPackage>()
+    private val failedPackages = mutableMapOf<Pair<String, Int>, FailedPackage>()
     private var lastMountFailure: MountFailure? = null
 
     /**
@@ -89,6 +88,10 @@ class Mounter {
         val recordExternalAppSpecificStorage =
             VfsRuntimePolicy.shouldRecordExternalAppSpecificStorage(packageName)
         val plan = VfsRuntimePolicy.getMountPlan(packageName, userId)
+        // 执行时刻计划内容哈希：失败登记用同一快照，无采样竞态；
+        // 空计划（无规则）无收敛对象，记 null 使失败不建条目。
+        val planHash: Int? = plan?.takeIf { !it.isEmpty() }
+            ?.let { it.sources.zip(it.targets).hashCode() }
 
         if (plan == null || plan.isEmpty()) {
             val result = RuntimeFileUtils.bind_mount_result(
@@ -98,7 +101,7 @@ class Mounter {
             )
             Log.i("MC_REDIRECT", "[Mounter] bindMount result=${result.success} " +
                     "pkg=$packageName pid=$pid detail=${result.reason}")
-            return handleBindMountResultLocked(packageName, pid, uid, result)
+            return handleBindMountResultLocked(packageName, pid, uid, result, planHash)
         }
 
         pidRecords.put(packageName, pid)
@@ -136,18 +139,20 @@ class Mounter {
         } else {
             result
         }
-        return handleBindMountResultLocked(packageName, pid, uid, effective)
+        return handleBindMountResultLocked(packageName, pid, uid, effective, planHash)
     }
 
     private fun handleBindMountResultLocked(
         packageName: String,
         pid: Int,
         uid: Int,
-        result: RuntimeFileUtils.BindMountResult
+        result: RuntimeFileUtils.BindMountResult,
+        planHash: Int?,
     ): Boolean {
+        val packageUser = packageName to uid.toUserId()
         if (result.success) {
             mountFailedPids.remove(pid)
-            failedPackages.remove(packageName)
+            failedPackages.remove(packageUser)
             mountRetryCount.remove(pid)
             return true
         }
@@ -175,12 +180,15 @@ class Mounter {
             namespaceDirty = result.namespaceDirty,
             targetTerminated = result.targetTerminated,
         )
-        failedPackages[packageName] = FailedPackage(
-            // 单调时钟：NTP/用户改时间不得拉长或 Judas 冷却。
-            lastFailedAtMs = SystemClock.elapsedRealtime(),
-            failedAtGen = VfsRuntimePolicy.currentPolicy().generation,
-            permanent = !disposition.retryable,
-        )
+        // 永久失败与空计划不建条目（重投必然复现或无收敛对象；
+        // 配置修正后计划内容变化，下次失败自然建新条目）。
+        if (planHash != null && disposition.retryable) {
+            failedPackages[packageUser] = FailedPackage(
+                // 单调时钟：NTP/用户改时间不得拉长或 Judas 冷却。
+                lastFailedAtMs = SystemClock.elapsedRealtime(),
+                failedPlanHash = planHash,
+            )
+        }
         val safetyStop = if (disposition.forceStopTargetPackage) {
             // namespace 已污染且 native 未能终止目标：由 server 补充强停，
             // 防止应用继续运行在脏挂载视图上产生不可预期的文件访问。
@@ -708,23 +716,25 @@ class Mounter {
     }
 
     /**
-     * 取出到期的失败包并刷新其时间为 now（排队即刷新，下次心跳见冷却未满跳过，
-     * 天然 in-flight 去重，无需额外状态）。调用方经正常 remount 链重投。
+     * 取出到期的失败包并移除条目（take 语义：无残留可漏；排队后若再失败会建新条目）。
+     * 调用方经正常 remount 链重投（新鲜进程表 + 选择策略 + 隔离过滤 + 身份门）。
+     * 内容哈希失配（规则已变）说明正常链路已接管，直接丢弃。
      */
     fun consumeDueFailedPackages(nowMs: Long = SystemClock.elapsedRealtime()): List<String> =
         synchronized(lock) {
-            val currentGen = VfsRuntimePolicy.currentPolicy().generation
-            failedPackages.filter { (packageName, failed) ->
+            failedPackages.filter { (packageUser, failed) ->
+                val (packageName, userId) = packageUser
+                val currentPlanHash = VfsRuntimePolicy.getMountPlan(packageName, userId)
+                    ?.takeIf { !it.isEmpty() }
+                    ?.let { it.sources.zip(it.targets).hashCode() }
                 MountFailureRetryPolicy.shouldRequeueFailedPackage(
                     nowMs = nowMs,
                     lastFailedAtMs = failed.lastFailedAtMs,
-                    failedAtGen = failed.failedAtGen,
-                    currentGen = currentGen,
-                    permanent = failed.permanent,
+                    failedPlanHash = failed.failedPlanHash,
+                    currentPlanHash = currentPlanHash,
                 )
-            }.keys.toList().also { due ->
-                val now = SystemClock.elapsedRealtime()
-                due.forEach { failedPackages[it] = failedPackages.getValue(it).copy(lastFailedAtMs = now) }
+            }.keys.map { it.first }.distinct().also { due ->
+                due.forEach { pkg -> failedPackages.keys.removeAll { it.first == pkg } }
             }
         }
 
@@ -743,11 +753,10 @@ class Mounter {
         private val RETRY_DELAYS_MS = longArrayOf(2000, 5000, 15000)
     }
 
-    /** 心跳重投候选（包级代数锚定）：包名 →（上次失败时刻，失败时代数，是否永久失败）。 */
+    /** 心跳重投候选：上次失败时刻 + 失败时计划内容哈希（单调时钟）。 */
     private data class FailedPackage(
         val lastFailedAtMs: Long,
-        val failedAtGen: Long,
-        val permanent: Boolean,
+        val failedPlanHash: Int,
     )
 
     data class MountFailure(

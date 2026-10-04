@@ -34,20 +34,19 @@ internal object MountFailureRetryPolicy {
     )
 
     /**
-     * 失败包重投判定纯函数：只重投非永久失败，冷却到期，且失败时代数与当前一致
-     * （代数推进说明规则已变，正常 remount 链已接管，旧条目作废）。
+     * 失败包重投判定纯函数：冷却到期且计划内容未变才重投。
+     * 内容变化（规则已改）说明正常 remount 链已接管，旧条目作废；
+     * 计划消失（规则已删）同样失配，不重投空事务。
      */
     fun shouldRequeueFailedPackage(
         nowMs: Long,
         lastFailedAtMs: Long,
-        failedAtGen: Long,
-        currentGen: Long,
-        permanent: Boolean,
+        failedPlanHash: Int,
+        currentPlanHash: Int?,
         cooldownMs: Long = FAILED_REQUEUE_COOLDOWN_MS,
     ): Boolean {
-        if (permanent) return false
         if (lastFailedAtMs <= 0L) return false
-        if (failedAtGen != currentGen) return false
+        if (currentPlanHash == null || currentPlanHash != failedPlanHash) return false
         return nowMs - lastFailedAtMs >= cooldownMs
     }
 
