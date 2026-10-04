@@ -1,6 +1,7 @@
 package me.gm.cleaner.runtime.server.process
 
 import android.app.ActivityManager
+import android.util.Log
 import androidx.annotation.CallSuper
 import api.SystemService
 import me.gm.cleaner.core.common.RuntimeFileUtils.isIsolatedUid
@@ -76,8 +77,20 @@ abstract class BaseProcessObserver : BaseObserver() {
 
     fun getGateRefusalCount(): Int = mounter.getGateRefusalCount()
 
-    /** 心跳重投失败挂载（冷却内/永久失败自动跳过），返回本次投递数。 */
-    fun requeueFailedMounts(): Int = mounter.requeueFailedMounts()
+    /**
+     * 心跳重收敛：取出到期失败包，经正常 remount 链（新鲜 procList +
+     * 选择策略 + 隔离过滤 + 身份门）重投，不直调单 pid 挂载。
+     */
+    fun requeueFailedMounts() {
+        val due = mounter.consumeDueFailedPackages()
+        if (due.isEmpty()) return
+        Log.i("MC_REDIRECT", "[Observer] heartbeat requeue packages=$due")
+        mounter.forProcListAsync(
+            getRunningAppProcesses(due),
+            false,
+            true,
+        )
+    }
 
     fun getMountedDirs(): List<String> = mounter.getMountedDirs()
 

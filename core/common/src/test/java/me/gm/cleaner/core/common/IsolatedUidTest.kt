@@ -28,4 +28,14 @@ class IsolatedUidTest {
             assertTrue(199001.isIsolatedUid())
         }
     }
+
+    @Test
+    fun `起始边界90000非隔离90001隔离`() {
+        with(RuntimeFileUtils) {
+            assertFalse(90000.isIsolatedUid())
+            assertFalse(190000.isIsolatedUid())
+            assertTrue(90001.isIsolatedUid())
+            assertTrue(190001.isIsolatedUid())
+        }
+    }
 }

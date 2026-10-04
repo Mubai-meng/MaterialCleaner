@@ -27,9 +27,11 @@ class MountFailureRetryPolicyTest {
     @Test
     fun `永久失败不重投`() {
         assertFalse(
-            MountFailureRetryPolicy.shouldRequeueFailedMount(
+            MountFailureRetryPolicy.shouldRequeueFailedPackage(
                 nowMs = 1_000_000L,
                 lastFailedAtMs = 100_000L,
+                failedAtGen = 7L,
+                currentGen = 7L,
                 permanent = true,
             ),
         )
@@ -38,19 +40,36 @@ class MountFailureRetryPolicyTest {
     @Test
     fun `冷却内不重投冷却后重投`() {
         assertFalse(
-            MountFailureRetryPolicy.shouldRequeueFailedMount(
+            MountFailureRetryPolicy.shouldRequeueFailedPackage(
                 nowMs = 100_000L,
                 lastFailedAtMs = 90_000L,
+                failedAtGen = 7L,
+                currentGen = 7L,
                 permanent = false,
                 cooldownMs = 60_000L,
             ),
         )
         assertTrue(
-            MountFailureRetryPolicy.shouldRequeueFailedMount(
+            MountFailureRetryPolicy.shouldRequeueFailedPackage(
                 nowMs = 200_000L,
                 lastFailedAtMs = 90_000L,
+                failedAtGen = 7L,
+                currentGen = 7L,
                 permanent = false,
                 cooldownMs = 60_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `代数推进旧条目作废`() {
+        assertFalse(
+            MountFailureRetryPolicy.shouldRequeueFailedPackage(
+                nowMs = 1_000_000L,
+                lastFailedAtMs = 100_000L,
+                failedAtGen = 7L,
+                currentGen = 8L,
+                permanent = false,
             ),
         )
     }

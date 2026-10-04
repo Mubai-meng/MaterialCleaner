@@ -49,11 +49,12 @@ class Mounter {
     /** 每 pid 重试计数，达到 MAX_MOUNT_RETRIES 后放弃 */
     private val mountRetryCount = mutableMapOf<Int, Int>()
     /**
-     * 重投候选：pid →（包名，uid，上次失败时刻，是否永久失败）。
-     * 即时重试耗尽后，心跳按冷却重投，避免失败永久裸奔；
-     * 随 mountFailedPids 同增同减（成功/进程死/校验失效/重置时剪枝）。
+     * 重投候选（包级代数锚定）：包名 →（上次失败时刻，失败时代数）。
+     * 即时重试耗尽后，心跳按冷却经正常 remount 链重投；
+     * 代数推进（规则已变）则旧条目自动失效，由正常链路接管；
+     * 成功/重置时剪枝。pid 级状态一律不留（死/复用无残留，shared 进程无覆盖）。
      */
-    private val failedTargets = mutableMapOf<Int, FailedTarget>()
+    private val failedPackages = mutableMapOf<String, FailedPackage>()
     private var lastMountFailure: MountFailure? = null
 
     /**
@@ -146,7 +147,7 @@ class Mounter {
     ): Boolean {
         if (result.success) {
             mountFailedPids.remove(pid)
-            failedTargets.remove(pid)
+            failedPackages.remove(packageName)
             mountRetryCount.remove(pid)
             return true
         }
@@ -155,7 +156,6 @@ class Mounter {
             // 已在重试策略端判定永久不可重试，此处只计数不告警，
             // 且不留任何失败痕迹（失败集合残留会让 VFS 永久 DEGRADED）。
             gateRefusalCount.incrementAndGet()
-            failedTargets.remove(pid)
             mountFailedPids.remove(pid)
             mountRetryCount.remove(pid)
             Log.i(
@@ -175,10 +175,10 @@ class Mounter {
             namespaceDirty = result.namespaceDirty,
             targetTerminated = result.targetTerminated,
         )
-        failedTargets[pid] = FailedTarget(
-            packageName = packageName,
-            uid = uid,
-            lastFailedAtMs = System.currentTimeMillis(),
+        failedPackages[packageName] = FailedPackage(
+            // 单调时钟：NTP/用户改时间不得拉长或 Judas 冷却。
+            lastFailedAtMs = SystemClock.elapsedRealtime(),
+            failedAtGen = VfsRuntimePolicy.currentPolicy().generation,
             permanent = !disposition.retryable,
         )
         val safetyStop = if (disposition.forceStopTargetPackage) {
@@ -576,7 +576,6 @@ class Mounter {
     private fun notifyProcessKilledLocked(packageName: String, pid: Int) {
         pidRecords.remove(packageName, pid)
         mountFailedPids.remove(pid)
-        failedTargets.remove(pid)
         mountRetryCount.remove(pid)
         if (pidRecords.containsKey(packageName)) {
             rmdirPackages.add(packageName)
@@ -616,7 +615,6 @@ class Mounter {
             }
             val oldValues = pidRecords.replaceValues(packageName, validValue)
             mountFailedPids.removeAll(oldValues - validValue.toSet())
-            (oldValues - validValue.toSet()).forEach { failedTargets.remove(it) }
             if (validValue.isEmpty()) {
                 removeMountDirsLocked(packageName)
             }
@@ -686,7 +684,7 @@ class Mounter {
         }
 
         mountFailedPids.clear()
-        failedTargets.clear()
+        failedPackages.clear()
         mountRetryCount.clear()
         rmdirPackages.clear()
         rmdirQueueSize = 0
@@ -710,29 +708,25 @@ class Mounter {
     }
 
     /**
-     * 心跳重投失败目标：即时重试耗尽后，按冷却逐个重投仍存活的非永久失败。
-     * 跑在调用方线程，快照后逐个经 bindMountAsync 投递（走 handler 串行，
-     * 与 remount 互斥语义一致）。返回本次投递数。
+     * 取出到期的失败包并刷新其时间为 now（排队即刷新，下次心跳见冷却未满跳过，
+     * 天然 in-flight 去重，无需额外状态）。调用方经正常 remount 链重投。
      */
-    fun requeueFailedMounts(nowMs: Long = System.currentTimeMillis()): Int {
-        val due = synchronized(lock) {
-            failedTargets.filter { (pid, target) ->
-                MountFailureRetryPolicy.shouldRequeueFailedMount(
+    fun consumeDueFailedPackages(nowMs: Long = SystemClock.elapsedRealtime()): List<String> =
+        synchronized(lock) {
+            val currentGen = VfsRuntimePolicy.currentPolicy().generation
+            failedPackages.filter { (packageName, failed) ->
+                MountFailureRetryPolicy.shouldRequeueFailedPackage(
                     nowMs = nowMs,
-                    lastFailedAtMs = target.lastFailedAtMs,
-                    permanent = target.permanent,
+                    lastFailedAtMs = failed.lastFailedAtMs,
+                    failedAtGen = failed.failedAtGen,
+                    currentGen = currentGen,
+                    permanent = failed.permanent,
                 )
-            }.map { (pid, target) -> Triple(target.packageName, pid, target.uid) }
+            }.keys.toList().also { due ->
+                val now = SystemClock.elapsedRealtime()
+                due.forEach { failedPackages[it] = failedPackages.getValue(it).copy(lastFailedAtMs = now) }
+            }
         }
-        due.forEach { (packageName, pid, uid) ->
-            Log.i(
-                "MC_REDIRECT",
-                "[Mounter] heartbeat requeue pkg=$packageName pid=$pid",
-            )
-            bindMountAsync(packageName, pid, uid)
-        }
-        return due.size
-    }
 
     fun onDestroy() {
         thread.quit()
@@ -749,15 +743,15 @@ class Mounter {
         private val RETRY_DELAYS_MS = longArrayOf(2000, 5000, 15000)
     }
 
-    /** 心跳重投候选：失败包名/uid/上次失败时刻/是否永久失败。 */
-    private data class FailedTarget(
-        val packageName: String,
-        val uid: Int,
+    /** 心跳重投候选（包级代数锚定）：包名 →（上次失败时刻，失败时代数，是否永久失败）。 */
+    private data class FailedPackage(
         val lastFailedAtMs: Long,
+        val failedAtGen: Long,
         val permanent: Boolean,
     )
 
-    data class MountFailure(        val timeMillis: Long,
+    data class MountFailure(
+        val timeMillis: Long,
         val packageName: String,
         val pid: Int,
         val uid: Int,

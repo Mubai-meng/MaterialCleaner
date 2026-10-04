@@ -34,17 +34,20 @@ internal object MountFailureRetryPolicy {
     )
 
     /**
-     * 失败目标重投判定纯函数：只重投非永久失败，且与上次失败间隔达到冷却。
-     * 永久失败（参数无效等）重投必然复现，由调用方直接跳过。
+     * 失败包重投判定纯函数：只重投非永久失败，冷却到期，且失败时代数与当前一致
+     * （代数推进说明规则已变，正常 remount 链已接管，旧条目作废）。
      */
-    fun shouldRequeueFailedMount(
+    fun shouldRequeueFailedPackage(
         nowMs: Long,
         lastFailedAtMs: Long,
+        failedAtGen: Long,
+        currentGen: Long,
         permanent: Boolean,
         cooldownMs: Long = FAILED_REQUEUE_COOLDOWN_MS,
     ): Boolean {
         if (permanent) return false
         if (lastFailedAtMs <= 0L) return false
+        if (failedAtGen != currentGen) return false
         return nowMs - lastFailedAtMs >= cooldownMs
     }
 

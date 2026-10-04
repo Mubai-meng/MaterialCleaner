@@ -9,6 +9,7 @@ import java.io.InputStreamReader;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import me.gm.cleaner.core.common.RuntimeFileUtils;
 import me.gm.cleaner.runtime.server.BuildConfig;
 import me.gm.cleaner.runtime.server.CleanerServer;
 import me.gm.cleaner.runtime.server.ServerConstants;
@@ -255,6 +256,10 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                                 }
                                 final var logFormatAppPrincipalName = StringUtils.substring(start, startSlash + 1, startSpace);
                                 final var uid = PackageInfoMapper.getUid(logFormatAppPrincipalName);
+                                // 与 BaseProcessObserver 候选资格一致：隔离进程不进挂载链。
+                                if (RuntimeFileUtils.INSTANCE.isIsolatedUid(uid)) {
+                                    continue;
+                                }
                                 if (!isMounterActiveForUid(uid)) {
                                     continue;
                                 }
