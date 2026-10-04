@@ -33,7 +33,7 @@ App（编辑意图，经 Binder 受控触发 remount）
   （`OrderedRedirectInterpreter` 为唯一解释器，经 `MountPlanDeriver` 消费）。
 * 只有 Projector 决定如何变成运行时；只有各执行端决定怎么执行。
 * 记录判定归 `RuntimeBehaviorPolicy`；VFS 只做视图委托。
-* 兼容读写收拢于 `LegacyStoragePolicyAdapter`，调用方迁移后删除。
+* 兼容读写收拢于配置存储直读，旧适配器已删除。
 
 ## 禁止箭头（门禁 G1 文件级强制）
 
