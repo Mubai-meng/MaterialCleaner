@@ -7,6 +7,7 @@ import androidx.core.text.isDigitsOnly
 import me.gm.cleaner.core.common.AndroidFilesystemConfig.AID_USER_OFFSET
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.file.LinkOption
 import java.nio.file.NoSuchFileException
@@ -203,6 +204,31 @@ object RuntimeFileUtils {
 
     fun Int.toUserId(): Int = this / AID_USER_OFFSET
     fun Int.toAppId(): Int = this % AID_USER_OFFSET
+
+    @Throws(IOException::class)
+    fun writeTextAtomically(file: File, content: String) {
+        val parent = file.parentFile
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs()
+        }
+        val tmpFile = File(parent, "${file.name}.${System.nanoTime()}.tmp")
+        try {
+            FileOutputStream(tmpFile).use { fos ->
+                fos.write(content.toByteArray(Charsets.UTF_8))
+                fos.flush()
+                fos.fd.sync()
+            }
+            if (!tmpFile.renameTo(file)) {
+                throw IOException("rename failed: ${tmpFile.path} -> ${file.path}")
+            }
+        } catch (e: IOException) {
+            tmpFile.delete()
+            throw e
+        } catch (e: RuntimeException) {
+            tmpFile.delete()
+            throw e
+        }
+    }
 
     private external fun b(dir: String): Int
     fun rm_dir(dir: String): Int = b(dir)

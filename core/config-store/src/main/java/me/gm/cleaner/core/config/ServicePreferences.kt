@@ -7,6 +7,7 @@ import androidx.core.content.edit
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.preference.PreferenceManager
+import me.gm.cleaner.core.common.RuntimeFileUtils
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -48,7 +49,6 @@ object ServicePreferences {
         preferences = PreferenceManager.getDefaultSharedPreferences(context)
         denylistFile = context.filesDir.resolve(DENY_LIST_KEY)
         denylistCache = null
-        LegacyStoragePolicyAdapter.init(context.filesDir)
         ConfiguredPolicyStoreProvider.initialize(context.filesDir)
     }
 
@@ -123,12 +123,12 @@ object ServicePreferences {
     // STORAGE REDIRECT：读写与批量已直迁配置存储；仅分享导出读原始文件。
     // @App
     // @Server
-    fun readRawStorageRedirect(): String = LegacyStoragePolicyAdapter.readRawStorageRedirect()
+    fun readRawStorageRedirect(): String = ConfiguredPolicyStoreProvider.instance.readRawRedirect()
 
     // READ ONLY：读写与批量已直迁配置存储。
     // @App
     // @Server
-    fun readRawReadOnly(): String = LegacyStoragePolicyAdapter.readRawReadOnly()
+    fun readRawReadOnly(): String = ConfiguredPolicyStoreProvider.instance.readRawReadOnly()
 
     // FILE SYSTEM RECORD
     // @Server
@@ -152,7 +152,7 @@ object ServicePreferences {
         set(value) {
             try {
                 denylistCache = value
-                LegacyStoragePolicyAdapter.writeUtf8Atomically(denylistFile, value.joinToString("\n"))
+                RuntimeFileUtils.writeTextAtomically(denylistFile, value.joinToString("\n"))
             } catch (e: IOException) {
                 Log.e(TAG, "Failed to write denylist", e)
             }

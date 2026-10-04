@@ -6,42 +6,23 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * P2 差分护栏：同一输入同时驱动新旧两套语义，冻结等价与分歧。
+ * 语义护栏：规范解释器与投影桥的行为冻结。
  *
- * 等价（必须全等，切换生产调用的前置条件）：
- * - MountRules.getMountedPath 对 OrderedRedirectInterpreter.interpret.derivedPath
- * - MountRules.mountPoint 对 deriveMountPoints.derivedPath
- *
- * 已知分歧（只记录不强制全等，切换时需另行决策）：
- * - getAccessiblePlaces 对 deriveAliasClosure：算法不同（单步逆推+meaningless 预过滤
- *   对 BFS 反向候选+interpret 回验+maxPaths 截断），此处只冻结代表样本行为。
- * - 校验严格度：Ordered 要求规范绝对路径+连续 orderIndex，非法抛；
- *   MountRules 零校验静默容忍。
+ * 旧双实现已退役并删除；等价性由 oracle 回放与投影桥断言锁定。
+ * 校验严格度：非规范输入在投影器与钩子解析期过滤，桥内兜底丢弃，永不抛异常。
  */
 class RedirectDifferentialTest {
 
     @Test
-    fun `oracle全量回放新旧解释一致`() {
+    fun `oracle全量回放解释一致`() {
         oracleCases().forEach { case ->
             val ordered = case.rules.mapIndexed { index, (source, target) ->
                 rule(index, source, target)
             }
-            val legacy = MountRules(case.rules)
-
-            assertEquals(
-                "${case.name}: getMountedPath",
-                case.mountedPath,
-                legacy.getMountedPath(case.path),
-            )
             assertEquals(
                 "${case.name}: interpret",
                 case.mountedPath,
                 OrderedRedirectInterpreter.interpret(case.path, ordered).derivedPath,
-            )
-            assertEquals(
-                "${case.name}: mountPoint",
-                case.mountPoints,
-                legacy.mountPoint,
             )
             assertEquals(
                 "${case.name}: deriveMountPoints",
@@ -53,32 +34,33 @@ class RedirectDifferentialTest {
     }
 
     @Test
-    fun `空规则与无命中一致透传`() {
-        assertDifferential(
-            name = "empty",
-            rules = emptyList(),
-            paths = listOf("/visible/A/file.txt"),
-        )
-        assertDifferential(
+    fun `无命中一致透传`() {
+        assertBridged(
             name = "no-match",
             rules = listOf("/real/photos" to "/visible/DCIM"),
             paths = listOf("/other/file.txt", "/visible/DCIM2/a.jpg"),
+            expectedMountPoints = listOf("/visible/DCIM"),
+            expectedResolved = listOf("/other/file.txt", "/visible/DCIM2/a.jpg"),
         )
     }
 
     @Test
     fun `最后匹配与尾链改写一致`() {
-        assertDifferential(
+        assertBridged(
             name = "last-match-wins",
             rules = listOf("/real/first" to "/visible/A", "/real/last" to "/visible/A"),
             paths = listOf("/visible/A/file.txt"),
+            expectedMountPoints = listOf("/visible/A", "/real/first"),
+            expectedResolved = listOf("/real/last/file.txt"),
         )
-        assertDifferential(
+        assertBridged(
             name = "tail-chain",
             rules = listOf("/real/A" to "/visible/A", "/real/B" to "/real/A/B"),
             paths = listOf("/visible/A/B/file.txt", "/visible/A/other.txt"),
+            expectedMountPoints = listOf("/visible/A", "/real/A/B"),
+            expectedResolved = listOf("/real/B/file.txt", "/real/A/other.txt"),
         )
-        assertDifferential(
+        assertBridged(
             name = "preserve-in-middle",
             rules = listOf(
                 "/backing" to "/visible/A",
@@ -86,12 +68,14 @@ class RedirectDifferentialTest {
                 "/final" to "/backing/sub",
             ),
             paths = listOf("/visible/A/file.txt", "/backing/sub/file.txt"),
+            expectedMountPoints = listOf("/visible/A", "/backing", "/backing/sub"),
+            expectedResolved = listOf("/visible/A/file.txt", "/final/file.txt"),
         )
     }
 
     @Test
     fun `同名前缀与路径边界一致`() {
-        assertDifferential(
+        assertBridged(
             name = "segment-boundary",
             rules = listOf("/real/photos" to "/visible/DCIM"),
             paths = listOf(
@@ -100,20 +84,24 @@ class RedirectDifferentialTest {
                 "/visible/DCIM",
                 "/real/photos/a.jpg",
             ),
+            expectedMountPoints = listOf("/visible/DCIM"),
+            expectedResolved = listOf(
+                "/real/photos/a.jpg",
+                "/visible/DCIM2/a.jpg",
+                "/real/photos",
+                "/real/photos/a.jpg",
+            ),
         )
     }
 
     @Test
-    fun `校验分歧矩阵_旧容忍新抛`() {
-        // 尾斜杠：旧实现按 startsWith 语义容忍，新实现拒绝。
+    fun `校验严格度_非法抛`() {
         val trailingSlash = listOf(rule(0, "/real/A", "/visible/A"))
         try {
             OrderedRedirectInterpreter.interpret("/visible/A/", trailingSlash)
             fail("尾斜杠应抛")
         } catch (_: IllegalArgumentException) {
         }
-        // MountRules 不校验，此处不断言其输出，只确认不抛以冻结容忍行为。
-        MountRules(listOf("/real/A" to "/visible/A")).getMountedPath("/visible/A/")
 
         // 双斜杠与相对段同理。
         listOf("/visible//A/file", "/visible/A/../B").forEach { bad ->
@@ -124,7 +112,7 @@ class RedirectDifferentialTest {
             }
         }
 
-        // orderIndex 空洞：新实现拒绝，旧实现无 order 概念。
+        // orderIndex 空洞拒绝。
         val gapped = listOf(
             OrderedRedirectRule(RuleId("r0"), RedirectRuleType.MAP, "/a", "/b", 0),
             OrderedRedirectRule(RuleId("r2"), RedirectRuleType.MAP, "/c", "/d", 2),
@@ -149,26 +137,24 @@ class RedirectDifferentialTest {
     }
 
     @Test
-    fun `推导器挂载点与旧实现一致`() {
+    fun `推导器挂载点与oracle一致`() {
         oracleCases().forEach { case ->
             val snapshot = snapshotOf(case.rules)
-            val expected = MountRules(case.rules).mountPoint
             val actual = RedirectPolicyDeriver.buildConfiguredMountPoints(snapshot).points
-            assertEquals("${case.name}: deriver mountPoints", expected, actual)
+            assertEquals("${case.name}: deriver mountPoints", case.mountPoints, actual)
         }
     }
 
     @Test
-    fun `推导器非规范输入回退旧实现不抛`() {
+    fun `推导器非规范输入丢弃不抛`() {
         val dirty = listOf("/real/A/" to "/visible/A", "/visible/A" to "/visible/A")
         val snapshot = snapshotOf(dirty)
-        val expected = MountRules(dirty).mountPoint
         assertEquals(
-            expected,
+            listOf("/visible/A"),
             RedirectPolicyDeriver.buildConfiguredMountPoints(snapshot).points,
         )
         assertEquals(
-            MountRules(dirty).getMountedPath("/visible/A/file"),
+            "/visible/A/file",
             RedirectPolicyDeriver.getMountedPath(snapshot, "pkg", 0, "/visible/A/file"),
         )
     }
@@ -191,36 +177,33 @@ class RedirectDifferentialTest {
     }
 
     @Test
-    fun `投影桥挂载计划与旧实现一致`() {
+    fun `投影桥挂载计划与oracle一致`() {
         oracleCases().forEach { case ->
             val rules = case.rules.map { (source, target) ->
                 RedirectRule(source = source, target = target)
             }
             val plan = MountPlanDeriver.derive("pkg", 0, rules)
                 ?: error("${case.name}: 空规则不应返回 null")
-            val legacy = MountRules(case.rules)
-            assertEquals("${case.name}: sources", legacy.sources, plan.sources)
-            assertEquals("${case.name}: targets", legacy.targets, plan.targets)
-            assertEquals("${case.name}: mountPoints", legacy.mountPoint, plan.mountPoints)
-            assertEquals("${case.name}: mkdirList", legacy.mountPoint + legacy.sources, plan.mkdirList)
+            assertEquals("${case.name}: sources", case.rules.map { it.first }, plan.sources)
+            assertEquals("${case.name}: targets", case.rules.map { it.second }, plan.targets)
+            assertEquals("${case.name}: mountPoints", case.mountPoints, plan.mountPoints)
+            assertEquals("${case.name}: mkdirList", case.mountPoints + plan.sources, plan.mkdirList)
             assertEquals(
                 "${case.name}: resolve",
-                legacy.getMountedPath(case.path),
+                case.mountedPath,
                 MountPlanDeriver.resolveMountedPath(rules, case.path),
             )
         }
     }
 
     @Test
-    fun `投影桥空规则返回null脏输入不抛`() {
+    fun `投影桥空规则返回null脏输入丢弃不抛`() {
         assertEquals(null, MountPlanDeriver.derive("pkg", 0, emptyList()))
         assertEquals("/a", MountPlanDeriver.resolveMountedPath(emptyList(), "/a"))
         val dirty = listOf(RedirectRule(source = "/real/A/", target = "/visible/A"))
         val plan = MountPlanDeriver.derive("pkg", 0, dirty)!!
-        assertEquals(
-            MountRules(listOf("/real/A/" to "/visible/A")).mountPoint,
-            plan.mountPoints,
-        )
+        assertEquals(emptyList<String>(), plan.mountPoints)
+        assertEquals("/visible/A/file", MountPlanDeriver.resolveMountedPath(dirty, "/visible/A/file"))
     }
 
     private fun snapshotOf(rules: List<Pair<String, String>>): RedirectPolicySnapshot {
@@ -235,23 +218,23 @@ class RedirectDifferentialTest {
         )
     }
 
-    private fun assertDifferential(
+    private fun assertBridged(
         name: String,
         rules: List<Pair<String, String>>,
         paths: List<String>,
+        expectedMountPoints: List<String>,
+        expectedResolved: List<String>,
     ) {
-        val ordered = rules.mapIndexed { index, (source, target) ->
-            rule(index, source, target)
-        }
-        val legacy = MountRules(rules)
-        val mountPoints = OrderedRedirectInterpreter.deriveMountPoints(ordered)
-            .map(RedirectMountPoint::derivedPath)
-        assertEquals("$name: mountPoint", legacy.mountPoint, mountPoints)
-        paths.forEach { path ->
+        val redirect = rules.map { (source, target) -> RedirectRule(source, target) }
+        val plan = MountPlanDeriver.derive("pkg", 0, redirect)
+            ?: error("$name: 空规则不应返回 null")
+        assertEquals("$name: mountPoints", expectedMountPoints, plan.mountPoints)
+        assertEquals("$name: mkdirList", expectedMountPoints + plan.sources, plan.mkdirList)
+        paths.forEachIndexed { index, path ->
             assertEquals(
                 "$name: $path",
-                legacy.getMountedPath(path),
-                OrderedRedirectInterpreter.interpret(path, ordered).derivedPath,
+                expectedResolved[index],
+                MountPlanDeriver.resolveMountedPath(redirect, path),
             )
         }
     }

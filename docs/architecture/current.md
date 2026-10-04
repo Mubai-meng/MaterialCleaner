@@ -30,7 +30,7 @@ App（编辑意图，经 Binder 受控触发 remount）
 ## 所有权
 
 * 只有 Store 决定保存了什么；只有 Policy 决定规则是什么意思
-  （`OrderedRedirectInterpreter`，`MountRules` 仅剩界面可达分析与过渡兜底）。
+  （`OrderedRedirectInterpreter` 为唯一解释器，经 `MountPlanDeriver` 消费）。
 * 只有 Projector 决定如何变成运行时；只有各执行端决定怎么执行。
 * 记录判定归 `RuntimeBehaviorPolicy`；VFS 只做视图委托。
 * 兼容读写收拢于 `LegacyStoragePolicyAdapter`，调用方迁移后删除。
@@ -47,5 +47,5 @@ Hook/Mounter → 第二套 redirect 解释（经 MountPlanDeriver）
 
 ## 已知兼容层（只减不增）
 
-`LegacyStoragePolicyAdapter` 双轨、`MountRules` 界面分析与兜底、
 `MountWizard` 旧 Parcel 5-bool、`read_snapshot` 非 Safe 热路径（Hook try-parse 兜底）。
+旧解释器、旧兼容适配器与旧双轨读写已删除；解析期过滤保证热路径永不抛异常。

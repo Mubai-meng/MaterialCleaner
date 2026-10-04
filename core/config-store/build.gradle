@@ -20,6 +20,7 @@ android {
 
 dependencies {
     api project(':core:storage-redirect-domain')
+    implementation project(':core:common')
     implementation "androidx.core:core-ktx:$rootProject.coreVersion"
     implementation "androidx.lifecycle:lifecycle-common:$rootProject.lifecycleVersion"
     implementation "androidx.preference:preference-ktx:$rootProject.preferenceVersion"

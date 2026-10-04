@@ -3,9 +3,7 @@ package me.gm.cleaner.core.storage.redirect.domain
 /**
  * VFS 执行所需的已投影挂载计划。
  *
- * P4 迁移：VFS/Mounter 不再持有 [MountRules]，只消费这份已决定的数据。
- * [mountPoints] 由 canonical interpreter 推导（[OrderedRedirectInterpreter]），
- * 经 P2 差分护栏证明与旧实现全等；非规范历史数据回退旧实现，永不抛异常。
+ * [mountPoints] 由规范解释器推导；输入契约见 [MountPlanDeriver]。
  */
 data class RuntimeMountPlan(
     val packageName: String,
@@ -24,8 +22,8 @@ data class RuntimeMountPlan(
 /**
  * 快照裸规则对到挂载计划的唯一投影桥。
  *
- * [RedirectPolicyDeriver]、VFS store、后续 Hook 统一经此入口，
- * 不得各自重写 Pair 解释。空规则返回 null，与旧 `getMountRules` 语义一致。
+ * 输入契约：规则对由投影器与钩子解析期过滤为规范路径后进入；
+ * 查询路径非规范时原样返回，永不抛异常。旧解释器已彻底退役。
  */
 object MountPlanDeriver {
 
@@ -47,42 +45,27 @@ object MountPlanDeriver {
 
     fun resolveMountedPath(rules: List<RedirectRule>, path: String): String {
         if (rules.isEmpty()) return path
+        if (!OrderedRedirectInterpreter.isCanonicalAbsolutePath(path)) return path
         val zipped = rules.map { it.source to it.target }
-        return interpretMountedPath(zipped, path)
+        return OrderedRedirectInterpreter.interpret(path, toOrderedRules(zipped)).derivedPath
     }
 
-    private fun deriveMountPoints(zipped: List<Pair<String, String>>): List<String> {
-        val ordered = toOrderedRulesOrNull(zipped) ?: return MountRules(zipped).mountPoint
-        return try {
-            OrderedRedirectInterpreter.deriveMountPoints(ordered)
-                .map(RedirectMountPoint::derivedPath)
-        } catch (_: IllegalArgumentException) {
-            MountRules(zipped).mountPoint
-        }
-    }
+    private fun deriveMountPoints(zipped: List<Pair<String, String>>): List<String> =
+        OrderedRedirectInterpreter.deriveMountPoints(toOrderedRules(zipped))
+            .map(RedirectMountPoint::derivedPath)
 
-    private fun interpretMountedPath(zipped: List<Pair<String, String>>, path: String): String {
-        val ordered = toOrderedRulesOrNull(zipped) ?: return MountRules(zipped).getMountedPath(path)
-        return try {
-            OrderedRedirectInterpreter.interpret(path, ordered).derivedPath
-        } catch (_: IllegalArgumentException) {
-            MountRules(zipped).getMountedPath(path)
+    private fun toOrderedRules(zipped: List<Pair<String, String>>): List<OrderedRedirectRule> =
+        zipped.filter { (source, target) ->
+            source.isNotBlank() && target.isNotBlank() &&
+                OrderedRedirectInterpreter.isCanonicalAbsolutePath(source) &&
+                OrderedRedirectInterpreter.isCanonicalAbsolutePath(target)
+        }.mapIndexed { index, (source, target) ->
+            OrderedRedirectRule(
+                ruleId = RuleId("mount-plan-${(source + target).hashCode()}"),
+                type = if (source == target) RedirectRuleType.PRESERVE else RedirectRuleType.MAP,
+                source = source,
+                target = target,
+                orderIndex = index,
+            )
         }
-    }
-
-    private fun toOrderedRulesOrNull(zipped: List<Pair<String, String>>): List<OrderedRedirectRule>? {
-        return try {
-            zipped.mapIndexed { index, (source, target) ->
-                OrderedRedirectRule(
-                    ruleId = RuleId("mount-plan-$index"),
-                    type = if (source == target) RedirectRuleType.PRESERVE else RedirectRuleType.MAP,
-                    source = source,
-                    target = target,
-                    orderIndex = index,
-                )
-            }
-        } catch (_: IllegalArgumentException) {
-            null
-        }
-    }
 }

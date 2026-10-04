@@ -80,6 +80,12 @@ interface ConfiguredPolicyStore {
 
     fun readSnapshot(): ConfiguredPolicySnapshot
 
+    /** 分享导出读原始文件；内容即兼容 JSON。 */
+    fun readRawRedirect(): String
+
+    /** 分享导出读原始文件；内容即兼容 JSON。 */
+    fun readRawReadOnly(): String
+
     fun updateRedirect(
         expectedRevision: String?,
         mutation: (StoragePolicyEnvelope) -> StoragePolicyEnvelope,
@@ -117,10 +123,16 @@ class FileConfiguredPolicyStore(
         return readRedirectLocked()
     }
 
+    /** 分享导出读原始文件；内容即兼容 JSON，Store 读写同一文件。 */
+    override fun readRawRedirect(): String = redirectFile.readText(Charsets.UTF_8)
+
     @Synchronized
     override fun readReadOnly(): VersionedReadOnlyPolicy {
         return readReadOnlyLocked()
     }
+
+    /** 分享导出读原始文件；内容即兼容 JSON，Store 读写同一文件。 */
+    override fun readRawReadOnly(): String = readOnlyFile.readText(Charsets.UTF_8)
 
     /** redirect/read-only 必须在同一锁区间读取，避免快照混合两个文件的时刻。 */
     @Synchronized

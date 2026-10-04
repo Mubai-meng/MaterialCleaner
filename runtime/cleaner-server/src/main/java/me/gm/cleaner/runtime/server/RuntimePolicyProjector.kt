@@ -6,6 +6,7 @@ import me.gm.cleaner.core.config.ConfigSourceHealth
 import me.gm.cleaner.core.config.ConfiguredPolicySnapshot
 import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.storage.redirect.domain.OrderedRedirectInterpreter
 import me.gm.cleaner.core.storage.redirect.domain.RedirectPolicySnapshot
 import me.gm.cleaner.core.storage.redirect.domain.RedirectRule
 import me.gm.cleaner.core.storage.redirect.domain.RuntimeBehaviorPolicy
@@ -168,6 +169,17 @@ object RuntimePolicyProjector {
             Log.w(
                 "MC_REDIRECT",
                 "[RuntimePolicyProjector] drop invalid rule pkg=$packageName " +
+                        "user=$userId source=$source target=$target"
+            )
+            return null
+        }
+        // 快照规则必须规范：下游解释器永不抛异常，非规范直接丢弃并记录。
+        if (!OrderedRedirectInterpreter.isCanonicalAbsolutePath(normalizedSource) ||
+            !OrderedRedirectInterpreter.isCanonicalAbsolutePath(normalizedTarget)
+        ) {
+            Log.w(
+                "MC_REDIRECT",
+                "[RuntimePolicyProjector] drop non-canonical rule pkg=$packageName " +
                         "user=$userId source=$source target=$target"
             )
             return null

@@ -1,7 +1,7 @@
 app/src/main/java/me/gm/cleaner/client/ui/storageredirect/MountWizard.kt	1320
 core/storage-redirect-databus/src/main/java/me/gm/cleaner/core/storage/redirect/databus/DataBus.kt	836
 runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/policy/NativeHookStatus.kt	823
-runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/policy/HookPolicyCache.kt	802
+runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/policy/HookPolicyCache.kt	808
 word:app/src/main/java/me/gm/cleaner/client/BasePromptActivity.kt|denylist	9
 word:app/src/main/java/me/gm/cleaner/client/NotificationService.kt|denylist	8
 word:app/src/main/java/me/gm/cleaner/client/ui/AppListViewModelBase.kt|denylist	1

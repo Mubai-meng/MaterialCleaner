@@ -4,6 +4,7 @@ import android.util.Log
 import me.gm.cleaner.core.common.err.ErrorCodes
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.core.storage.redirect.domain.MountPlanDeriver
+import me.gm.cleaner.core.storage.redirect.domain.OrderedRedirectInterpreter.isCanonicalAbsolutePath
 import me.gm.cleaner.core.storage.redirect.domain.RedirectRule
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.HookDataBusBridge
 import me.gm.cleaner.runtime.mediaprovider.hook.fuse.FuseNativePolicyAdapter
@@ -628,6 +629,11 @@ object HookPolicyCache {
                         val source = ruleObj.optString("source", "")
                         val target = ruleObj.optString("target", "")
                         if (source.isNotEmpty() && target.isNotEmpty()) {
+                            // 解析期过滤非规范路径：热路径解释器永不抛异常。
+                            if (!isCanonicalAbsolutePath(source) || !isCanonicalAbsolutePath(target)) {
+                                Log.w(TAG, "parseRedirectPolicy: drop non-canonical rule pkg=$pkg")
+                                continue
+                            }
                             zipped.add(RedirectRule(source, target))
                         }
                     }
