@@ -117,8 +117,9 @@ class AppListAdapter(
                 fragment.lifecycleScope.launch(Dispatchers.IO) {
                     val sharedProcessPackages = getSharedProcessPackages(model.packageInfo)
                         .map { it.packageName }
-                    val result = ConfiguredPolicyStoreProvider.instance
-                        .updateRedirect(null) { it.removeRedirectRules(sharedProcessPackages) }
+                    val store = ConfiguredPolicyStoreProvider.instance
+                    val result = store
+                        .updateRedirect(store.snapshots.value.redirect.revision) { it.removeRedirectRules(sharedProcessPackages) }
                     if (!result.success) {
                         Log.e("MC/Policy", "remove redirect failed: ${result.error}")
                         return@launch
@@ -139,8 +140,9 @@ class AppListAdapter(
                 fragment.lifecycleScope.launch(Dispatchers.IO) {
                     val sharedUserIdPackages = getSharedUserIdPackages(model.packageInfo)
                         .map { it.packageName }
-                    val result = ConfiguredPolicyStoreProvider.instance
-                        .updateReadOnly(null) { it.removeReadOnlyRules(sharedUserIdPackages) }
+                    val store = ConfiguredPolicyStoreProvider.instance
+                    val result = store
+                        .updateReadOnly(store.snapshots.value.readOnly.revision) { it.removeReadOnlyRules(sharedUserIdPackages) }
                     if (!result.success) {
                         Log.e("MC/Policy", "remove read-only failed: ${result.error}")
                         return@launch

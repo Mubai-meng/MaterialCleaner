@@ -173,8 +173,9 @@ abstract class BasePromptActivity : AppCompatActivity() {
 
                         val sharedProcessPackages = getSharedProcessPackages(packageInfo)
                             .map { it.packageName }
-                        val writeResult = ConfiguredPolicyStoreProvider.instance
-                            .updateRedirect(null) { it.replaceRedirectRules(rules, sharedProcessPackages) }
+                        val store = ConfiguredPolicyStoreProvider.instance
+                        val writeResult = store
+                            .updateRedirect(store.snapshots.value.redirect.revision) { it.replaceRedirectRules(rules, sharedProcessPackages) }
                         if (!writeResult.success) {
                             Log.e("MC/Policy", "put redirect failed: ${writeResult.error}")
                         } else if (!writeResult.changed) {

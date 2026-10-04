@@ -15,6 +15,8 @@ class StoragePolicyBatchEdit(
 ) {
     private var pendingRedirect: StoragePolicyEnvelope? = null
     private var pendingReadOnly: StoragePolicyEnvelope? = null
+    private var baseRedirectRevision: String? = null
+    private var baseReadOnlyRevision: String? = null
     private var stageFailed = false
     private var committed = false
 
@@ -36,14 +38,14 @@ class StoragePolicyBatchEdit(
         }
         var ok = true
         pendingRedirect?.let { pending ->
-            val result = store.updateRedirect(null) { pending }
+            val result = store.updateRedirect(baseRedirectRevision!!) { pending }
             if (!result.success) {
                 Log.e(TAG, "Failed to commit redirect policy batch: ${result.error}")
                 ok = false
             }
         }
         pendingReadOnly?.let { pending ->
-            val result = store.updateReadOnly(null) { pending }
+            val result = store.updateReadOnly(baseReadOnlyRevision!!) { pending }
             if (!result.success) {
                 Log.e(TAG, "Failed to commit read-only policy batch: ${result.error}")
                 ok = false
@@ -57,13 +59,15 @@ class StoragePolicyBatchEdit(
         rawRules: List<Pair<String, String>>,
         packageNames: List<String>,
     ): StoragePolicyEnvelope {
-        val base = staged ?: store.readRedirect().envelope
+        val current = staged?.let { it to baseRedirectRevision }
+            ?: store.readRedirect().let { it.envelope to it.revision }
+        baseRedirectRevision = current.second
         return try {
-            base.replaceRedirectRules(rawRules, packageNames)
+            current.first.replaceRedirectRules(rawRules, packageNames)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stage redirect policy batch", e)
             stageFailed = true
-            base
+            current.first
         }
     }
 
@@ -72,13 +76,15 @@ class StoragePolicyBatchEdit(
         rawRules: List<String>,
         packageNames: List<String>,
     ): StoragePolicyEnvelope {
-        val base = staged ?: store.readReadOnly().envelope
+        val current = staged?.let { it to baseReadOnlyRevision }
+            ?: store.readReadOnly().let { it.envelope to it.revision }
+        baseReadOnlyRevision = current.second
         return try {
-            base.replaceReadOnlyRules(rawRules, packageNames)
+            current.first.replaceReadOnlyRules(rawRules, packageNames)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stage read-only policy batch", e)
             stageFailed = true
-            base
+            current.first
         }
     }
 

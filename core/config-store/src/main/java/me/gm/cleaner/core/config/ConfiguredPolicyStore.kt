@@ -67,7 +67,9 @@ data class PolicyStoreResult(
 /**
  * 配置策略的唯一读写门面。
  *
- * `expectedRevision` 非空时执行内容级 CAS；传 null 表示由调用方承担并发协调。
+ * 所有生产写入必须传入读取时刻的 revision 做内容级 CAS；
+ * 与当前不一致时返回 REVISION_CONFLICT，由调用方决定重试或放弃，
+ * 不得静默覆盖。空配置的 revision 同样参与比较。
  * 读取结果始终携带健康状态，调用方不得把 CORRUPT 当作空策略继续发布。
  */
 interface ConfiguredPolicyStore {
@@ -87,12 +89,12 @@ interface ConfiguredPolicyStore {
     fun readRawReadOnly(): String
 
     fun updateRedirect(
-        expectedRevision: String?,
+        expectedRevision: String,
         mutation: (StoragePolicyEnvelope) -> StoragePolicyEnvelope,
     ): PolicyStoreResult
 
     fun updateReadOnly(
-        expectedRevision: String?,
+        expectedRevision: String,
         mutation: (StoragePolicyEnvelope) -> StoragePolicyEnvelope,
     ): PolicyStoreResult
 }
@@ -195,7 +197,7 @@ class FileConfiguredPolicyStore(
 
     @Synchronized
     override fun updateRedirect(
-        expectedRevision: String?,
+        expectedRevision: String,
         mutation: (StoragePolicyEnvelope) -> StoragePolicyEnvelope,
     ): PolicyStoreResult {
         val current = readRedirectLocked()
@@ -206,7 +208,7 @@ class FileConfiguredPolicyStore(
                 message = "配置源损坏: 无法更新",
             )
         }
-        if (expectedRevision != null && expectedRevision != current.revision) {
+        if (expectedRevision != current.revision) {
             return failure(
                 currentRevision = current.revision,
                 kind = PolicyStoreFailureKind.REVISION_CONFLICT,
@@ -256,7 +258,7 @@ class FileConfiguredPolicyStore(
 
     @Synchronized
     override fun updateReadOnly(
-        expectedRevision: String?,
+        expectedRevision: String,
         mutation: (StoragePolicyEnvelope) -> StoragePolicyEnvelope,
     ): PolicyStoreResult {
         val current = readReadOnlyLocked()
@@ -267,7 +269,7 @@ class FileConfiguredPolicyStore(
                 message = "配置源损坏: 无法更新",
             )
         }
-        if (expectedRevision != null && expectedRevision != current.revision) {
+        if (expectedRevision != current.revision) {
             return failure(
                 currentRevision = current.revision,
                 kind = PolicyStoreFailureKind.REVISION_CONFLICT,

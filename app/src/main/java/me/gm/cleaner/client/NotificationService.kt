@@ -79,7 +79,8 @@ class NotificationService : Service() {
                     MainScope().launch(Dispatchers.IO) {
                         val sharedProcessPackages =
                             getSharedProcessPackages(packageInfo).map { it.packageName }
-                        val removeResult = ConfiguredPolicyStoreProvider.instance.updateRedirect(null) {
+                        val store = ConfiguredPolicyStoreProvider.instance
+                        val removeResult = store.updateRedirect(store.snapshots.value.redirect.revision) {
                             it.removeRedirectRules(sharedProcessPackages)
                         }
                         if (!removeResult.success) {
@@ -172,7 +173,8 @@ class NotificationService : Service() {
                 val answers = ServiceMoreOptionsPreferences.editMountRulesTemplate
                 val rulesByTemplate = wizard.createRules(answers)
                 val templatePackages = getSharedProcessPackages(packageInfo).map { it.packageName }
-                val putResult = ConfiguredPolicyStoreProvider.instance.updateRedirect(null) {
+                val store = ConfiguredPolicyStoreProvider.instance
+                val putResult = store.updateRedirect(store.snapshots.value.redirect.revision) {
                     it.replaceRedirectRules(rulesByTemplate, templatePackages)
                 }
                 if (!putResult.success) {
@@ -192,7 +194,8 @@ class NotificationService : Service() {
                             ) {
                                 val refreshPackages =
                                     getSharedProcessPackages(packageInfo).map { it.packageName }
-                                val refreshResult = ConfiguredPolicyStoreProvider.instance.updateRedirect(null) {
+                                val store = ConfiguredPolicyStoreProvider.instance
+                                val refreshResult = store.updateRedirect(store.snapshots.value.redirect.revision) {
                                     it.replaceRedirectRules(wizard.createRules(answers), refreshPackages)
                                 }
                                 if (!refreshResult.success) {

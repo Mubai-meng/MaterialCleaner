@@ -12,13 +12,13 @@ class StoragePolicyViewsTest {
 
     private fun seededStore(): FileConfiguredPolicyStore {
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
-        store.updateRedirect(null) {
+        store.updateRedirect(store.readRedirect().revision) {
             it.replaceRedirectRules(
                 listOf("/storage/emulated/0/DCIM" to "/storage/emulated/0/Pictures"),
                 listOf("com.example"),
             )
         }
-        store.updateReadOnly(null) {
+        store.updateReadOnly(store.readReadOnly().revision) {
             it.replaceReadOnlyRules(listOf("/protected"), listOf("com.example"))
         }
         return store

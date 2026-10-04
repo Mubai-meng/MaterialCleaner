@@ -98,14 +98,15 @@ class MountAppPickerFragment : BaseFragment() {
                     )
                     .apply {
                         addOnPositiveButtonClickListener {
-                            val redirectResult = ConfiguredPolicyStoreProvider.instance
-                                .updateRedirect(null) { it.removeRedirectRules(uninstalledPackages) }
+                            val store = ConfiguredPolicyStoreProvider.instance
+                            val redirectResult = store
+                                .updateRedirect(store.snapshots.value.redirect.revision) { it.removeRedirectRules(uninstalledPackages) }
                             if (!redirectResult.success) {
                                 Log.e("MC/Policy", "remove redirect failed: ${redirectResult.error}")
                                 return@addOnPositiveButtonClickListener
                             }
                             val readOnlyResult = ConfiguredPolicyStoreProvider.instance
-                                .updateReadOnly(null) { it.removeReadOnlyRules(uninstalledPackages) }
+                                .updateReadOnly(ConfiguredPolicyStoreProvider.instance.snapshots.value.readOnly.revision) { it.removeReadOnlyRules(uninstalledPackages) }
                             if (!readOnlyResult.success) {
                                 Log.e("MC/Policy", "remove read-only failed: ${readOnlyResult.error}")
                                 return@addOnPositiveButtonClickListener

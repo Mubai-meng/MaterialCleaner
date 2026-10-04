@@ -19,7 +19,7 @@
 
 ```text
 App（编辑意图，经 Binder 受控触发 remount）
-  → ConfiguredPolicyStore（配置事实源，CAS，双文件）
+  → ConfiguredPolicyStore（配置事实源，全员 CAS，冲突失败不覆盖，双文件）
   → RuntimePolicyProjector（唯一投影口，CORRUPT 熔断，generation 自增在校验后）
   → RedirectPolicySnapshot{storage, behavior}（逻辑分拆，同快照聚合发布；
     有序最终一致性：VFS 先切、总线后发、Hook 追平，同 publication set 同代同纪元）

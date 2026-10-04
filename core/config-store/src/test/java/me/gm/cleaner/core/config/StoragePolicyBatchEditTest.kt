@@ -59,4 +59,17 @@ class StoragePolicyBatchEditTest {
             assertTrue(true)
         }
     }
+
+    @Test
+    fun `提交时版本冲突返回失败且不覆盖`() {
+        val store = FileConfiguredPolicyStore(temporaryFolder.root)
+        val tx = StoragePolicyBatchEdit(store)
+        tx.putRedirect(listOf("/a" to "/b"), listOf("p1"))
+        store.updateRedirect(store.readRedirect().revision) {
+            it.replaceRedirectRules(listOf("/other" to "/target"), listOf("p2"))
+        }
+        assertFalse(tx.commit())
+        assertEquals(listOf("/other" to "/target"), store.getPackageSrZipped("p2"))
+        assertTrue(store.getPackageSrZipped("p1").isEmpty())
+    }
 }
