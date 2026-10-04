@@ -177,9 +177,12 @@ abstract class BasePromptActivity : AppCompatActivity() {
                             .updateRedirect(null) { it.replaceRedirectRules(rules, sharedProcessPackages) }
                         if (!writeResult.success) {
                             Log.e("MC/Policy", "put redirect failed: ${writeResult.error}")
+                        } else if (!writeResult.changed) {
+                            Log.i("MC/Policy", "put redirect unchanged, skip notify/remount")
+                        } else {
+                            CleanerClient.service?.notifySrChanged()
+                            CleanerClient.service?.remount(sharedProcessPackages.toTypedArray())
                         }
-                        CleanerClient.service?.notifySrChanged()
-                        CleanerClient.service?.remount(sharedProcessPackages.toTypedArray())
                     }
                     finish()
                 }

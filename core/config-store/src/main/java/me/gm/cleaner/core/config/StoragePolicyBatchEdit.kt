@@ -4,31 +4,36 @@ import android.util.Log
 import me.gm.cleaner.core.storage.redirect.domain.StoragePolicyEnvelope
 
 /**
- * 存储策略批量编辑事务：暂存多包变更后单次提交。
+ * 存储策略批量编辑：暂存多包变更后提交。
  *
- * P9 收敛：替代门面批量暂存，Store 直写，无旧 JSON 分支。
- * 未初始化时跳过并告警，与旧行为一致。
+ * 非原子：redirect 与 read-only 独立提交，先后失败互不回滚；
+ * 调用方不得将其当作跨域事务。暂存失败记标记，提交直接报告失败，
+ * 不再用原值伪装成功。
  */
-class StoragePolicyEditTransaction(
+class StoragePolicyBatchEdit(
     private val store: ConfiguredPolicyStore = ConfiguredPolicyStoreProvider.instance,
 ) {
     private var pendingRedirect: StoragePolicyEnvelope? = null
     private var pendingReadOnly: StoragePolicyEnvelope? = null
+    private var stageFailed = false
     private var committed = false
 
     fun putRedirect(rawRules: List<Pair<String, String>>, packageNames: List<String>) {
-        check(!committed) { "事务已提交，不可复用" }
+        check(!committed) { "批量编辑已提交，不可复用" }
         pendingRedirect = stageRedirect(pendingRedirect, rawRules, packageNames)
     }
 
     fun putReadOnly(rawRules: List<String>, packageNames: List<String>) {
-        check(!committed) { "事务已提交，不可复用" }
+        check(!committed) { "批量编辑已提交，不可复用" }
         pendingReadOnly = stageReadOnly(pendingReadOnly, rawRules, packageNames)
     }
 
     fun commit(): Boolean {
-        check(!committed) { "事务已提交，不可复用" }
+        check(!committed) { "批量编辑已提交，不可复用" }
         committed = true
+        if (stageFailed) {
+            return false
+        }
         var ok = true
         pendingRedirect?.let { pending ->
             val result = store.updateRedirect(null) { pending }
@@ -57,6 +62,7 @@ class StoragePolicyEditTransaction(
             base.replaceRedirectRules(rawRules, packageNames)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stage redirect policy batch", e)
+            stageFailed = true
             base
         }
     }
@@ -71,11 +77,12 @@ class StoragePolicyEditTransaction(
             base.replaceReadOnlyRules(rawRules, packageNames)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stage read-only policy batch", e)
+            stageFailed = true
             base
         }
     }
 
     private companion object {
-        const val TAG = "StoragePolicyEditTransaction"
+        const val TAG = "StoragePolicyBatchEdit"
     }
 }

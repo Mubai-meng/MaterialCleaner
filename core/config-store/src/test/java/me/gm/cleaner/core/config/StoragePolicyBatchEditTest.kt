@@ -7,14 +7,14 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
-class StoragePolicyEditTransactionTest {
+class StoragePolicyBatchEditTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()
 
     @Test
     fun `多包暂存单次提交`() {
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
-        val tx = StoragePolicyEditTransaction(store)
+        val tx = StoragePolicyBatchEdit(store)
         tx.putRedirect(listOf("/a" to "/b"), listOf("p1"))
         tx.putRedirect(listOf("/c" to "/d"), listOf("p2"))
         tx.putReadOnly(listOf("/ro"), listOf("p1"))
@@ -30,7 +30,7 @@ class StoragePolicyEditTransactionTest {
     @Test
     fun `提交后不可复用`() {
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
-        val tx = StoragePolicyEditTransaction(store)
+        val tx = StoragePolicyBatchEdit(store)
         tx.putRedirect(listOf("/a" to "/b"), listOf("p1"))
         assertTrue(tx.commit())
         try {

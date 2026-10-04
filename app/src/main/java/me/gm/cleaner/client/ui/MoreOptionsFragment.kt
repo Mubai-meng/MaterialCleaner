@@ -36,7 +36,7 @@ import me.gm.cleaner.dao.RootPreferences
 import me.gm.cleaner.dao.ServiceMoreOptionsPreferences
 import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
-import me.gm.cleaner.core.config.StoragePolicyEditTransaction
+import me.gm.cleaner.core.config.StoragePolicyBatchEdit
 import me.gm.cleaner.core.config.getPackageSrCount
 import me.gm.cleaner.core.config.getPackageSrZipped
 import me.gm.cleaner.net.NOTIFICATION_CHANNEL
@@ -150,7 +150,7 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                             )
                             addOnPositiveButtonClickListener { checkedApps ->
                                 MainScope().launch(Dispatchers.IO) {
-                                    val tx = StoragePolicyEditTransaction()
+                                    val tx = StoragePolicyBatchEdit()
                                     for (packageInfo in checkedApps) {
                                         val list = mutableListOf<Pair<String, String>>()
                                         val rules = input.getJSONArray(packageInfo.packageName)
@@ -228,7 +228,7 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                         val readOnlyPaths =
                             ServiceMoreOptionsPreferences.editReadOnlyTemplate.sorted()
                         MainScope().launch(Dispatchers.IO) {
-                            val tx = StoragePolicyEditTransaction()
+                            val tx = StoragePolicyBatchEdit()
                             val selectedApps = checkedApps.mapNotNull { packageInfo ->
                                 installedNonsystemApps.firstOrNull { it.packageName == packageInfo.packageName }
                             }
@@ -267,7 +267,7 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                     addOnPositiveButtonClickListener { checkedApps ->
                         val answers = ServiceMoreOptionsPreferences.editMountRulesTemplate
                         MainScope().launch(Dispatchers.IO) {
-                            val tx = StoragePolicyEditTransaction()
+                            val tx = StoragePolicyBatchEdit()
                             val selectedApps = checkedApps.mapNotNull { packageInfo ->
                                 installedNonSystemApps.firstOrNull { it.packageName == packageInfo.packageName }
                             }

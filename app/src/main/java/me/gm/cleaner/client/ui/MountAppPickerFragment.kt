@@ -102,11 +102,13 @@ class MountAppPickerFragment : BaseFragment() {
                                 .updateRedirect(null) { it.removeRedirectRules(uninstalledPackages) }
                             if (!redirectResult.success) {
                                 Log.e("MC/Policy", "remove redirect failed: ${redirectResult.error}")
+                                return@addOnPositiveButtonClickListener
                             }
                             val readOnlyResult = ConfiguredPolicyStoreProvider.instance
                                 .updateReadOnly(null) { it.removeReadOnlyRules(uninstalledPackages) }
                             if (!readOnlyResult.success) {
                                 Log.e("MC/Policy", "remove read-only failed: ${readOnlyResult.error}")
+                                return@addOnPositiveButtonClickListener
                             }
                             val denyList = ServicePreferences.denylist - uninstalledPackages.toSet()
                             ServicePreferences.denylist = denyList

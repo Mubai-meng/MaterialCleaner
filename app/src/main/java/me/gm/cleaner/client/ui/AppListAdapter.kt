@@ -121,6 +121,10 @@ class AppListAdapter(
                         .updateRedirect(null) { it.removeRedirectRules(sharedProcessPackages) }
                     if (!result.success) {
                         Log.e("MC/Policy", "remove redirect failed: ${result.error}")
+                        return@launch
+                    }
+                    if (!result.changed) {
+                        return@launch
                     }
                     CleanerClient.service?.notifySrChanged()
                     if (model.mountState != AppListModel.STATE_UNMOUNTED) {
@@ -139,6 +143,10 @@ class AppListAdapter(
                         .updateReadOnly(null) { it.removeReadOnlyRules(sharedUserIdPackages) }
                     if (!result.success) {
                         Log.e("MC/Policy", "remove read-only failed: ${result.error}")
+                        return@launch
+                    }
+                    if (!result.changed) {
+                        return@launch
                     }
                     CleanerClient.service?.notifyReadOnlyChanged()
                 }

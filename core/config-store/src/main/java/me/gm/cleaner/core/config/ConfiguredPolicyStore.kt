@@ -108,7 +108,7 @@ object ConfiguredPolicyStoreProvider {
     }
 }
 
-/** 旧 JSON 文件的兼容适配器。它不读取 deny_list，也不改变旧文件格式。 */
+/** 规范持久化实现（兼容表示）。它不读取 deny_list，也不改变旧文件格式。 */
 class FileConfiguredPolicyStore(
     private val baseDir: File,
 ) : ConfiguredPolicyStore {

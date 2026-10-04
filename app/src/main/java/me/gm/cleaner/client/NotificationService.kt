@@ -84,6 +84,10 @@ class NotificationService : Service() {
                         }
                         if (!removeResult.success) {
                             Log.e("MC/Policy", "remove redirect failed: ${removeResult.error}")
+                            return@launch
+                        }
+                        if (!removeResult.changed) {
+                            return@launch
                         }
                         if (CleanerClient.pingBinder()) {
                             CleanerClient.service?.notifySrChanged()
@@ -173,26 +177,33 @@ class NotificationService : Service() {
                 }
                 if (!putResult.success) {
                     Log.e("MC/Policy", "put redirect failed: ${putResult.error}")
-                }
-                CleanerClient.service?.notifySrChanged()
-                buildPackageAddedNotification(context, packageInfo)
-                MainScope().launch {
-                    OnlineAppCategory.fetch(context, packageInfo).onSuccess { appTypeMarks ->
-                        appTypeMarks ?: return@onSuccess
-                        wizard.answerBasedOnRecord(answers, emptyList(), appTypeMarks)
+                } else {
+                    if (putResult.changed) {
+                        CleanerClient.service?.notifySrChanged()
+                    }
+                    buildPackageAddedNotification(context, packageInfo)
+                    MainScope().launch {
+                        OnlineAppCategory.fetch(context, packageInfo).onSuccess { appTypeMarks ->
+                            appTypeMarks ?: return@onSuccess
+                            wizard.answerBasedOnRecord(answers, emptyList(), appTypeMarks)
 
-                        if (rulesByTemplate ==
-                            ConfiguredPolicyStoreProvider.instance.getPackageSrZipped(packageInfo.packageName)
-                        ) {
-                            val refreshPackages =
-                                getSharedProcessPackages(packageInfo).map { it.packageName }
-                            val refreshResult = ConfiguredPolicyStoreProvider.instance.updateRedirect(null) {
-                                it.replaceRedirectRules(wizard.createRules(answers), refreshPackages)
+                            if (rulesByTemplate ==
+                                ConfiguredPolicyStoreProvider.instance.getPackageSrZipped(packageInfo.packageName)
+                            ) {
+                                val refreshPackages =
+                                    getSharedProcessPackages(packageInfo).map { it.packageName }
+                                val refreshResult = ConfiguredPolicyStoreProvider.instance.updateRedirect(null) {
+                                    it.replaceRedirectRules(wizard.createRules(answers), refreshPackages)
+                                }
+                                if (!refreshResult.success) {
+                                    Log.e("MC/Policy", "put redirect failed: ${refreshResult.error}")
+                                    return@launch
+                                }
+                                if (!refreshResult.changed) {
+                                    return@launch
+                                }
+                                CleanerClient.service?.notifySrChanged()
                             }
-                            if (!refreshResult.success) {
-                                Log.e("MC/Policy", "put redirect failed: ${refreshResult.error}")
-                            }
-                            CleanerClient.service?.notifySrChanged()
                         }
                     }
                 }

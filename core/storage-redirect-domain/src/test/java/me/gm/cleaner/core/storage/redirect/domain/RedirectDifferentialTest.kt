@@ -201,9 +201,20 @@ class RedirectDifferentialTest {
         assertEquals(null, MountPlanDeriver.derive("pkg", 0, emptyList()))
         assertEquals("/a", MountPlanDeriver.resolveMountedPath(emptyList(), "/a"))
         val dirty = listOf(RedirectRule(source = "/real/A/", target = "/visible/A"))
-        val plan = MountPlanDeriver.derive("pkg", 0, dirty)!!
-        assertEquals(emptyList<String>(), plan.mountPoints)
+        assertEquals(null, MountPlanDeriver.derive("pkg", 0, dirty))
         assertEquals("/visible/A/file", MountPlanDeriver.resolveMountedPath(dirty, "/visible/A/file"))
+    }
+
+    @Test
+    fun `投影桥半脏输入三字段同源`() {
+        val mixed = listOf(
+            RedirectRule(source = "/real/A/", target = "/visible/A"),
+            RedirectRule(source = "/visible/A", target = "/visible/A"),
+        )
+        val plan = MountPlanDeriver.derive("pkg", 0, mixed)!!
+        assertEquals(listOf("/visible/A"), plan.sources)
+        assertEquals(listOf("/visible/A"), plan.targets)
+        assertEquals(listOf("/visible/A"), plan.mountPoints)
     }
 
     private fun snapshotOf(rules: List<Pair<String, String>>): RedirectPolicySnapshot {

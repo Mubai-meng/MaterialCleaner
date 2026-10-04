@@ -31,8 +31,10 @@ public class StoragePolicyChangeCoordinator {
     public void onPreferencesChanged() {
         final var previousPackages = currentStorageRedirectPackages();
         reloadSharedPreferencesFromDisk();
-        // 顺序治理：先构建并更新内存策略（Mounter 的数据源），
-        // VFS remount 先切，发布快照与 Hook 刷新后置——上层切换不领先于底层挂载视图。
+        // 顺序治理（有序最终一致性，非全局原子切换）：先构建并更新内存策略
+        // （Mounter 的数据源），VFS remount 先切，发布快照与 Hook 刷新后置——
+        // 上层切换不领先于底层挂载视图。发布失败则 VFS 新代、Hook 旧代，
+        // 由下次变更或重试 reconcile，不在此处建状态机。
         // P0：CORRUPT 时 build 抛 IllegalArgumentException，旧内存快照与 DataBus 旧文件保持不变，
         // 这里显式阻断 remount/publish，避免 Binder 异常穿透，保留 last-known-good。
         final me.gm.cleaner.core.storage.redirect.domain.RedirectPolicySnapshot snapshot;

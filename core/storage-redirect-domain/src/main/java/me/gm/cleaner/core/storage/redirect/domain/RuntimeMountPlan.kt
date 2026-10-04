@@ -33,7 +33,8 @@ object MountPlanDeriver {
         rules: List<RedirectRule>,
     ): RuntimeMountPlan? {
         if (rules.isEmpty()) return null
-        val zipped = rules.map { it.source to it.target }
+        val zipped = validPairs(rules.map { it.source to it.target })
+        if (zipped.isEmpty()) return null
         return RuntimeMountPlan(
             packageName = packageName,
             userId = userId,
@@ -54,12 +55,16 @@ object MountPlanDeriver {
         OrderedRedirectInterpreter.deriveMountPoints(toOrderedRules(zipped))
             .map(RedirectMountPoint::derivedPath)
 
-    private fun toOrderedRules(zipped: List<Pair<String, String>>): List<OrderedRedirectRule> =
+    /** 有效规则对：三字段同源的前提，非规范与空白直接丢弃。 */
+    private fun validPairs(zipped: List<Pair<String, String>>): List<Pair<String, String>> =
         zipped.filter { (source, target) ->
             source.isNotBlank() && target.isNotBlank() &&
                 OrderedRedirectInterpreter.isCanonicalAbsolutePath(source) &&
                 OrderedRedirectInterpreter.isCanonicalAbsolutePath(target)
-        }.mapIndexed { index, (source, target) ->
+        }
+
+    private fun toOrderedRules(zipped: List<Pair<String, String>>): List<OrderedRedirectRule> =
+        validPairs(zipped).mapIndexed { index, (source, target) ->
             OrderedRedirectRule(
                 ruleId = RuleId("mount-plan-${(source + target).hashCode()}"),
                 type = if (source == target) RedirectRuleType.PRESERVE else RedirectRuleType.MAP,

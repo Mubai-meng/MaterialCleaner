@@ -9,11 +9,14 @@ package me.gm.cleaner.core.storage.redirect.domain
  * - MediaProvider Java Hook Layer 查询 [RuntimeStoragePolicy] 修正 _data 路径
  * - FUSE Native Hook Layer 消费由 [RuntimeStoragePolicy] 推导出的 configured_mount_points
  *
- * 逻辑分拆但聚合发布：[storage] 与 [behavior] 生命周期不同，但 DataBus 仍以
- * 同一 generation/epoch 原子发布，JSON 字段名保持不变以兼容已发布快照。
+ * 逻辑分拆但聚合发布：[storage] 与 [behavior] 生命周期不同，但一次提交
+ * 总是用同一快照发布（publication set），JSON 字段名保持不变以兼容已发布快照。
+ *
+ * 一致性模型为有序最终一致性，而非全局原子切换：VFS 先应用、总线后发、
+ * Hook 追平。不同 publication set 允许代数不同；同 set 内代数与纪元相同。
  *
  * @property schemaVersion 快照结构版本（当前为 1）
- * @property generation 快照代数（递增，用于判断是否过期）
+ * @property generation 单次投影版本：每次投影递增，只排序同一发布者生涯内的快照
  * @property publisherEpoch 发布者本轮生命周期标识；发布者重启后允许 generation 从 1 重新开始
  * @property redirectRevision 重定向配置正文 revision，不承担运行时排序
  * @property readOnlyRevision 只读配置正文 revision，不承担运行时排序
