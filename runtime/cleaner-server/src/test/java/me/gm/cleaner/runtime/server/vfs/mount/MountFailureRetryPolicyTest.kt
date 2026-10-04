@@ -71,6 +71,18 @@ class MountFailureRetryPolicyTest {
     }
 
     @Test
+    fun `零时刻不重投`() {
+        assertFalse(
+            MountFailureRetryPolicy.shouldRequeueFailedPackage(
+                nowMs = 1_000_000L,
+                lastFailedAtMs = 0L,
+                failedPlanHash = 1234,
+                currentPlanHash = 1234,
+            ),
+        )
+    }
+
+    @Test
     fun `脏namespace且native未终止目标时要求forceStop`() {
         val disposition = MountFailureRetryPolicy.classify(
             stage = "namespace_rollback_failed",

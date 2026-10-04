@@ -151,8 +151,9 @@ class Mounter {
     ): Boolean {
         val packageUser = packageName to uid.toUserId()
         if (result.success) {
+            // 成功不终结长期条目：条目只由 take 终结。
+            // process 粒度的成功不得清 package/user 粒度的 obligation。
             mountFailedPids.remove(pid)
-            failedPackages.remove(packageUser)
             mountRetryCount.remove(pid)
             return true
         }
@@ -716,13 +717,14 @@ class Mounter {
     }
 
     /**
-     * 取出到期的失败包并移除条目（take 语义：无残留可漏；排队后若再失败会建新条目）。
+     * 取出到期的失败条目（take 语义：无残留可漏；排队后若再失败会建新条目）。
+     * 消费按 (package,user) 键，执行按包去重（remount API 本来包级）；
      * 调用方经正常 remount 链重投（新鲜进程表 + 选择策略 + 隔离过滤 + 身份门）。
      * 内容哈希失配（规则已变）说明正常链路已接管，直接丢弃。
      */
     fun consumeDueFailedPackages(nowMs: Long = SystemClock.elapsedRealtime()): List<String> =
         synchronized(lock) {
-            failedPackages.filter { (packageUser, failed) ->
+            val dueKeys = failedPackages.filter { (packageUser, failed) ->
                 val (packageName, userId) = packageUser
                 val currentPlanHash = VfsRuntimePolicy.getMountPlan(packageName, userId)
                     ?.takeIf { !it.isEmpty() }
@@ -733,9 +735,9 @@ class Mounter {
                     failedPlanHash = failed.failedPlanHash,
                     currentPlanHash = currentPlanHash,
                 )
-            }.keys.map { it.first }.distinct().also { due ->
-                due.forEach { pkg -> failedPackages.keys.removeAll { it.first == pkg } }
-            }
+            }.keys.toList()
+            dueKeys.forEach { failedPackages.remove(it) }
+            dueKeys.map { it.first }.distinct()
         }
 
     fun onDestroy() {
