@@ -158,6 +158,7 @@ class VfsLayerController {
             val mountFailedPids = observer.getMountFailedPids().size
             val mountTotalAttempts = observer.getTotalMountAttempts()
             val mountFailureCount = observer.getMountFailureCount()
+            val mountGateRefusals = observer.getGateRefusalCount()
             val lastFailure = observer.getLastMountFailure()
             val lastMountErrorCode = observer.getLastMountErrorCode()
             val state = if (mountFailedPids > 0) {
@@ -187,6 +188,7 @@ class VfsLayerController {
                     "mountFailedPids" to mountFailedPids.toString(),
                     "mountTotalAttempts" to mountTotalAttempts.toString(),
                     "mountFailureCount" to mountFailureCount.toString(),
+                    "mountGateRefusals" to mountGateRefusals.toString(),
                     "lastMountFailureAt" to (lastFailure?.timeMillis ?: 0L).toString(),
                     "lastMountFailurePackage" to (lastFailure?.packageName ?: ""),
                     "lastMountFailurePid" to (lastFailure?.pid ?: 0).toString(),

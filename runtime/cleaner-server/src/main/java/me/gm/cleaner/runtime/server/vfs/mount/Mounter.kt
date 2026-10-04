@@ -40,6 +40,12 @@ class Mounter {
     val totalAttempts: AtomicInteger = AtomicInteger(0)
     /** mount 失败总次数（含重试耗尽），用于 collectStatus metrics */
     val failureCount: AtomicInteger = AtomicInteger(0)
+    /**
+     * 身份门拒绝对次数：目标 pid 已死/被复用，fail-closed 拒绝挂载。
+     * 门拒是安全机制正常工作，不是失败，单独计数，不进 failureCount、
+     * mountFailedPids 与 lastMountFailure。
+     */
+    val gateRefusalCount: AtomicInteger = AtomicInteger(0)
     /** 每 pid 重试计数，达到 MAX_MOUNT_RETRIES 后放弃 */
     private val mountRetryCount = mutableMapOf<Int, Int>()
     private var lastMountFailure: MountFailure? = null
@@ -136,6 +142,18 @@ class Mounter {
             mountFailedPids.remove(pid)
             mountRetryCount.remove(pid)
             return true
+        }
+        if (result.stage == "target_identity") {
+            // 身份门拒绝：pid 已死或被复用，fail-closed 是正确行为；
+            // 已在重试策略端判定永久不可重试，此处只计数不告警。
+            gateRefusalCount.incrementAndGet()
+            mountRetryCount.remove(pid)
+            Log.i(
+                "MC_REDIRECT",
+                "[Mounter] identity gate refused pkg=$packageName pid=$pid uid=$uid " +
+                    "detail=${result.reason}",
+            )
+            return false
         }
         mountFailedPids.add(pid)
         failureCount.incrementAndGet()
@@ -660,6 +678,8 @@ class Mounter {
     fun getTotalAttempts(): Int = totalAttempts.get()
 
     fun getFailureCount(): Int = failureCount.get()
+
+    fun getGateRefusalCount(): Int = gateRefusalCount.get()
 
     fun getLastMountFailure(): MountFailure? = synchronized(lock) {
         lastMountFailure

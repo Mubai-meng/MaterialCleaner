@@ -3,6 +3,7 @@ package me.gm.cleaner.runtime.server.process
 import android.app.ActivityManager
 import androidx.annotation.CallSuper
 import api.SystemService
+import me.gm.cleaner.core.common.RuntimeFileUtils.isIsolatedUid
 import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.runtime.server.VfsRuntimePolicy
 import me.gm.cleaner.runtime.server.lifecycle.BaseObserver
@@ -21,7 +22,8 @@ abstract class BaseProcessObserver : BaseObserver() {
 
     private fun getRunningAppProcesses(packageNames: Array<String>): List<ActivityManager.RunningAppProcessInfo> =
         SystemService.getRunningAppProcessesNoThrow().filter { procInfo ->
-            isMounterActiveForUid(procInfo.uid) && procInfo.pkgList.any { packageNames.contains(it) }
+            !procInfo.uid.isIsolatedUid() &&
+                isMounterActiveForUid(procInfo.uid) && procInfo.pkgList.any { packageNames.contains(it) }
         }
 
     fun remountForPackages(packageNames: Array<String>) {
@@ -30,7 +32,8 @@ abstract class BaseProcessObserver : BaseObserver() {
 
     private fun getRunningAppProcesses(packageNames: Iterable<String>): List<ActivityManager.RunningAppProcessInfo> =
         SystemService.getRunningAppProcessesNoThrow().filter { procInfo ->
-            isMounterActiveForUid(procInfo.uid) && procInfo.pkgList.any { packageNames.contains(it) }
+            !procInfo.uid.isIsolatedUid() &&
+                isMounterActiveForUid(procInfo.uid) && procInfo.pkgList.any { packageNames.contains(it) }
         }
 
     fun remountAll() {
@@ -70,6 +73,8 @@ abstract class BaseProcessObserver : BaseObserver() {
     fun getTotalMountAttempts(): Int = mounter.getTotalAttempts()
 
     fun getMountFailureCount(): Int = mounter.getFailureCount()
+
+    fun getGateRefusalCount(): Int = mounter.getGateRefusalCount()
 
     fun getMountedDirs(): List<String> = mounter.getMountedDirs()
 

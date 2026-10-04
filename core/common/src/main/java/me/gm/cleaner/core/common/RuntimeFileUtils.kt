@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.os.Environment
 import android.util.Log
 import androidx.core.text.isDigitsOnly
+import me.gm.cleaner.core.common.AndroidFilesystemConfig.AID_ISOLATED_START
 import me.gm.cleaner.core.common.AndroidFilesystemConfig.AID_USER_OFFSET
 import org.json.JSONObject
 import java.io.File
@@ -204,6 +205,12 @@ object RuntimeFileUtils {
 
     fun Int.toUserId(): Int = this / AID_USER_OFFSET
     fun Int.toAppId(): Int = this % AID_USER_OFFSET
+
+    /**
+     * 隔离进程判定（webview 沙盒等）：朝生暮死且各有独立命名空间，
+     * 选为挂载目标注定撞上 PID 复用门，调用方应直接排除。
+     */
+    fun Int.isIsolatedUid(): Boolean = toAppId() > AID_ISOLATED_START
 
     @Throws(IOException::class)
     fun writeTextAtomically(file: File, content: String) {
