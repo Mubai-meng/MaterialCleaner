@@ -19,6 +19,8 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
 
     private final CleanerServer mServer;
     private volatile boolean mHasAmStart = false;
+    private volatile long mStartAtMs = 0L;
+    private volatile long mLastReadAtMs = 0L;
     private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
 
     public ActivityManagerLogsObserver(final CleanerServer server) {
@@ -28,6 +30,8 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
     @Override
     public void onStart() {
         super.onStart();
+        mStartAtMs = android.os.SystemClock.elapsedRealtime();
+        mLastReadAtMs = 0L;
         // /system/bin/logcat -c
         final var clearLogcat = new char[0x15];
 
@@ -224,6 +228,9 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                     process = Runtime.getRuntime().exec(new String(logcat));
                     final var reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
                     for (var line = reader.readLine(); line != null; line = reader.readLine()) {
+                        // 存活心跳：只要还在消费行，尾巴就活着；卡住（Binder 阻塞/logd wedged）
+                        // 时 readLine 不返回，心跳停滞，看门狗据此判假活（区别于 executor 关闭的真死）。
+                        mLastReadAtMs = android.os.SystemClock.elapsedRealtime();
                         try {
                             final var indexOfStartProc = line.indexOf(new String(amStartProc));
                             if (indexOfStartProc != -1) {
@@ -336,6 +343,14 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
 
     public boolean hasAmStart() {
         return mHasAmStart;
+    }
+
+    public long getStartAtMs() {
+        return mStartAtMs;
+    }
+
+    public long getLastReadAtMs() {
+        return mLastReadAtMs;
     }
 
     public boolean isLogcatShutdown() {

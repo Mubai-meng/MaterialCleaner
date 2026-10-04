@@ -43,6 +43,7 @@ import me.gm.cleaner.server.ICleanerService;
 import me.gm.cleaner.server.IFileChangeObserver;
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway;
 import me.gm.cleaner.runtime.server.process.ActivityManagerLogsObserver;
+import me.gm.cleaner.runtime.server.process.ObserverStallPolicy;
 import me.gm.cleaner.runtime.server.recording.FileSystemObserver;
 import me.gm.cleaner.runtime.server.lifecycle.ObserverManager;
 import me.gm.cleaner.runtime.server.storage.StorageEventListenerDelegate;
@@ -88,6 +89,14 @@ public class CleanerService extends ICleanerService.Stub {
         for (final var observer : observers) {
             if (observer instanceof final ActivityManagerLogsObserver activityManagerObserver) {
                 if (activityManagerObserver.isLogcatShutdown()) {
+                    return 2;
+                }
+                if (ObserverStallPolicy.INSTANCE.isStalled(
+                        android.os.SystemClock.elapsedRealtime(),
+                        activityManagerObserver.getStartAtMs(),
+                        activityManagerObserver.getLastReadAtMs(),
+                        ObserverStallPolicy.START_GRACE_MS,
+                        ObserverStallPolicy.STALL_THRESHOLD_MS)) {
                     return 2;
                 }
                 if (!activityManagerObserver.hasAmStart()) {
