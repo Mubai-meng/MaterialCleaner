@@ -16,6 +16,9 @@ android {
     }
     namespace 'me.gm.cleaner.core.config'
     buildFeatures { buildConfig true }
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {

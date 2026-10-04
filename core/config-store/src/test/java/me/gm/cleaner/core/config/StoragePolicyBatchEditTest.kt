@@ -28,6 +28,25 @@ class StoragePolicyBatchEditTest {
     }
 
     @Test
+    fun `暂存失败提交返回失败且不写入`() {
+        val store = FileConfiguredPolicyStore(temporaryFolder.root)
+        val tx = StoragePolicyBatchEdit(store)
+        tx.putRedirect(listOf("/a" to "/b"), listOf(""))
+        assertFalse(tx.commit())
+        assertTrue(store.getPackageSrZipped("").isEmpty())
+    }
+
+    @Test
+    fun `任一域暂存失败整体失败且不写入`() {
+        val store = FileConfiguredPolicyStore(temporaryFolder.root)
+        val tx = StoragePolicyBatchEdit(store)
+        tx.putRedirect(listOf("/a" to "/b"), listOf("p1"))
+        tx.putReadOnly(listOf("/ro"), listOf(""))
+        assertFalse(tx.commit())
+        assertTrue(store.getPackageSrZipped("p1").isEmpty())
+        assertTrue(store.getPackageReadOnly("p1").isEmpty())
+    }
+    @Test
     fun `提交后不可复用`() {
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
         val tx = StoragePolicyBatchEdit(store)

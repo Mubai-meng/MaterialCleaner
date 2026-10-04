@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -160,7 +161,10 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                                         }
                                         tx.putRedirect(list, listOf(packageInfo.packageName))
                                     }
-                                    tx.commit()
+                                    if (!tx.commit()) {
+                                        Log.e("MC/Policy", "import template batch commit failed")
+                                        return@launch
+                                    }
                                     CleanerClient.service?.notifySrChanged()
                                 }
                             }
@@ -245,7 +249,10 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                                     .toList()
                                 tx.putReadOnly(mountedReadOnlyPaths, listOf(pi.packageName))
                             }
-                            tx.commit()
+                            if (!tx.commit()) {
+                                Log.e("MC/Policy", "read-only template batch commit failed")
+                                return@launch
+                            }
                             CleanerClient.service?.notifyReadOnlyChanged()
                         }
                     }
@@ -275,7 +282,10 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                                 val wizard = MountWizard(pi)
                                 tx.putRedirect(wizard.createRules(answers), listOf(pi.packageName))
                             }
-                            tx.commit()
+                            if (!tx.commit()) {
+                                Log.e("MC/Policy", "mount template batch commit failed")
+                                return@launch
+                            }
                             CleanerClient.service?.notifySrChanged()
                         }
                     }
