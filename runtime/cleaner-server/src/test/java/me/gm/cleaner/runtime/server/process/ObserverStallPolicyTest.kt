@@ -47,4 +47,18 @@ class ObserverStallPolicyTest {
             ),
         )
     }
+
+    @Test
+    fun `logd不响应时不判死`() {
+        assertFalse(
+            ObserverStallPolicy.isStalled(
+                nowMs = 500_000L,
+                startAtMs = 1L,
+                lastReadAtMs = 100_000L,
+                graceMs = 0L,
+                stallMs = 5_000L,
+                logdResponsive = false,
+            ),
+        )
+    }
 }

@@ -71,6 +71,26 @@ public class CleanerService extends ICleanerService.Stub {
         throw new SecurityException(String.valueOf(func));
     }
 
+    /**
+     * logd 旁路探针：疑似假活时确认 logd 本身是否响应。
+     * logd wedged 时杀 server 无用（新 tail 照样读不到行），此时必须放行。
+     */
+    private static boolean probeLogdResponsive() {
+        try {
+            final var process = Runtime.getRuntime().exec(new String[]{"logcat", "-d", "-t", "1"});
+            final boolean exited = process.waitFor(
+                    ObserverStallPolicy.LOGD_PROBE_TIMEOUT_MS,
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!exited) {
+                process.destroy();
+                return false;
+            }
+            return process.exitValue() == 0;
+        } catch (final Throwable t) {
+            return false;
+        }
+    }
+
     @Override
     public int getServerVersion() {
         if (RuntimeFileUtils.INSTANCE.toAppId(Binder.getCallingUid()) != mManagerAid) {
@@ -94,10 +114,15 @@ public class CleanerService extends ICleanerService.Stub {
                 if (ObserverStallPolicy.INSTANCE.isStalled(
                         android.os.SystemClock.elapsedRealtime(),
                         activityManagerObserver.getStartAtMs(),
-                        activityManagerObserver.getLastReadAtMs(),
-                        ObserverStallPolicy.START_GRACE_MS,
-                        ObserverStallPolicy.STALL_THRESHOLD_MS)) {
-                    return 2;
+                        activityManagerObserver.getLastReadAtMs())) {
+                    // 疑似假活：先确认 logd 本身响应，排除 logd wedged 导致的误杀
+                    //（logd 死了杀 server 也没用，新 tail 照样读不到行）。
+                    if (probeLogdResponsive()) {
+                        return 2;
+                    }
+                    android.util.Log.w("CleanerService",
+                            "observer stall suspected but logd wedged, skip kill");
+                    return 0;
                 }
                 if (!activityManagerObserver.hasAmStart()) {
                     return 3;

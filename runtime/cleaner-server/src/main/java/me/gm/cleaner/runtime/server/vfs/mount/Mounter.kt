@@ -152,8 +152,11 @@ class Mounter {
         }
         if (result.stage == "target_identity") {
             // 身份门拒绝：pid 已死或被复用，fail-closed 是正确行为；
-            // 已在重试策略端判定永久不可重试，此处只计数不告警。
+            // 已在重试策略端判定永久不可重试，此处只计数不告警，
+            // 且不留任何失败痕迹（失败集合残留会让 VFS 永久 DEGRADED）。
             gateRefusalCount.incrementAndGet()
+            failedTargets.remove(pid)
+            mountFailedPids.remove(pid)
             mountRetryCount.remove(pid)
             Log.i(
                 "MC_REDIRECT",
