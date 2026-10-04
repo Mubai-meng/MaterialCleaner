@@ -717,27 +717,34 @@ class Mounter {
     }
 
     /**
-     * 取出到期的失败条目（take 语义：无残留可漏；排队后若再失败会建新条目）。
+     * 消费失败条目三岔：KEEP（冷却未到，原样保留）、TAKE（到期且哈希一致，
+     * 取出去重投）、DISCARD（哈希失配或计划消失，旧条目作废）。
      * 消费按 (package,user) 键，执行按包去重（remount API 本来包级）；
      * 调用方经正常 remount 链重投（新鲜进程表 + 选择策略 + 隔离过滤 + 身份门）。
-     * 内容哈希失配（规则已变）说明正常链路已接管，直接丢弃。
      */
     fun consumeDueFailedPackages(nowMs: Long = SystemClock.elapsedRealtime()): List<String> =
         synchronized(lock) {
-            val dueKeys = failedPackages.filter { (packageUser, failed) ->
+            val takeKeys = mutableListOf<Pair<String, Int>>()
+            val discardKeys = mutableListOf<Pair<String, Int>>()
+            for ((packageUser, failed) in failedPackages) {
                 val (packageName, userId) = packageUser
                 val currentPlanHash = VfsRuntimePolicy.getMountPlan(packageName, userId)
                     ?.takeIf { !it.isEmpty() }
                     ?.let { it.sources.zip(it.targets).hashCode() }
-                MountFailureRetryPolicy.shouldRequeueFailedPackage(
-                    nowMs = nowMs,
-                    lastFailedAtMs = failed.lastFailedAtMs,
-                    failedPlanHash = failed.failedPlanHash,
-                    currentPlanHash = currentPlanHash,
-                )
-            }.keys.toList()
-            dueKeys.forEach { failedPackages.remove(it) }
-            dueKeys.map { it.first }.distinct()
+                if (currentPlanHash == null || currentPlanHash != failed.failedPlanHash) {
+                    discardKeys += packageUser
+                } else if (MountFailureRetryPolicy.shouldRequeueFailedPackage(
+                        nowMs = nowMs,
+                        lastFailedAtMs = failed.lastFailedAtMs,
+                        failedPlanHash = failed.failedPlanHash,
+                        currentPlanHash = currentPlanHash,
+                    )
+                ) {
+                    takeKeys += packageUser
+                }
+            }
+            (discardKeys + takeKeys).forEach { failedPackages.remove(it) }
+            takeKeys.map { it.first }.distinct()
         }
 
     fun onDestroy() {
