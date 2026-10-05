@@ -32,6 +32,8 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
     /**
      * Start-proc 行纯解析。threadtime 的 pid/tid 列非定宽，
      * 禁止按 tag 下标过滤——历史教训：INDEX_OF_TAG 按发射线程位宽随机丢行。
+     * 无 brace 的 FastRestart 行同样接受（常被杀应用复活走此格式，
+     * 以 ` for ` 为界；进程名/uid 段不可能含空格）。
      * 校验顺序与原内联逻辑一致（分隔符先验再切分），仅把无副作用的
      * 格式校验提前，避免为异形行触发 PackageInfoMapper 全量初始化。
      */
@@ -41,15 +43,26 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
             return null;
         }
         // $pid:$processName/$logFormatAppPrincipalName for pre-top-activity, content provider, service {$packageName/$className} caller=$packageName
+        // FastRestart 复活行无 brace：.../u0a273 for FastRestart com.tencent.mm caller=null
+        // 有 brace 用 brace（与原逻辑完全一致）；无 brace 才退到 ` for ` 边界。
         final var indexOfBrace = line.indexOf('{');
-        if (indexOfBrace == -1) {
-            return null;
+        final int end;
+        if (indexOfBrace != -1) {
+            end = indexOfBrace;
+        } else {
+            final var forBoundary = line.indexOf(" for ", indexOfStartProc);
+            if (forBoundary == -1) {
+                return null;
+            }
+            end = forBoundary;
         }
-        final var start = StringUtils.substring(line, indexOfStartProc + 28, indexOfBrace);
+        final var start = StringUtils.substring(line, indexOfStartProc + 28, end);
         // 异形行（如厂商定制 kill-reason 行）可能缺分隔符，先验下标再切分。
         final var startSlash = start.indexOf('/');
         final var startSpace = start.indexOf(' ');
-        if (startSlash == -1 || startSpace == -1 || startSpace <= startSlash) {
+        // FastRestart 无 brace 行：principal 直达行尾，没有尾随空格。
+        final var principalEnd = startSpace == -1 ? start.length() : startSpace;
+        if (startSlash == -1 || principalEnd <= startSlash) {
             return null;
         }
         final var startColon = start.indexOf(':');
@@ -63,7 +76,7 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
         return new ParsedProcLine(
                 Integer.parseInt(pidStr),
                 StringUtils.substring(start, startColon + 1, startSlash),
-                StringUtils.substring(start, startSlash + 1, startSpace));
+                StringUtils.substring(start, startSlash + 1, principalEnd));
     }
 
     /**

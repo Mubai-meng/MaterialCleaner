@@ -50,6 +50,19 @@ class AmLogLineParserTest {
     }
 
     @Test
+    fun `FastRestart无brace行命中`() {
+        val parsed = ActivityManagerLogsObserver.parseStartProcLine(
+            "10-05 11:47:18.456  2816  3412 I ActivityManager: Start proc " +
+                "23887:com.tencent.mm/u0a273 for FastRestart com.tencent.mm caller=null",
+            startTag,
+        )
+        assertNotNull(parsed)
+        assertEquals(23887, parsed!!.pid)
+        assertEquals("com.tencent.mm", parsed.processName)
+        assertEquals("u0a273", parsed.principal)
+    }
+
+    @Test
     fun `异形行返回空`() {
         // 无 tag（大小写敏感，前缀需精确）
         assertNull(
