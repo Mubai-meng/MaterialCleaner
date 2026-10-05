@@ -3,6 +3,7 @@ package me.gm.cleaner.runtime.server.consumer
 import android.util.Log
 import me.gm.cleaner.core.config.ServicePreferences
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 import me.gm.cleaner.runtime.server.CleanerServer
 import org.json.JSONObject
 
@@ -32,7 +33,7 @@ object RedirectNoticeConsumer {
     }
 
     fun loadCursor() {
-        cursor = DataBus.readCursor(DataBus.EVENT_REDIRECT_NOTICE)
+        cursor = DataBus.readCursor(DataBusProtocol.EVENT_REDIRECT_NOTICE)
         Log.d(TAG, "loadCursor: cursor='$cursor'")
     }
 
@@ -42,11 +43,11 @@ object RedirectNoticeConsumer {
      */
     fun pollAndConsume(): Int {
         val srv = server ?: return 0
-        val signalTime = DataBus.getSignalTimestamp(DataBus.SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED)
+        val signalTime = DataBus.getSignalTimestamp(DataBusProtocol.SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED)
         if (signalTime <= lastSignalTimestamp && lastSignalTimestamp > 0) return 0
         lastSignalTimestamp = signalTime
 
-        val events = DataBus.readEventFiles(DataBus.EVENT_REDIRECT_NOTICE, cursor)
+        val events = DataBus.readEventFiles(DataBusProtocol.EVENT_REDIRECT_NOTICE, cursor)
         if (events.isEmpty()) return 0
 
         var consumed = 0
@@ -127,8 +128,8 @@ object RedirectNoticeConsumer {
         return consumed
     }
 
-    private fun advanceCursor(event: DataBus.EventFile) {
+    private fun advanceCursor(event: DataBusProtocol.EventFile) {
         cursor = event.name
-        DataBus.writeCursorToEvent(DataBus.EVENT_REDIRECT_NOTICE, event)
+        DataBus.writeCursorToEvent(DataBusProtocol.EVENT_REDIRECT_NOTICE, event)
     }
 }

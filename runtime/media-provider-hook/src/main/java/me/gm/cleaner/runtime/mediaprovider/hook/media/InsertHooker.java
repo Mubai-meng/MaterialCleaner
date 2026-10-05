@@ -25,6 +25,7 @@ import de.robv.android.xposed.XposedHelpers;
 import me.gm.cleaner.core.storage.redirect.databus.DataBus;
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.AbstractGuardedHook;
 import org.json.JSONObject;
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol;
 
 /**
  * MediaProvider insertFile Hook。
@@ -298,9 +299,9 @@ public class InsertHooker extends AbstractGuardedHook {
             event.put("type", type);
             event.put("reason", "REDIRECTED_TO_INTERNAL");
             final var seq = HookDataBusBridge.INSTANCE.writeEvent(
-                    DataBus.EVENT_REDIRECT_NOTICE, event.toString());
+                    DataBusProtocol.EVENT_REDIRECT_NOTICE, event.toString());
             if (seq >= 0) {
-                HookDataBusBridge.INSTANCE.signal(DataBus.SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED);
+                HookDataBusBridge.INSTANCE.signal(DataBusProtocol.SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED);
             }
         } catch (Exception e) {
             Log.e("MC_REDIRECT", "[InsertHooker] DataBus write failed", e);

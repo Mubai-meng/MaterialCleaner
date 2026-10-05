@@ -9,6 +9,7 @@ import me.gm.cleaner.core.storage.redirect.domain.RedirectPolicyDeriver
 import me.gm.cleaner.core.storage.redirect.domain.RedirectPolicySnapshot
 import org.json.JSONArray
 import org.json.JSONObject
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
 /**
  * 策略快照发布器。
@@ -75,8 +76,8 @@ object SnapshotPublisher {
         VfsRuntimePolicy.updatePolicy(snapshot)
 
         val json = serializeRedirectPolicy(snapshot)
-        val written = DataBus.writeSnapshot(DataBus.SNAPSHOT_REDIRECT_POLICY, json)
-        val signaled = written && DataBus.signal(DataBus.SIGNAL_REDIRECT_POLICY_CHANGED)
+        val written = DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_REDIRECT_POLICY, json)
+        val signaled = written && DataBus.signal(DataBusProtocol.SIGNAL_REDIRECT_POLICY_CHANGED)
         Log.d(TAG, "publishRedirectPolicy: generation=${snapshot.generation}")
         return written && signaled
     }
@@ -152,8 +153,8 @@ object SnapshotPublisher {
         VfsRuntimePolicy.updatePolicy(snapshot)
 
         val json = serializeReadOnly(snapshot)
-        val written = DataBus.writeSnapshot(DataBus.SNAPSHOT_READ_ONLY, json)
-        val signaled = written && DataBus.signal(DataBus.SIGNAL_READ_ONLY_CHANGED)
+        val written = DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_READ_ONLY, json)
+        val signaled = written && DataBus.signal(DataBusProtocol.SIGNAL_READ_ONLY_CHANGED)
         Log.d(TAG, "publishReadOnly: packages=${snapshot.storage.readOnlyRules.size}")
         return written && signaled
     }
@@ -170,8 +171,8 @@ object SnapshotPublisher {
         val mountPoints = RedirectPolicyDeriver.buildConfiguredMountPoints(snapshot)
 
         val json = serializeConfiguredMountPoints(mountPoints)
-        val written = DataBus.writeSnapshot(DataBus.SNAPSHOT_CONFIGURED_MOUNT_POINTS, json)
-        val signaled = written && DataBus.signal(DataBus.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
+        val written = DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_CONFIGURED_MOUNT_POINTS, json)
+        val signaled = written && DataBus.signal(DataBusProtocol.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
         Log.d(TAG, "publishConfiguredMountPoints: count=${mountPoints.points.size}")
         return written && signaled
     }
@@ -185,8 +186,8 @@ object SnapshotPublisher {
         val caps = PlatformCapabilitiesDetector.detect()
         VfsRuntimePolicy.updateCapabilities(caps)
         val json = PlatformCapabilitiesDetector.toJson(caps)
-        val written = DataBus.writeSnapshot(DataBus.SNAPSHOT_PLATFORM_CAPABILITIES, json)
-        val signaled = written && DataBus.signal(DataBus.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
+        val written = DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES, json)
+        val signaled = written && DataBus.signal(DataBusProtocol.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
         Log.d(TAG, "publishPlatformCapabilities: sdk=${caps.sdkVersionInt}, " +
                 "fuseBpf=${caps.isFuseBpfEnabled}, fuse=${caps.fuseAvailable}, " +
                 "mediaProvider=${caps.mediaProviderPackageName}, " +
@@ -212,25 +213,25 @@ object SnapshotPublisher {
 
     private fun redirectPolicyPublication(snapshot: RedirectPolicySnapshot): SnapshotPublication =
         SnapshotPublication(
-            snapshotName = DataBus.SNAPSHOT_REDIRECT_POLICY,
+            snapshotName = DataBusProtocol.SNAPSHOT_REDIRECT_POLICY,
             content = serializeRedirectPolicy(snapshot),
-            signalName = DataBus.SIGNAL_REDIRECT_POLICY_CHANGED,
+            signalName = DataBusProtocol.SIGNAL_REDIRECT_POLICY_CHANGED,
         )
 
     private fun readOnlyPublication(snapshot: RedirectPolicySnapshot): SnapshotPublication =
         SnapshotPublication(
-            snapshotName = DataBus.SNAPSHOT_READ_ONLY,
+            snapshotName = DataBusProtocol.SNAPSHOT_READ_ONLY,
             content = serializeReadOnly(snapshot),
-            signalName = DataBus.SIGNAL_READ_ONLY_CHANGED,
+            signalName = DataBusProtocol.SIGNAL_READ_ONLY_CHANGED,
         )
 
     private fun mountPointsPublication(snapshot: RedirectPolicySnapshot): SnapshotPublication =
         SnapshotPublication(
-            snapshotName = DataBus.SNAPSHOT_CONFIGURED_MOUNT_POINTS,
+            snapshotName = DataBusProtocol.SNAPSHOT_CONFIGURED_MOUNT_POINTS,
             content = serializeConfiguredMountPoints(
                 RedirectPolicyDeriver.buildConfiguredMountPoints(snapshot)
             ),
-            signalName = DataBus.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED,
+            signalName = DataBusProtocol.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED,
         )
 
     // ── JSON 序列化 ──

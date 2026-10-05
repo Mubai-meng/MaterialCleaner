@@ -1,11 +1,11 @@
 package me.gm.cleaner.runtime.mediaprovider.hook.policy
-
 import android.util.Log
 import me.gm.cleaner.core.common.err.ErrorCodes
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.HookDataBusBridge
 import org.json.JSONArray
 import org.json.JSONObject
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
 object NativeHookStatus {
     private const val TAG = "NativeHookStatus"
@@ -576,8 +576,8 @@ object NativeHookStatus {
     fun publishSnapshot() {
         runCatching {
             val json = toJson()
-            if (HookDataBusBridge.writeSnapshot(DataBus.SNAPSHOT_NATIVE_HOOK_STATUS, json)) {
-                HookDataBusBridge.signal(DataBus.SIGNAL_NATIVE_HOOK_STATUS_CHANGED)
+            if (HookDataBusBridge.writeSnapshot(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS, json)) {
+                HookDataBusBridge.signal(DataBusProtocol.SIGNAL_NATIVE_HOOK_STATUS_CHANGED)
             }
         }.onFailure {
             Log.w(TAG, "publishSnapshot failed", it)

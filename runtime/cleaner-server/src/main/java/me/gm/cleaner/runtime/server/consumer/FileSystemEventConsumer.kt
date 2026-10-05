@@ -2,6 +2,7 @@ package me.gm.cleaner.runtime.server.consumer
 
 import android.util.Log
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 import me.gm.cleaner.runtime.server.recording.FileSystemObserver
 import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
 import org.json.JSONObject
@@ -34,7 +35,7 @@ object FileSystemEventConsumer {
 
     /** 从 DataBus 加载持久化游标 */
     fun loadCursor() {
-        cursor = DataBus.readCursor(DataBus.EVENT_FILESYSTEM)
+        cursor = DataBus.readCursor(DataBusProtocol.EVENT_FILESYSTEM)
         Log.d(TAG, "loadCursor: cursor='$cursor'")
     }
 
@@ -44,11 +45,11 @@ object FileSystemEventConsumer {
      */
     fun pollAndConsume(): Int {
         // 信号熔断：signal 未变化表示无新事件，跳过文件系统扫描（listFiles）以节省 tmpfs I/O
-        val signalTime = DataBus.getSignalTimestamp(DataBus.SIGNAL_FILESYSTEM_EVENTS_CHANGED)
+        val signalTime = DataBus.getSignalTimestamp(DataBusProtocol.SIGNAL_FILESYSTEM_EVENTS_CHANGED)
         if (signalTime <= lastSignalTimestamp && lastSignalTimestamp > 0) return 0
         lastSignalTimestamp = signalTime
 
-        val events = DataBus.readEventFiles(DataBus.EVENT_FILESYSTEM, cursor)
+        val events = DataBus.readEventFiles(DataBusProtocol.EVENT_FILESYSTEM, cursor)
         if (events.isEmpty()) return 0
 
         val observer = ObserverManager.fastGetObserver(FileSystemObserver::class.java)
@@ -143,9 +144,9 @@ object FileSystemEventConsumer {
         }
     }
 
-    private fun advanceCursor(event: DataBus.EventFile) {
+    private fun advanceCursor(event: DataBusProtocol.EventFile) {
         cursor = event.name
-        DataBus.writeCursorToEvent(DataBus.EVENT_FILESYSTEM, event)
+        DataBus.writeCursorToEvent(DataBusProtocol.EVENT_FILESYSTEM, event)
     }
 
     /**

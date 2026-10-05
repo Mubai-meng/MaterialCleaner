@@ -5,6 +5,7 @@ import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.util.Log
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 import me.gm.cleaner.runtime.server.orchestrator.ServerErrorJournal
 import org.json.JSONArray
 import org.json.JSONObject
@@ -164,14 +165,14 @@ object DiagnosticArchive {
             appendLine()
         }
 
-        val nativeStatus = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_NATIVE_HOOK_STATUS)
+        val nativeStatus = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS)
             ?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (nativeStatus != null) {
             appendNativeHookSummary(nativeStatus)
             appendLine()
         }
 
-        val platformCaps = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_PLATFORM_CAPABILITIES)
+        val platformCaps = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES)
             ?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (platformCaps != null) {
             appendLine("Platform capabilities:")
@@ -221,14 +222,14 @@ object DiagnosticArchive {
             appendLine()
         }
 
-        val nativeStatus = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_NATIVE_HOOK_STATUS)
+        val nativeStatus = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS)
             ?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (nativeStatus != null) {
             appendNativeHookSummaryZhCn(nativeStatus)
             appendLine()
         }
 
-        val platformCaps = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_PLATFORM_CAPABILITIES)
+        val platformCaps = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES)
             ?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (platformCaps != null) {
             appendLine("平台能力：")
@@ -323,20 +324,20 @@ object DiagnosticArchive {
         runCatching {
             val status = server.layerOrchestrator.collectStatusJson()
             addText(zip, "status/orchestrated_status.json", status)
-            DataBus.writeSnapshot(DataBus.SNAPSHOT_ORCHESTRATED_STATUS, status)
+            DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_ORCHESTRATED_STATUS, status)
         }.onFailure {
             addText(zip, "status/orchestrated_status_error.txt", it.stackTraceToString())
         }
         runCatching {
             addText(zip, "status/server_exception.txt", server.cleanerService.serverException.toString())
         }
-        addSnapshotIfExists(zip, DataBus.SNAPSHOT_NATIVE_HOOK_STATUS,
+        addSnapshotIfExists(zip, DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS,
             "status/native_hook_status_pretty.json")
         addNativeHookSectionIfExists(zip, "fuseJavaGate",
             "status/fuse_java_gate_status.json")
-        addSnapshotIfExists(zip, DataBus.SNAPSHOT_PLATFORM_CAPABILITIES,
+        addSnapshotIfExists(zip, DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES,
             "status/platform_capabilities.json")
-        addSnapshotIfExists(zip, DataBus.SNAPSHOT_CONFIGURED_MOUNT_POINTS,
+        addSnapshotIfExists(zip, DataBusProtocol.SNAPSHOT_CONFIGURED_MOUNT_POINTS,
             "status/configured_mount_points.json")
     }
 
@@ -382,17 +383,17 @@ object DiagnosticArchive {
         addDirectoryFiles(zip, File(busRoot, "snapshots"), "databus/snapshots", Int.MAX_VALUE)
         addDirectoryFiles(zip, File(busRoot, "signals"), "databus/signals", Int.MAX_VALUE)
         addDirectoryFiles(zip, File(busRoot, "cursors"), "databus/cursors", Int.MAX_VALUE)
-        addDirectoryFiles(zip, File(busRoot, "events/${DataBus.EVENT_FILESYSTEM}"),
-            "databus/events/${DataBus.EVENT_FILESYSTEM}", MAX_EVENT_FILES)
-        addDirectoryFiles(zip, File(busRoot, "events/${DataBus.EVENT_REDIRECT_NOTICE}"),
-            "databus/events/${DataBus.EVENT_REDIRECT_NOTICE}", MAX_EVENT_FILES)
+        addDirectoryFiles(zip, File(busRoot, "events/${DataBusProtocol.EVENT_FILESYSTEM}"),
+            "databus/events/${DataBusProtocol.EVENT_FILESYSTEM}", MAX_EVENT_FILES)
+        addDirectoryFiles(zip, File(busRoot, "events/${DataBusProtocol.EVENT_REDIRECT_NOTICE}"),
+            "databus/events/${DataBusProtocol.EVENT_REDIRECT_NOTICE}", MAX_EVENT_FILES)
         addDirectoryFiles(zip, File(busRoot, "events/consumed"),
             "databus/events/consumed", MAX_EVENT_FILES)
-        addDirectoryFiles(zip, File(busRoot, "leases/${DataBus.LEASE_QUERY_SESSIONS}"),
-            "databus/leases/${DataBus.LEASE_QUERY_SESSIONS}", MAX_EVENT_FILES)
+        addDirectoryFiles(zip, File(busRoot, "leases/${DataBusProtocol.LEASE_QUERY_SESSIONS}"),
+            "databus/leases/${DataBusProtocol.LEASE_QUERY_SESSIONS}", MAX_EVENT_FILES)
     }
 
-    private fun healthToJson(health: DataBus.HealthReport): JSONObject = JSONObject().apply {
+    private fun healthToJson(health: DataBusProtocol.HealthReport): JSONObject = JSONObject().apply {
         put("initialized", health.initialized)
         put("healthy", health.healthy)
         put("criticalSnapshotsReady", health.criticalSnapshotsReady)
@@ -518,7 +519,7 @@ object DiagnosticArchive {
         sectionName: String,
         entryName: String,
     ) {
-        val content = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_NATIVE_HOOK_STATUS) ?: return
+        val content = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS) ?: return
         val section = runCatching {
             JSONObject(content).optJSONObject(sectionName)
         }.getOrNull() ?: return

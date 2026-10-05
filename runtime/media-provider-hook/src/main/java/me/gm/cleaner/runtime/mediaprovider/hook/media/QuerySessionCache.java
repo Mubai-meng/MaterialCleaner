@@ -15,6 +15,7 @@ import java.util.regex.Pattern;
 import me.gm.cleaner.core.storage.redirect.databus.DataBus;
 
 import org.json.JSONObject;
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol;
 
 /**
  * MediaProvider Hook 进程内的 query session 缓存。
@@ -73,7 +74,7 @@ public final class QuerySessionCache {
         }
 
         if (shouldSignalLeases) {
-            HookDataBusBridge.INSTANCE.signal(DataBus.SIGNAL_QUERY_SESSION_LEASES_CHANGED);
+            HookDataBusBridge.INSTANCE.signal(DataBusProtocol.SIGNAL_QUERY_SESSION_LEASES_CHANGED);
         }
     }
 
@@ -133,7 +134,7 @@ public final class QuerySessionCache {
             event.put("mountedPath", entry.mountedPath);
             event.put("sourceLayer", "MEDIA_PROVIDER_QUERY_SESSION");
             return HookDataBusBridge.INSTANCE.writeLease(
-                    DataBus.LEASE_QUERY_SESSIONS,
+                    DataBusProtocol.LEASE_QUERY_SESSIONS,
                     leaseKey(entry),
                     event.toString()
             );
@@ -174,9 +175,9 @@ public final class QuerySessionCache {
             event.put("type", "QUERY");
             event.put("reason", aggressive ? "MEDIA_NOT_FOUND_AGGRESSIVE" : "MEDIA_NOT_FOUND");
             final var seq = HookDataBusBridge.INSTANCE.writeEvent(
-                    DataBus.EVENT_REDIRECT_NOTICE, event.toString());
+                    DataBusProtocol.EVENT_REDIRECT_NOTICE, event.toString());
             if (seq >= 0) {
-                HookDataBusBridge.INSTANCE.signal(DataBus.SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED);
+                HookDataBusBridge.INSTANCE.signal(DataBusProtocol.SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED);
             }
         } catch (Exception e) {
             Log.e(TAG, "emitMediaNotFound failed", e);

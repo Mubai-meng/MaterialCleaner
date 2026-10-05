@@ -10,7 +10,7 @@ word:app/src/main/java/me/gm/cleaner/client/ui/MountAppPickerFragment.kt|denylis
 word:app/src/main/java/me/gm/cleaner/client/ui/ServiceStatusFormatter.kt|ConfiguredMountPoint	3
 word:app/src/test/java/me/gm/cleaner/client/ui/ServiceStatusFormatterTest.kt|ConfiguredMountPoint	2
 word:core/config-store/src/main/java/me/gm/cleaner/core/config/ServicePreferences.kt|denylist	13
-word:core/storage-redirect-databus/src/main/java/me/gm/cleaner/core/storage/redirect/databus/DataBus.kt|configured_mount_points	10
+word:core/storage-redirect-databus/src/main/java/me/gm/cleaner/core/storage/redirect/databus/DataBusProtocol.kt|configured_mount_points	8
 word:core/storage-redirect-domain/src/main/java/me/gm/cleaner/core/storage/redirect/domain/ConfiguredMountPointsSnapshot.kt|ConfiguredMountPoint	1
 word:core/storage-redirect-domain/src/main/java/me/gm/cleaner/core/storage/redirect/domain/RedirectPolicyDeriver.kt|ConfiguredMountPoint	3
 word:core/storage-redirect-domain/src/main/java/me/gm/cleaner/core/storage/redirect/domain/RedirectPolicySnapshot.kt|configured_mount_points	1

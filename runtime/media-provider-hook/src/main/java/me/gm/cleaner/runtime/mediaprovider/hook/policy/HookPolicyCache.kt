@@ -1,5 +1,4 @@
 package me.gm.cleaner.runtime.mediaprovider.hook.policy
-
 import android.util.Log
 import me.gm.cleaner.core.common.err.ErrorCodes
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
@@ -11,6 +10,7 @@ import me.gm.cleaner.runtime.mediaprovider.hook.fuse.FuseNativePolicyAdapter
 import org.json.JSONObject
 import java.io.File
 import java.util.regex.Pattern
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
 /**
  * MediaProvider Java Hook 层的本地策略缓存。
@@ -145,10 +145,10 @@ object HookPolicyCache {
         val policyOutcome = consumeAfterSignalCapture(
             currentAcknowledgedTimestamp = lastPolicySignalTimestamp,
             captureSignalTimestamp = {
-                HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_REDIRECT_POLICY_CHANGED)
+                HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_REDIRECT_POLICY_CHANGED)
             },
             consumeSnapshot = {
-                val policyJson = HookDataBusBridge.readSnapshot(DataBus.SNAPSHOT_REDIRECT_POLICY)
+                val policyJson = HookDataBusBridge.readSnapshot(DataBusProtocol.SNAPSHOT_REDIRECT_POLICY)
                 if (policyJson == null) {
                     Log.w(TAG, "initFromDataBus: no redirect_policy snapshot available")
                     NativeHookStatus.markRedirectPolicyFailed(
@@ -186,10 +186,10 @@ object HookPolicyCache {
         val roOutcome = consumeAfterSignalCapture(
             currentAcknowledgedTimestamp = lastReadOnlySignalTimestamp,
             captureSignalTimestamp = {
-                HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_READ_ONLY_CHANGED)
+                HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_READ_ONLY_CHANGED)
             },
             consumeSnapshot = {
-                val roJson = HookDataBusBridge.readSnapshot(DataBus.SNAPSHOT_READ_ONLY)
+                val roJson = HookDataBusBridge.readSnapshot(DataBusProtocol.SNAPSHOT_READ_ONLY)
                 if (roJson == null) {
                     Log.w(TAG, "initFromDataBus: no read_only snapshot available")
                     NativeHookStatus.markReadOnlyPolicyFailed(
@@ -227,7 +227,7 @@ object HookPolicyCache {
         val capsOutcome = consumeAfterSignalCapture(
             currentAcknowledgedTimestamp = lastCapabilitiesSignalTimestamp,
             captureSignalTimestamp = {
-                HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
+                HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
             },
             consumeSnapshot = {
                 loadPlatformCapabilities()
@@ -240,7 +240,7 @@ object HookPolicyCache {
         val mountOutcome = consumeAfterSignalCapture(
             currentAcknowledgedTimestamp = lastMountSignalTimestamp,
             captureSignalTimestamp = {
-                HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
+                HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
             },
             consumeSnapshot = {
                 val pushed = loadAndPushConfiguredMountPoints(force = false)
@@ -256,10 +256,10 @@ object HookPolicyCache {
      * 两者独立追踪，不混用。
      */
     fun isStale(): Boolean {
-        val roSignalTime = HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_READ_ONLY_CHANGED)
-        val policySignalTime = HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_REDIRECT_POLICY_CHANGED)
-        val mountSignalTime = HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
-        val capsSignalTime = HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
+        val roSignalTime = HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_READ_ONLY_CHANGED)
+        val policySignalTime = HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_REDIRECT_POLICY_CHANGED)
+        val mountSignalTime = HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
+        val capsSignalTime = HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
         return roSignalTime > lastReadOnlySignalTimestamp
                 || policySignalTime > lastPolicySignalTimestamp
                 || mountSignalTime > lastMountSignalTimestamp
@@ -274,7 +274,7 @@ object HookPolicyCache {
      * 从 DataBus 加载 platform_capabilities.json 并缓存关键能力字段。
      */
     private fun loadPlatformCapabilities() {
-        val json = HookDataBusBridge.readSnapshot(DataBus.SNAPSHOT_PLATFORM_CAPABILITIES)
+        val json = HookDataBusBridge.readSnapshot(DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES)
         if (json == null) {
             Log.d(TAG, "loadPlatformCapabilities: no snapshot available")
             return
@@ -334,15 +334,15 @@ object HookPolicyCache {
     fun refreshChangedSnapshotsFromDataBus() {
         // 外层粗判避免无谓 IO；游标在真正消费前再次捕获水位，
         // 吸收粗判与读取之间新到的 signal，防止新一代被误标已处理。
-        val policyObserved = HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_REDIRECT_POLICY_CHANGED)
+        val policyObserved = HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_REDIRECT_POLICY_CHANGED)
         if (policyObserved > lastPolicySignalTimestamp) {
             val policyResult = consumeAfterSignalCapture(
                 currentAcknowledgedTimestamp = lastPolicySignalTimestamp,
                 captureSignalTimestamp = {
-                    HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_REDIRECT_POLICY_CHANGED)
+                    HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_REDIRECT_POLICY_CHANGED)
                 },
                 consumeSnapshot = {
-                    val policyJson = HookDataBusBridge.readSnapshot(DataBus.SNAPSHOT_REDIRECT_POLICY)
+                    val policyJson = HookDataBusBridge.readSnapshot(DataBusProtocol.SNAPSHOT_REDIRECT_POLICY)
                     if (policyJson == null) {
                         NativeHookStatus.markRedirectPolicyFailed(
                             "", "redirect_policy snapshot missing during refresh"
@@ -370,15 +370,15 @@ object HookPolicyCache {
             lastPolicySignalTimestamp = policyResult.acknowledgedTimestamp
         }
 
-        val roObserved = HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_READ_ONLY_CHANGED)
+        val roObserved = HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_READ_ONLY_CHANGED)
         if (roObserved > lastReadOnlySignalTimestamp) {
             val roResult = consumeAfterSignalCapture(
                 currentAcknowledgedTimestamp = lastReadOnlySignalTimestamp,
                 captureSignalTimestamp = {
-                    HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_READ_ONLY_CHANGED)
+                    HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_READ_ONLY_CHANGED)
                 },
                 consumeSnapshot = {
-                    val roJson = HookDataBusBridge.readSnapshot(DataBus.SNAPSHOT_READ_ONLY)
+                    val roJson = HookDataBusBridge.readSnapshot(DataBusProtocol.SNAPSHOT_READ_ONLY)
                     if (roJson == null) {
                         NativeHookStatus.markReadOnlyPolicyFailed(
                             "", "read_only snapshot missing during refresh"
@@ -407,13 +407,13 @@ object HookPolicyCache {
         }
 
         // platform_capabilities 变更（极少发生，但仍支持运行时重检测）
-        val capsObserved = HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
+        val capsObserved = HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
         var forceMountRefresh = false
         if (capsObserved > lastCapabilitiesSignalTimestamp) {
             val capsResult = consumeAfterSignalCapture(
                 currentAcknowledgedTimestamp = lastCapabilitiesSignalTimestamp,
                 captureSignalTimestamp = {
-                    HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
+                    HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
                 },
                 consumeSnapshot = {
                     loadPlatformCapabilities()
@@ -433,14 +433,14 @@ object HookPolicyCache {
      * 如果变化则经信号游标读取 snapshot，内部再比较 snapshot generation（策略代数）。
      */
     fun tryRefreshNativeMountPoints(force: Boolean = false) {
-        val mountSignalTime = HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
+        val mountSignalTime = HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
         if (!force && mountSignalTime <= lastMountSignalTimestamp && lastMountSignalTimestamp > 0) {
             return  // signal 未变更
         }
         val mountResult = consumeAfterSignalCapture(
             currentAcknowledgedTimestamp = lastMountSignalTimestamp,
             captureSignalTimestamp = {
-                HookDataBusBridge.getSignalTimestamp(DataBus.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
+                HookDataBusBridge.getSignalTimestamp(DataBusProtocol.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
             },
             consumeSnapshot = {
                 val pushed = loadAndPushConfiguredMountPoints(force)
@@ -460,7 +460,7 @@ object HookPolicyCache {
      * 此路径是 native 挂载点配置的唯一分发路径。
      */
     private fun loadAndPushConfiguredMountPoints(force: Boolean): Boolean {
-        val json = HookDataBusBridge.readSnapshot(DataBus.SNAPSHOT_CONFIGURED_MOUNT_POINTS)
+        val json = HookDataBusBridge.readSnapshot(DataBusProtocol.SNAPSHOT_CONFIGURED_MOUNT_POINTS)
         if (json == null) {
             Log.d(TAG, "loadConfiguredMountPoints: no snapshot available")
             return false

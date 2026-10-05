@@ -26,6 +26,7 @@ import de.robv.android.xposed.XposedHelpers;
 
 import me.gm.cleaner.core.storage.redirect.databus.DataBus;
 import org.json.JSONObject;
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol;
 
 /**
  * FUSE Java 入口门 — 自动驾驶版本。
@@ -579,9 +580,9 @@ public class FuseJavaGate {
             event.put("policyGeneration", HookPolicyCache.INSTANCE.getRedirectPolicyGeneration());
             event.put("nativeMountPointsGeneration",
                     HookPolicyCache.INSTANCE.getNativeMountPointsGeneration());
-            HookDataBusBridge.INSTANCE.writeEvent(DataBus.EVENT_FILESYSTEM, event.toString());
+            HookDataBusBridge.INSTANCE.writeEvent(DataBusProtocol.EVENT_FILESYSTEM, event.toString());
             // 数据面契约 6.4: 写事件后发 signal，消除消费者端 2s 轮询延迟
-            HookDataBusBridge.INSTANCE.signal(DataBus.SIGNAL_FILESYSTEM_EVENTS_CHANGED);
+            HookDataBusBridge.INSTANCE.signal(DataBusProtocol.SIGNAL_FILESYSTEM_EVENTS_CHANGED);
         } catch (Exception e) {
             Log.e("MC_REDIRECT", "[FuseJavaGate] DataBus write failed", e);
         }

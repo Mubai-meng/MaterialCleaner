@@ -4,6 +4,7 @@ import android.os.RemoteException
 import android.util.Log
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.server.ICleanerServerCallback
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
 /**
  * MediaProvider 进程访问 DataBus 的统一入口。
@@ -15,13 +16,13 @@ import me.gm.cleaner.server.ICleanerServerCallback
 object HookDataBusBridge {
     private const val TAG = "HookDataBusBridge"
     private val hookWritableSnapshots = setOf(
-        DataBus.SNAPSHOT_NATIVE_HOOK_STATUS,
+        DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS,
     )
     private val hookWritableSignals = setOf(
-        DataBus.SIGNAL_FILESYSTEM_EVENTS_CHANGED,
-        DataBus.SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED,
-        DataBus.SIGNAL_QUERY_SESSION_LEASES_CHANGED,
-        DataBus.SIGNAL_NATIVE_HOOK_STATUS_CHANGED,
+        DataBusProtocol.SIGNAL_FILESYSTEM_EVENTS_CHANGED,
+        DataBusProtocol.SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED,
+        DataBusProtocol.SIGNAL_QUERY_SESSION_LEASES_CHANGED,
+        DataBusProtocol.SIGNAL_NATIVE_HOOK_STATUS_CHANGED,
     )
 
     @Volatile

@@ -7,6 +7,7 @@ import me.gm.cleaner.runtime.server.process.BaseProcessObserver
 import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
 import org.json.JSONObject
 import java.io.File
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
 /**
  * Query session lease 消费器。
@@ -18,7 +19,7 @@ object QuerySessionLeaseConsumer {
     private const val TAG = "QuerySessionLeaseConsumer"
 
     fun pollAndApply(): Int {
-        val leases = DataBus.readLeaseFiles(DataBus.LEASE_QUERY_SESSIONS)
+        val leases = DataBus.readLeaseFiles(DataBusProtocol.LEASE_QUERY_SESSIONS)
         if (leases.isEmpty()) return 0
 
         val now = System.currentTimeMillis()
@@ -30,12 +31,12 @@ object QuerySessionLeaseConsumer {
                 val mountedPath = root.optString("mountedPath", "")
                 val expiresAt = root.optLong("expiresAt", 0L)
                 if (mountedPath.isBlank()) {
-                    DataBus.deleteLeaseFile(DataBus.LEASE_QUERY_SESSIONS, lease.name)
+                    DataBus.deleteLeaseFile(DataBusProtocol.LEASE_QUERY_SESSIONS, lease.name)
                     continue
                 }
                 if (expiresAt <= now) {
                     rmdirSafe(mountedPath)
-                    DataBus.deleteLeaseFile(DataBus.LEASE_QUERY_SESSIONS, lease.name)
+                    DataBus.deleteLeaseFile(DataBusProtocol.LEASE_QUERY_SESSIONS, lease.name)
                     expired++
                     continue
                 }
@@ -46,7 +47,7 @@ object QuerySessionLeaseConsumer {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to apply query session lease ${lease.name}", e)
-                DataBus.deleteLeaseFile(DataBus.LEASE_QUERY_SESSIONS, lease.name)
+                DataBus.deleteLeaseFile(DataBusProtocol.LEASE_QUERY_SESSIONS, lease.name)
             }
         }
         if (applied > 0 || expired > 0) {
