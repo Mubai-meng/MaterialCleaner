@@ -37,6 +37,7 @@ import me.gm.cleaner.dao.RootPreferences
 import me.gm.cleaner.dao.ServiceMoreOptionsPreferences
 import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.config.BatchCommitResult
 import me.gm.cleaner.core.config.StoragePolicyBatchEdit
 import me.gm.cleaner.core.config.getPackageSrCount
 import me.gm.cleaner.core.config.getPackageSrZipped
@@ -161,11 +162,18 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                                         }
                                         tx.putRedirect(list, listOf(packageInfo.packageName))
                                     }
-                                    if (!tx.commit()) {
-                                        Log.e("MC/Policy", "import template batch commit failed")
-                                        return@launch
+                                    val r = tx.commitStructured()
+                                    when (r.overall) {
+                                        BatchCommitResult.Overall.SUCCESS -> CleanerClient.service?.notifySrChanged()
+                                        BatchCommitResult.Overall.FAILURE -> {
+                                            Log.e("MC/Policy", "import template batch commit failed: stageFailed=${r.stageFailed}, redirect=${r.redirect?.error}")
+                                            return@launch
+                                        }
+                                        BatchCommitResult.Overall.PARTIAL -> {
+                                            Log.e("MC/Policy", "unexpected partial commit: redirect=${r.redirect}, readOnly=${r.readOnly}")
+                                            return@launch
+                                        }
                                     }
-                                    CleanerClient.service?.notifySrChanged()
                                 }
                             }
                         }
@@ -249,11 +257,18 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                                     .toList()
                                 tx.putReadOnly(mountedReadOnlyPaths, listOf(pi.packageName))
                             }
-                            if (!tx.commit()) {
-                                Log.e("MC/Policy", "read-only template batch commit failed")
-                                return@launch
+                            val r = tx.commitStructured()
+                            when (r.overall) {
+                                BatchCommitResult.Overall.SUCCESS -> CleanerClient.service?.notifyReadOnlyChanged()
+                                BatchCommitResult.Overall.FAILURE -> {
+                                    Log.e("MC/Policy", "read-only template batch commit failed: stageFailed=${r.stageFailed}, readOnly=${r.readOnly?.error}")
+                                    return@launch
+                                }
+                                BatchCommitResult.Overall.PARTIAL -> {
+                                    Log.e("MC/Policy", "unexpected partial commit: redirect=${r.redirect}, readOnly=${r.readOnly}")
+                                    return@launch
+                                }
                             }
-                            CleanerClient.service?.notifyReadOnlyChanged()
                         }
                     }
                 }
@@ -282,11 +297,18 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                                 val wizard = MountWizard(pi)
                                 tx.putRedirect(wizard.createRules(answers), listOf(pi.packageName))
                             }
-                            if (!tx.commit()) {
-                                Log.e("MC/Policy", "mount template batch commit failed")
-                                return@launch
+                            val r = tx.commitStructured()
+                            when (r.overall) {
+                                BatchCommitResult.Overall.SUCCESS -> CleanerClient.service?.notifySrChanged()
+                                BatchCommitResult.Overall.FAILURE -> {
+                                    Log.e("MC/Policy", "mount template batch commit failed: stageFailed=${r.stageFailed}, redirect=${r.redirect?.error}")
+                                    return@launch
+                                }
+                                BatchCommitResult.Overall.PARTIAL -> {
+                                    Log.e("MC/Policy", "unexpected partial commit: redirect=${r.redirect}, readOnly=${r.readOnly}")
+                                    return@launch
+                                }
                             }
-                            CleanerClient.service?.notifySrChanged()
                         }
                     }
                 }

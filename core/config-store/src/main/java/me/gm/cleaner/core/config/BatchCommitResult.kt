@@ -25,6 +25,3 @@ data class BatchCommitResult(
         FAILURE,
     }
 }
-
-/** 顶层别名，兼容 `BatchCommitOverall` 与 `BatchCommitResult.Overall` 两种引用写法。 */
-typealias BatchCommitOverall = BatchCommitResult.Overall

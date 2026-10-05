@@ -23,7 +23,7 @@ class StoragePolicyBatchEditTest {
         tx.putReadOnly(listOf("/ro"), listOf("p1"))
 
         assertTrue(store.getPackageSrZipped("p1").isEmpty())
-        assertTrue(tx.commit())
+        assertTrue(tx.commitStructured().overall == BatchCommitResult.Overall.SUCCESS)
 
         assertEquals(listOf("/a" to "/b"), store.getPackageSrZipped("p1"))
         assertEquals(listOf("/c" to "/d"), store.getPackageSrZipped("p2"))
@@ -35,7 +35,7 @@ class StoragePolicyBatchEditTest {
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
         val tx = StoragePolicyBatchEdit(store)
         tx.putRedirect(listOf("/a" to "/b"), listOf(""))
-        assertFalse(tx.commit())
+        assertFalse(tx.commitStructured().overall == BatchCommitResult.Overall.SUCCESS)
         assertTrue(store.getPackageSrZipped("").isEmpty())
     }
 
@@ -45,7 +45,7 @@ class StoragePolicyBatchEditTest {
         val tx = StoragePolicyBatchEdit(store)
         tx.putRedirect(listOf("/a" to "/b"), listOf("p1"))
         tx.putReadOnly(listOf("/ro"), listOf(""))
-        assertFalse(tx.commit())
+        assertFalse(tx.commitStructured().overall == BatchCommitResult.Overall.SUCCESS)
         assertTrue(store.getPackageSrZipped("p1").isEmpty())
         assertTrue(store.getPackageReadOnly("p1").isEmpty())
     }
@@ -54,7 +54,7 @@ class StoragePolicyBatchEditTest {
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
         val tx = StoragePolicyBatchEdit(store)
         tx.putRedirect(listOf("/a" to "/b"), listOf("p1"))
-        assertTrue(tx.commit())
+        assertTrue(tx.commitStructured().overall == BatchCommitResult.Overall.SUCCESS)
         try {
             tx.putRedirect(listOf("/x" to "/y"), listOf("p2"))
             assertFalse("复用应抛", true)
@@ -71,7 +71,7 @@ class StoragePolicyBatchEditTest {
         store.updateRedirect(store.readRedirect().revision) {
             it.replaceRedirectRules(listOf("/other" to "/target"), listOf("p2"))
         }
-        assertFalse(tx.commit())
+        assertFalse(tx.commitStructured().overall == BatchCommitResult.Overall.SUCCESS)
         assertEquals(listOf("/other" to "/target"), store.getPackageSrZipped("p2"))
         assertTrue(store.getPackageSrZipped("p1").isEmpty())
     }

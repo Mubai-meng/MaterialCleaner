@@ -71,14 +71,6 @@ class StoragePolicyBatchEdit(
         )
     }
 
-    @Deprecated(
-        message = "请改用 commitStructured 以区分 SUCCESS / PARTIAL / FAILURE",
-        replaceWith = ReplaceWith("commitStructured().overall == BatchCommitOverall.SUCCESS"),
-    )
-    fun commit(): Boolean {
-        return commitStructured().overall == BatchCommitResult.Overall.SUCCESS
-    }
-
     private fun stageRedirect(
         staged: StoragePolicyEnvelope?,
         rawRules: List<Pair<String, String>>,
