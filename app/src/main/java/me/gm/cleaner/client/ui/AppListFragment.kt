@@ -173,7 +173,12 @@ class AppListFragment : BaseServiceSettingsFragment() {
                 viewModel.appsFlow.collect { state ->
                     when (state) {
                         is AppListState.Done -> {
-                            val mounted = state.list.filter { it.mountRulesCount > 0 }
+                            // "已挂载应用"列表 = 设置过**任意**规则的应用。
+                            // 只读规则（ReadOnlyRule）同样是有效规则，只是不走 bind mount，
+                            // 若只按 mountRulesCount 过滤，只配了只读规则的应用会整条消失。
+                            val mounted = state.list.filter {
+                                it.mountRulesCount > 0 || it.readOnlyCount > 0
+                            }
                             adapter.submitList(mounted)
                             listContainer.isRefreshing = false
                         }
@@ -333,7 +338,10 @@ class AppListFragment : BaseServiceSettingsFragment() {
             }
             // Only update if load succeeded; don't overwrite existing data on failure
             if (loaded != null) {
-                val mounted = loaded.filter { it.mountRulesCount > 0 }
+                // 与上方 appsFlow 的过滤口径保持一致：有任意规则（重定向或只读）即显示。
+                val mounted = loaded.filter {
+                    it.mountRulesCount > 0 || it.readOnlyCount > 0
+                }
                 adapter.submitList(mounted)
             }
         }

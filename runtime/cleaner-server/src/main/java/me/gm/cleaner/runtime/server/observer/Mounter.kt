@@ -55,8 +55,16 @@ class Mounter {
         VfsRuntimeConfigStore.shouldMountForAllPackages()
 
     fun bindMountAsync(packageName: String, pid: Int, uid: Int) {
-        handler.post {
+        // 提交侧留痕：Handler 所在的 Looper 若已退出，post() 会返回 false 且**静默丢弃**任务，
+        // 表现为"调用方日志正常、bindMountLocked 却一次都没执行"。这一行让该故障可见。
+        val accepted = handler.post {
             synchronized(lock) { bindMountLocked(packageName, pid, uid) }
+        }
+        Log.i("MC_REDIRECT", "[Mounter] bindMountAsync enqueued=$accepted " +
+                "pkg=$packageName pid=$pid uid=$uid")
+        if (!accepted) {
+            Log.e("MC_REDIRECT", "[Mounter] Handler rejected the task (looper dead?), " +
+                    "mount will never run pkg=$packageName pid=$pid")
         }
     }
 
@@ -105,7 +113,12 @@ class Mounter {
             rules.sources.toTypedArray(), rules.targets.toTypedArray()
         )
         Log.i("MC_REDIRECT", "[Mounter] bindMount result=${result.success} pkg=$packageName " +
-                "pid=$pid sources=${rules.sources} targets=${rules.targets} detail=${result.reason}")
+                "pid=$pid sources=${rules.sources} targets=${rules.targets} " +
+                // nativeSource/nativeTarget 为 native 侧回报的**实际**参与 mount 的路径
+                // （source 已改写为 /mnt/user/<id>/... 视图）。失败时这是判断
+                // invalid_source / invalid_target 究竟卡在哪个字符串上的唯一依据。
+                "nativeSource=${result.source} nativeTarget=${result.target} " +
+                "detail=${result.reason}")
         // Issue #3：fuse_bypass 只是 FUSE 私有目录拦截优化，失败时降级为无 bypass
         // 再试一次，不记失败、不调度 pid 重试。回滚已保证 namespace 干净，
         // 且 fuseBypass=false 时 native 直接跳过 bypass 块，不会二次触发。

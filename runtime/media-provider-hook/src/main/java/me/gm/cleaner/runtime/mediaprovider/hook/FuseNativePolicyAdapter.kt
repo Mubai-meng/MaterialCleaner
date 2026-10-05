@@ -120,8 +120,70 @@ object FuseNativePolicyAdapter {
     fun initializeInlineHook(): String {
         ensureInlineLibraryLoaded()
         val statusJson = InlineHookConfig.initializeXHook()
+        logNativeStatus(statusJson)
         reportNativeFailureIfAny(statusJson)
         return statusJson
+    }
+
+    /**
+     * 把 native init() 返回的状态摘要打到 logcat。
+     *
+     * 存在的理由：`reportNativeFailureIfAny` 只把失败码写进 DataBus 快照，而
+     * MediaProvider 进程的 DataBus 文件通道本身就不可用（见 [DataBus.lastInitFailureOrNull]），
+     * 于是"FUSE native hook 为什么没起来"在现场日志里彻底不可见
+     * （实测：整份 logcat 只有 DataBus 的 AccessDeniedException，没有任何 native lastError）。
+     * 这里把关键字段直接落到 logcat，保证下次复现能一眼看到原因。
+     */
+    private fun logNativeStatus(statusJson: String) {
+        val summary = summarizeNativeStatus(statusJson)
+        if (summary.connectFailed) {
+            Log.w(TAG, "native init status (core unavailable): $summary")
+        } else {
+            Log.i(TAG, "native init status: $summary")
+        }
+    }
+
+    private fun summarizeNativeStatus(statusJson: String): NativeStatusSummary {
+        val root = runCatching { org.json.JSONObject(statusJson) }.getOrNull()
+            ?: return NativeStatusSummary(connectFailed = true, text = "unparsable: $statusJson")
+        // 原生 BuildHookStatusJson 只输出 fuseAvailable/fuseLibraryLoaded/hookMode/
+        // embeddedFuseJniFound/xhookRefreshCalled/symbols/symbolMethods/lastError，
+        // **从不输出顶层 coreAvailable / fullAvailable**。
+        // 此前用 root.optBoolean("coreAvailable", false) 读取，默认值 false 必然生效，
+        // 于是初始化成功（5 个符号全 true、methods 全 exact、lastError 为空）时依然打印
+        // "coreAvailable=false, fullAvailable=false" 并被打上 "(core unavailable)" 标签，
+        // 在现场日志里制造了"原生 hook 从未生效"的长期误判。
+        // 这里改为与 NativeHookStatus.parseNativeStatus 完全一致的派生口径。
+        val symbols = root.optJSONObject("symbols")
+        val containsMountHooked = symbols?.optBoolean("containsMount", false) ?: false
+        val coreAvailable = containsMountHooked
+        val fullAvailable = containsMountHooked &&
+                (symbols?.optBoolean("startsWith", false) ?: false) &&
+                (symbols?.optBoolean("isFuseBpfEnabled", false) ?: false) &&
+                (symbols?.optBoolean("fuseReqUserdata", false) ?: false) &&
+                (symbols?.optBoolean("fuseBpfInstall", false) ?: false)
+        val text = buildString {
+            append("coreAvailable=").append(coreAvailable)
+            append(", fullAvailable=").append(fullAvailable)
+            append(", hookMode=").append(root.optString("hookMode", "UNKNOWN"))
+            append(", fuseAvailable=").append(root.optBoolean("fuseAvailable", true))
+            append(", fuseLibraryLoaded=").append(root.optBoolean("fuseLibraryLoaded", false))
+            append(", fuseLibraryName=").append(root.optString("fuseLibraryName", ""))
+            append(", fuseJniLoadMode=").append(root.optString("fuseJniLoadMode", "UNKNOWN"))
+            append(", embeddedFuseJniFound=").append(root.optBoolean("embeddedFuseJniFound", false))
+            append(", symbols=").append(root.optJSONObject("symbols")?.toString() ?: "{}")
+            append(", methods=").append(root.optJSONObject("symbolMethods")?.toString() ?: "{}")
+            append(", missingSymbols=").append(root.optJSONArray("missingSymbols")?.toString() ?: "[]")
+            append(", lastError=").append(root.optString("lastError", ""))
+        }
+        return NativeStatusSummary(connectFailed = !coreAvailable, text = text)
+    }
+
+    private data class NativeStatusSummary(
+        val connectFailed: Boolean,
+        val text: String,
+    ) {
+        override fun toString(): String = text
     }
 
     /**
@@ -135,7 +197,10 @@ object FuseNativePolicyAdapter {
 
     internal fun mapNativeLastErrorToCode(statusJson: String): String? {
         val root = runCatching { org.json.JSONObject(statusJson) }.getOrNull() ?: return null
-        if (root.optBoolean("coreAvailable", false)) {
+        // 原生只输出 symbols.containsMount，不输出顶层 coreAvailable（详见 summarizeNativeStatus）。
+        // 旧判断 root.optBoolean("coreAvailable", false) 恒为 false，等于这道"核心已就绪则不算失败"
+        // 的短路从未生效；改为按 symbols.containsMount 判定。
+        if (root.optJSONObject("symbols")?.optBoolean("containsMount", false) == true) {
             return null
         }
         val message = root.optString("lastError")

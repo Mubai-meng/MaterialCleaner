@@ -200,8 +200,15 @@ static bool is_storage_path(const char *path) {
     if (path == nullptr) {
         return false;
     }
-    const char *storage = "/storage/"_iobfs.c_str();
-    if (strncmp(path, storage, strlen(storage)) != 0) {
+    // 注意：_iobfs 返回的是**临时对象**，其生命周期只到本语句结束。
+    // 若写成 `const char *storage = "/storage/"_iobfs.c_str();`，
+    // 下一语句通过该裸指针读取即为悬垂指针（UB）。实测 -O2 下 LLVM 会判定
+    // 解码写入"未在对象生命周期内被读取"而在死存储消除阶段整体删除，
+    // 使 strncmp 比较未初始化的栈内存，合法路径被恒判为非法
+    // （表现为 [Mounter] bindMount result=false stage=invalid_source）。
+    // 必须立即拷贝为具名对象，与下方 StringPrintf/_iobfs 的既有写法保持一致。
+    const std::string storage = "/storage/"_iobfs.c_str();
+    if (strncmp(path, storage.c_str(), storage.size()) != 0) {
         return false;
     }
     for (const char *p = path; *p != '\0'; ++p) {

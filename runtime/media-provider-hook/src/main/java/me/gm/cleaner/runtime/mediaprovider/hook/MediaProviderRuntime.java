@@ -9,30 +9,59 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
 public final class MediaProviderRuntime {
+    private static final String TAG = "MC_REDIRECT";
+
     private static Context sContext;
     private static MediaProviderHooksService sService;
     private static boolean sInlineHookInitialized;
+
+    /**
+     * bootstrap 是否已经完整跑过一次。
+     *
+     * XposedInit 为 bootstrap 装了两条独立触发通路（ContentProvider.attachInfo 与
+     * MediaProvider.onCreate）；两条都通时必须只执行一次，否则 MediaProviderHook
+     * 会被构造两遍、对同一批方法重复下 hook。
+     */
+    private static volatile boolean sBootstrapped;
+
+    private static final Object BOOTSTRAP_LOCK = new Object();
+
+    /** 供 XposedInit 的 bootstrap 看门狗判定是否需要告警。 */
+    public static boolean isBootstrapped() {
+        return sBootstrapped;
+    }
 
     private MediaProviderRuntime() {
     }
 
     public static void bootstrap(LoadPackageParam lpparam, Context context, MediaProviderHooksService service) {
-        sContext = context;
-        sService = service;
-        try {
-            final var mediaProviderClass = XposedHelpers.findClass(
-                    "com.android.providers.media.MediaProvider", lpparam.classLoader
-            );
-            Log.i("MC_REDIRECT", "[XposedInit] MediaProvider class found, registering hooks...");
-            NativeHookStatus.INSTANCE.markMediaProviderHookLoaded(lpparam.packageName);
-            initializeInlineHook(lpparam.packageName);
-            setupReRegisterOnDeath();
-            MediaProviderHooksService.requestReRegister("initial MediaProvider load");
-            service.initPolicyCache();
-            new MediaProviderHook(service, lpparam.classLoader, mediaProviderClass);
-            Log.i("MC_REDIRECT", "[XposedInit] MediaProviderHook created successfully");
-        } catch (XposedHelpers.ClassNotFoundError e) {
-            Log.e("MC_REDIRECT", "[XposedInit] MediaProvider hook setup FAILED", e);
+        synchronized (BOOTSTRAP_LOCK) {
+            if (sBootstrapped) {
+                Log.i(TAG, "[XposedInit] bootstrap already completed, ignoring duplicate trigger");
+                return;
+            }
+            sContext = context;
+            sService = service;
+            try {
+                final var mediaProviderClass = XposedHelpers.findClass(
+                        "com.android.providers.media.MediaProvider", lpparam.classLoader
+                );
+                Log.i(TAG, "[XposedInit] MediaProvider class found, registering hooks...");
+                NativeHookStatus.INSTANCE.markMediaProviderHookLoaded(lpparam.packageName);
+                initializeInlineHook(lpparam.packageName);
+                setupReRegisterOnDeath();
+                MediaProviderHooksService.requestReRegister("initial MediaProvider load");
+                service.initPolicyCache();
+                new MediaProviderHook(service, lpparam.classLoader, mediaProviderClass);
+                sBootstrapped = true;
+                Log.i(TAG, "[XposedInit] MediaProviderHook created successfully");
+            } catch (XposedHelpers.ClassNotFoundError e) {
+                Log.e(TAG, "[XposedInit] MediaProvider hook setup FAILED", e);
+            } catch (Throwable t) {
+                // 除 ClassNotFoundError 外的失败此前会一路冒泡出 handleLoadPackage 的调用方，
+                // 现场表现为"什么都没有发生"；这里显式记录，保证失败可见且不留下半初始化状态。
+                Log.e(TAG, "[XposedInit] MediaProvider hook setup FAILED", t);
+            }
         }
     }
 

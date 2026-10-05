@@ -19,6 +19,25 @@ public class PackageStatus implements Parcelable {
     public static final int PID_FLAG_UNKNOWN = 1 << 5;
     public static final int PID_FLAG_MOUNT_FAILED = 1 << 6;
 
+    /**
+     * 目标里存在已生效的挂载项，但没有覆盖全部 target（0 &lt; 命中数 &lt; target 数）。
+     *
+     * <p>引入前这一状况落到 base flag = 0（既非 MOUNTED 也非 UNKNOWN），
+     * 与"压根没挂上"在 UI 上无法区分，只能靠调用侧的兜底分支猜。
+     */
+    public static final int PID_FLAG_PARTIALLY_MOUNTED = 1 << 7;
+
+    /** target 一个都没命中（{@code check_mounts} 返回空数组）。 */
+    public static final int PID_FLAG_NOT_MOUNTED = 1 << 8;
+
+    /**
+     * 该 pid 从未被 Mounter 接管（不在 {@code Mounter.pidRecords} 里）。
+     *
+     * <p>它可能与 {@link #PID_FLAG_STARTUP_AWARE} 互斥存在。语义是"这不是我们的
+     * 重定向对象"，例如宿主了他人组件的 OEM 推送进程。调用侧不应把它计入分母。
+     */
+    public static final int PID_FLAG_UNMANAGED = 1 << 9;
+
     public static final Creator<PackageStatus> CREATOR = new Creator<>() {
         @Override
         public PackageStatus createFromParcel(Parcel source) {

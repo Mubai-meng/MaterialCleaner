@@ -2,6 +2,7 @@ package me.gm.cleaner.runtime.server.orchestrator
 
 import android.util.Log
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
+import me.gm.cleaner.runtime.server.consumer.EventDeadLetter
 import org.json.JSONObject
 
 object DataBusLayerReporter {
@@ -16,7 +17,12 @@ object DataBusLayerReporter {
 
     fun collect(generation: Long, now: Long): LayerReport {
         val health = DataBus.checkHealth(repair = true)
-        warnIfBacklog(health, now)
+        // 积压深度必须按游标计算。events/<queue>/ 里的文件只被游标越过、从不删除，
+        // 目录文件数是“累计写入量”；直接用它当积压量会每 60s 报一次假 backlog
+        // （实测 filesystem=561 时游标已指向最后一个事件，队列其实是空的）。
+        val filesystemPending = DataBus.pendingEventCount(DataBus.EVENT_FILESYSTEM)
+        val redirectNoticePending = DataBus.pendingEventCount(DataBus.EVENT_REDIRECT_NOTICE)
+        warnIfBacklog(health, now, filesystemPending, redirectNoticePending)
         val platformCapsJson = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_PLATFORM_CAPABILITIES)
         val platformCaps = platformCapsJson?.let {
             runCatching { JSONObject(it) }.getOrNull()
@@ -26,9 +32,15 @@ object DataBusLayerReporter {
             "busRootExists" to health.initialized.toString(),
             "missingDirectoryCount" to health.missingDirectories.size.toString(),
             "permissionIssueCount" to health.permissionIssues.size.toString(),
-            "eventQueueFilesystem" to (health.eventQueueCounts[DataBus.EVENT_FILESYSTEM] ?: 0).toString(),
-            "eventQueueRedirectNotice" to (health.eventQueueCounts[DataBus.EVENT_REDIRECT_NOTICE] ?: 0).toString(),
+            "eventQueueFilesystem" to filesystemPending.toString(),
+            "eventQueueRedirectNotice" to redirectNoticePending.toString(),
+            "eventQueueFilesystemArchived" to
+                    (health.eventQueueCounts[DataBus.EVENT_FILESYSTEM] ?: 0).toString(),
             "eventQueueConsumed" to (health.eventQueueCounts["consumed"] ?: 0).toString(),
+            // 隔离计数：把"队列卡死"变成可见的"N 条已隔离"。
+            // 非 0 即说明有事件永久失败（毒丸），但**队列已经解开**、后续事件正常消费。
+            "eventQueueFilesystemQuarantined" to
+                    EventDeadLetter.count(DataBus.EVENT_FILESYSTEM).toString(),
             "leaseQuerySessions" to (health.leaseCounts[DataBus.LEASE_QUERY_SESSIONS] ?: 0).toString(),
         )
 
@@ -101,18 +113,21 @@ object DataBusLayerReporter {
         return parts.joinToString("; ").ifBlank { "DataBus degraded" }
     }
 
-    private fun warnIfBacklog(health: DataBus.HealthReport, now: Long) {
-        val filesystem = health.eventQueueCounts[DataBus.EVENT_FILESYSTEM] ?: 0
-        val redirectNotice = health.eventQueueCounts[DataBus.EVENT_REDIRECT_NOTICE] ?: 0
+    private fun warnIfBacklog(
+        health: DataBus.HealthReport,
+        now: Long,
+        filesystemPending: Int,
+        redirectNoticePending: Int,
+    ) {
         val consumed = health.eventQueueCounts["consumed"] ?: 0
         val querySessionLease = health.leaseCounts[DataBus.LEASE_QUERY_SESSIONS] ?: 0
 
         val exceeded = mutableListOf<String>()
-        if (filesystem > FILESYSTEM_QUEUE_WARN_COUNT) {
-            exceeded += "${DataBus.EVENT_FILESYSTEM}=$filesystem"
+        if (filesystemPending > FILESYSTEM_QUEUE_WARN_COUNT) {
+            exceeded += "${DataBus.EVENT_FILESYSTEM}=$filesystemPending"
         }
-        if (redirectNotice > REDIRECT_NOTICE_QUEUE_WARN_COUNT) {
-            exceeded += "${DataBus.EVENT_REDIRECT_NOTICE}=$redirectNotice"
+        if (redirectNoticePending > REDIRECT_NOTICE_QUEUE_WARN_COUNT) {
+            exceeded += "${DataBus.EVENT_REDIRECT_NOTICE}=$redirectNoticePending"
         }
         if (consumed > CONSUMED_QUEUE_WARN_COUNT) {
             exceeded += "consumed=$consumed"
@@ -126,8 +141,8 @@ object DataBusLayerReporter {
         lastBacklogWarningAt = now
         Log.w("MC_STATE", JSONObject().apply {
             put("event", "databus_backlog")
-            put("filesystem", filesystem)
-            put("redirectNotice", redirectNotice)
+            put("filesystem", filesystemPending)
+            put("redirectNotice", redirectNoticePending)
             put("consumed", consumed)
             put("querySessionLease", querySessionLease)
             put("exceeded", exceeded.joinToString(","))

@@ -37,9 +37,22 @@ class HookRecoveryCoordinator(
     )
 
     fun onHooksBinderDied() {
-        Log.w(TAG, "onHooksBinderDied: MEDIA_PROVIDER_JAVA_HOOK -> UNAVAILABLE, " +
-                "FUSE_NATIVE_HOOK -> UNAVAILABLE (binderDied = process death)")
-        MediaProviderHookGateway.resetNativeStateForReconnect()
+        // 死掉的 Binder 是 **HooksBridgeProvider（me.gm.cleaner 应用进程）** 提供的桥，
+        // 既不是 MediaProvider 侧的 Java Hook，也不是 FUSE native hook —— 应用进程
+        // 被用户从最近任务划掉、或被 ColorOS 回收（常态）就会走到这里。
+        //
+        // 旧实现把它记成 "MEDIA_PROVIDER_JAVA_HOOK / FUSE_NATIVE_HOOK -> UNAVAILABLE
+        // (binderDied = process death)" 并调用 resetNativeStateForReconnect()，
+        // 直接引发误判链：
+        //   桥换代 → 新桥手上没有 MediaProvider Binder → isMediaProviderHookConnected()=false
+        //   → MediaProviderRecoveryStrategy 累计到阈值 → force-stop MediaProvider
+        //   → 系统级进程死亡波 → 前台应用被连带杀掉（实测 10:54:50 / 11:02:13 两次）。
+        //
+        // 正确语义：这只是控制面桥断了，重连即可。native 挂载点状态由 MediaProvider
+        // 进程持有，应用进程的死亡不可能使其失效，因此**不能**清零 generation 缓存。
+        Log.w(TAG, "onHooksBinderDied: hooks bridge process died " +
+                "(owner = me.gm.cleaner app process). MediaProvider Java hook and native " +
+                "mount state are unaffected -> reconnecting bridge only")
         scheduleHooksReconnect()
     }
 

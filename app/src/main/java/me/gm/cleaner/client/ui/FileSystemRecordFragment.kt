@@ -59,7 +59,11 @@ class FileSystemRecordFragment : BaseServiceSettingsFragment() {
                 is FileSystemRecordState.Disabled -> {
                     binding.progress.hide()
                     binding.warningContainer.isVisible = true
+                    binding.warning.setCompoundDrawablesWithIntrinsicBounds(
+                        R.drawable.ic_outline_error_outline_48, 0, 0, 0
+                    )
                     binding.warning.setText(R.string.filesystem_record_activation_instruction)
+                    binding.button.isVisible = true
                     binding.button.setText(R.string.filesystem_record_enable)
                     binding.button.setOnClickListener {
                         val index = viewPagerItems.indexOf(MoreOptionsFragmentStub::class.java)
@@ -81,7 +85,11 @@ class FileSystemRecordFragment : BaseServiceSettingsFragment() {
                 is FileSystemRecordState.DbTooLarge -> {
                     binding.progress.hide()
                     binding.warningContainer.isVisible = true
+                    binding.warning.setCompoundDrawablesWithIntrinsicBounds(
+                        R.drawable.ic_outline_error_outline_48, 0, 0, 0
+                    )
                     binding.warning.setText(R.string.filesystem_record_database_too_large)
+                    binding.button.isVisible = true
                     binding.button.setText(R.string.filesystem_record_database_load_anyway)
                     binding.button.setOnClickListener {
                         viewModel.startLoadingRecord()
@@ -93,7 +101,6 @@ class FileSystemRecordFragment : BaseServiceSettingsFragment() {
                     binding.warningContainer.isVisible = false
                     fileSystemRecordAdapter.submitList(emptyList())
                 }
-
                 is FileSystemRecordState.LoadingMore -> {
                     binding.progress.hide()
                     loadingMoreAdapter.setProgress(record.progress)
@@ -104,6 +111,16 @@ class FileSystemRecordFragment : BaseServiceSettingsFragment() {
 
                 is FileSystemRecordState.Done -> {
                     binding.progress.hide()
+                    // 空态占位：数据库为空（或记录全被隐藏列表/搜索条件过滤）时，
+                    // 此前页面完全空白，用户无法区分"确实还没有记录"与"页面故障"。
+                    if (record.list.isEmpty()) {
+                        binding.warningContainer.isVisible = true
+                        binding.warning.setCompoundDrawablesWithIntrinsicBounds(0, 0, 0, 0)
+                        binding.warning.setText(R.string.filesystem_record_empty)
+                        binding.button.isVisible = false
+                    } else {
+                        binding.warningContainer.isVisible = false
+                    }
                     if (record.list.size - fileSystemRecordAdapter.currentList.size > 5 * LOAD_SIZE) {
                         fileSystemRecordAdapter.setCurrentList(record.list) {
                             adapters.removeAdapter(loadingMoreAdapter)

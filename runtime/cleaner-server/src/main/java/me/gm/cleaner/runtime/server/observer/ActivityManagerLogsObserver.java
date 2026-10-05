@@ -6,6 +6,8 @@ import android.util.Log;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -20,6 +22,17 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
     private final CleanerServer mServer;
     private volatile boolean mHasAmStart = false;
     private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
+
+    /**
+     * 已被"静默丢弃"过的 app principal name 集合（去重后再记录日志）。
+     * 没有它时，一次丢包在日志上完全不可见——正是上一轮"规则建了但没重定向"
+     * 无法定位的原因。
+     */
+    private final Set<String> mUnresolvedLogged = ConcurrentHashMap.newKeySet();
+
+    /** logcat 子进程附着次数，仅用于日志留痕。 */
+    private final java.util.concurrent.atomic.AtomicInteger mLogcatAttachCount =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     public ActivityManagerLogsObserver(final CleanerServer server) {
         mServer = server;
@@ -222,6 +235,11 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
 
                 while (true) {
                     process = Runtime.getRuntime().exec(new String(logcat));
+                    // 启动留痕：本循环是进程启动事件的唯一来源，它一旦静默死掉
+                    // （exec 失败、被 SELinux 拒绝等），整条 bind mount 链路就没了触发点。
+                    Log.i("MC_REDIRECT", "[AMLogsObserver] logcat attached: attempt="
+                            + mLogcatAttachCount.incrementAndGet()
+                            + " uid=" + android.os.Process.myUid());
                     final var reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
                     for (var line = reader.readLine(); line != null; line = reader.readLine()) {
                         try {
@@ -257,8 +275,9 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                                 }
                                 final var processName = StringUtils.substring(start, startColon + 1, startSlash);
 
+                                final var mountAll = getMounter().mountForAllPackages();
                                 final String packageName;
-                                if (getMounter().mountForAllPackages()) {
+                                if (mountAll) {
                                     packageName = PackageInfoMapper.getPackageName(uid, processName);
                                 } else {
                                     packageName = PackageInfoMapper.getSrPackageName(uid, processName);
@@ -272,6 +291,26 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                                     Log.i("MC_REDIRECT", "[AMLogsObserver] Process start detected: pkg=" + packageName + " pid=" + pid + " uid=" + uid);
                                     Log.i("MC_REDIRECT", "[AMLogsObserver] Triggering bindMount for " + packageName);
                                     getMounter().bindMountAsync(packageName, pid, uid);
+                                } else if (mUnresolvedLogged.add(logFormatAppPrincipalName)) {
+                                    // 静默丢弃是本模块最危险的失效形态：不挂载、不报错、无日志，
+                                    // 用户只看到"规则建了但没重定向"。这里按 principalName 去重后
+                                    // 报一次，既能定位"为什么没挂载"，又不会在进程风暴时刷屏。
+                                    Log.w("MC_REDIRECT",
+                                            "[AMLogsObserver] start event dropped: principalName="
+                                                    + logFormatAppPrincipalName
+                                                    + " uid=" + uid
+                                                    + " processName=" + processName
+                                                    + " mountAll=" + mountAll
+                                                    + (uid < 0
+                                                    // 注意措辞：uid < 0 只表示 getUid() 拒绝返回，
+                                                    // 不能断言是"解析不出来"——按算术兜底能解出 uid、
+                                                    // 但该包没配重定向规则时同样返回 -1，
+                                                    // 那属于预期行为而非故障。上一轮被这句误导过一次。
+                                                    ? " (uid not usable: unresolvable principal name,"
+                                                    + " or package has no storage-redirect rule"
+                                                    + " — the latter is expected, not a fault)"
+                                                    : " (uid ok but package name lookup missed"
+                                                    + " — check PackageInfoMapper mapping)"));
                                 }
                             } else {
                                 // $pid:$processName/$logFormatAppPrincipalName (adj 0): stop $packageName due to from pid $pid
@@ -315,6 +354,14 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                             if (BuildConfig.DEBUG) {
                                 throw e;
                             }
+                        } catch (Throwable t) {
+                            // 单行解析失败绝不允许终止本线程：本 runnable 一旦退出，finally 会广播
+                            // ACTION_LOGCAT_SHUTDOWN 并 shutdown 执行器，观察器将**永久失效**——
+                            // 后果不只是日志缺失，而是进程启动事件全部丢失（文件系统记录永远为空，
+                            // 新启动的进程也不再触发 bindMount，存储重定向静默降级）。
+                            // 实测触发案例：PackageInfoMapper 映射表瞬时不可用导致的 NPE。
+                            Log.e("ActivityManagerLogsObserver",
+                                    "Failed to handle logcat line, skipping: " + line, t);
                         }
                     }
                     reader.close();

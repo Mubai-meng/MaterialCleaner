@@ -60,6 +60,73 @@ public class MediaProviderHooksService extends IMediaProviderHooksService.Stub {
         callback.run();
     }
 
+    // ── 应用进程（HooksBridgeProvider）存活探针 ──
+
+    /** 最近一次看护的应用进程存活探针 Binder；null 表示未看护或探针已失效。 */
+    private static volatile IBinder sAppBridgeWatchBinder;
+    private static volatile IBinder.DeathRecipient sAppBridgeWatchRecipient;
+    private static final Object sAppBridgeWatchLock = new Object();
+
+    /**
+     * 看护应用进程（{@code me.gm.cleaner}）回传的存活探针 Binder。
+     *
+     * <p>为什么需要这条反向通道：hooks 桥（HooksBridgeProvider）跑在应用进程里，
+     * 用户把应用从最近任务划掉、或 ColorOS 回收该进程时，桥对象整体被替换。
+     * 而本进程手上唯一的“桥已换新”证据就是桥进程的 Binder 死亡——
+     * 没有它，{@code sMediaProviderService} 会一直指向旧桥上已死的引用，
+     * 服务端 {@code isMediaProviderHookConnected()} 恒为 false，最终触发
+     * force-stop MediaProvider 这颗核弹（连带杀掉前台应用）。</p>
+     *
+     * <p>拿到死亡通知后调用 {@link #requestReRegister(String)} 重新走
+     * {@code register_hooks_callback}，此时 ContentProvider 会拉起新的应用进程，
+     * 新桥即可重新持有本进程的 Binder；整个过程无需重启 MediaProvider。</p>
+     *
+     * <p>兼容性：探针由新版 Provider 在注册回执里附带；旧版 Provider 不带该字段时
+     * 本方法收到 null 直接返回，行为与改动前完全一致。</p>
+     */
+    public static void watchAppBridge(IBinder appBridge) {
+        if (appBridge == null) {
+            return;
+        }
+        final IBinder current = sAppBridgeWatchBinder;
+        if (current != null && (current == appBridge || current.equals(appBridge))) {
+            // 同一个桥进程，已在看护。
+            return;
+        }
+        synchronized (sAppBridgeWatchLock) {
+            final IBinder previous = sAppBridgeWatchBinder;
+            final IBinder.DeathRecipient previousRecipient = sAppBridgeWatchRecipient;
+            if (previous != null && previousRecipient != null) {
+                try {
+                    previous.unlinkToDeath(previousRecipient, 0);
+                } catch (RuntimeException e) {
+                    Log.w("MC_REDIRECT", "[MediaProviderHooksService] unlink app bridge death recipient failed", e);
+                }
+            }
+            final IBinder.DeathRecipient recipient = () -> {
+                sAppBridgeWatchBinder = null;
+                sAppBridgeWatchRecipient = null;
+                Log.w("MC_REDIRECT", "[MediaProviderHooksService] App bridge process died, "
+                        + "re-registering hooks callback against the new bridge");
+                requestReRegister("app bridge process died");
+            };
+            try {
+                appBridge.linkToDeath(recipient, 0);
+            } catch (RemoteException e) {
+                // 桥进程在注册与 link 之间死掉了：立刻安排一次重注册，
+                // 否则会丢掉这条唯一的“桥已换新”信号。重试由
+                // BridgeRegistrationRetryPolicy 的突发预算 + 冷却探针兜底，不会失控。
+                Log.w("MC_REDIRECT", "[MediaProviderHooksService] linkToDeath on app bridge failed, "
+                        + "scheduling re-registration", e);
+                requestReRegister("app bridge died before liveness probe was armed");
+                return;
+            }
+            sAppBridgeWatchBinder = appBridge;
+            sAppBridgeWatchRecipient = recipient;
+            Log.i("MC_REDIRECT", "[MediaProviderHooksService] App bridge liveness probe armed");
+        }
+    }
+
     private void unlinkCleanerServerDeathRecipient(ICleanerServerCallback callback) {
         if (callback == null) {
             return;

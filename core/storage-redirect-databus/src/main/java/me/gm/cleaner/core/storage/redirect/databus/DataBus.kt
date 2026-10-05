@@ -131,10 +131,47 @@ object DataBus {
     @Volatile
     private var initialized = false
 
-    private val EVENT_FILE_NAME_PATTERN = Regex("^(\\d{20})-\\d+-\\d+-[0-9a-fA-F]{4}\\.json$")
+    /**
+     * 本进程内已经报告过目录准备失败的路径。
+     *
+     * MediaProvider 等非 root 进程对 /data/local/tmp 没有写权限（也不一定有权 stat），
+     * `Files.createDirectories("/data/local/tmp/cleaner")` 必然抛 AccessDeniedException。
+     * 这是**预期情形**（该进程的正路是 Binder bridge，见 HookDataBusBridge），
+     * 但历史实现每次调用都 `Log.e(..., e)`，一个进程启动就打出两条 40+ 行的完整堆栈，
+     * 反而把 native hook 的真实 lastError 淹没了。这里按路径去重，每个进程最多报一次。
+     */
+    private val reportedPrepareFailures =
+        java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
+    /** 最近一次目录准备失败的精简描述，供诊断归档读取；成功后清空。 */
+    @Volatile
+    private var lastInitFailure: String? = null
+
+    /** 最近一次目录准备失败的描述（`路径: 异常类: 消息`），从未失败过则为 null。 */
+    fun lastInitFailureOrNull(): String? = lastInitFailure
+
+    // 事件文件名固定前缀：20 位十进制序号 + '-' + 时间戳 + pid + 4 位随机十六进制 + ".json"
+    private const val EVENT_SEQ_DIGITS = 20
+
+    /**
+     * 文件名安全化用的正则。
+     *
+     * 提到文件级常量：原先写在 `createTempFileIn` 内部，每次调用都要
+     * `Pattern.compile` 一次；该函数在每次事件写入路径上会被调用（写事件文件、写游标）。
+     */
+    private val UNSAFE_FILENAME_CHARS = Regex("[^A-Za-z0-9._-]")
 
     // 进程内序号下界；真实事件序号会通过 counters/ 持久化分配。
     private val eventSeqCounter = AtomicLong(0)
+
+    /**
+     * 每个队列已分配到的最大序号（含本进程分配）。
+     *
+     * 用于在 `counters/<queue>.seq` 被外部清除或出现回退时判定"需要重建下界"，
+     * 从而让正常写入路径**不必**再读游标、更不必 `listFiles()` 扫描整个事件目录。
+     */
+    private val queueSeqFloor =
+        java.util.concurrent.ConcurrentHashMap<String, AtomicLong>()
 
     data class SnapshotHealth(
         val name: String,
@@ -186,6 +223,7 @@ object DataBus {
                 }
             }
             initialized = true
+            lastInitFailure = null
             Log.i(TAG, "DataBus initialized at $BUS_ROOT")
             return true
         } catch (e: Exception) {
@@ -490,13 +528,23 @@ object DataBus {
         makeWorldAccessible(dir, executable = true)
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Failed to prepare directory: ${dir.path}", e)
+        lastInitFailure = "${dir.path}: ${e.javaClass.simpleName}: ${e.message}"
+        if (reportedPrepareFailures.add(dir.path)) {
+            // 每个进程、每个路径只报一次完整堆栈：保持异常原文可查，
+            // 又不让"非 root 进程无权建 /data/local/tmp 目录"这一预期失败刷屏。
+            Log.w(
+                TAG,
+                "DataBus directory not writable from this process (uid=${Process.myUid()}), " +
+                        "falling back to Binder bridge: ${dir.path}",
+                e,
+            )
+        }
         false
     }
 
     private fun createTempFileIn(dir: File, prefix: String, suffix: String): File {
         val safePrefix = prefix
-            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .replace(UNSAFE_FILENAME_CHARS, "_")
             .take(120)
             .padEnd(3, '_')
         return Files.createTempFile(dir.toPath(), safePrefix, suffix).toFile()
@@ -572,12 +620,41 @@ object DataBus {
         }
     }
 
+    /**
+     * 分配下一个事件序号。
+     *
+     * ## 不变式（快路径的依据）
+     * 调用方在持有 `counters/<queue>.seq` 文件锁的前提下，**先写计数器、再写事件文件**。
+     * 因此计数器里的值永远 ≥ 目录中任何已存在事件文件的序号 —— 只要它是单调不减的，
+     * 新序号就一定不会与既有文件冲突，也不会落在游标之前。
+     *
+     * ## 快路径（绝大多数情况）
+     * 直接信任计数器文件。**不读游标、不 `listFiles()`**。原实现每写一个事件都要
+     * 读一次游标文件、并对整个事件目录做 `listFiles()` + 逐文件 stat + 正则解析
+     * （稳态上限 2000 个文件），是本项目最重的热路径开销。
+     *
+     * ## 慢路径（罕见）
+     * 仅在计数器文件尚未建立（首次写入）、被外部清除，或出现回退时进入：
+     * 用游标 + 一次目录扫描重建下界，保证不漏读也不错序。
+     * 触发时会打一条 WARN，便于在日志中确认这是异常而非常态。
+     */
     private fun nextEventSequence(queue: String, raf: RandomAccessFile): Long {
         val storedSeq = readCounterValue(raf)
+        val processSeq = eventSeqCounter.incrementAndGet()
+        val floor = queueSeqFloor.getOrPut(queue) { AtomicLong(0L) }
+
+        if (storedSeq > 0L && storedSeq >= floor.get()) {
+            floor.set(storedSeq)
+            return maxOf(storedSeq + 1, processSeq)
+        }
+
         val cursorSeq = parseEventSequence(readCursor(queue)) ?: 0L
         val queuedSeq = maxEventSequence(queue)
-        val processSeq = eventSeqCounter.incrementAndGet()
-        return maxOf(storedSeq + 1, cursorSeq + 1, queuedSeq + 1, processSeq)
+        val next = maxOf(storedSeq + 1, cursorSeq + 1, queuedSeq + 1, processSeq)
+        floor.set(next)
+        Log.w(TAG, "event sequence floor rebuilt for $queue: stored=$storedSeq " +
+                "cursor=$cursorSeq queued=$queuedSeq -> next=$next")
+        return next
     }
 
     private fun readCounterValue(raf: RandomAccessFile): Long {
@@ -630,6 +707,13 @@ object DataBus {
         }
     }
 
+    /**
+     * 事件目录中已存在的最大序号 —— **O(n)**，仅供序号下界重建的慢路径使用。
+     *
+     * 不要把它放回常规写入路径：它要对目录里每个文件做一次 `stat` 并解析文件名，
+     * 实测稳态目录规模上限为 `EVENT_QUEUE_MAX_FILES`，即每写一个事件就要扫描上千个文件。
+     * 常规路径见 [nextEventSequence] 的快路径。
+     */
     private fun maxEventSequence(queue: String): Long {
         val eventDir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
         if (!eventDir.exists()) return 0L
@@ -641,11 +725,25 @@ object DataBus {
             ?: 0L
     }
 
-    private fun parseEventSequence(name: String): Long? =
-        EVENT_FILE_NAME_PATTERN.matchEntire(name)
-            ?.groupValues
-            ?.get(1)
-            ?.toLongOrNull()
+    /**
+     * 解析事件文件名前 20 位的十进制序号。
+     *
+     * 原实现用 `Regex("^(\\d{20})-...")` + `matchEntire`，而 `maxEventSequence()`
+     * 会对目录里**每个**文件调用一次 —— 稳态下即每写一个事件触发上千次正则匹配。
+     * 序号是固定长度的十进制前缀，直接按下标校验并 `toLongOrNull()` 等价且快一个数量级。
+     *
+     * 尾部（时间戳/pid/随机十六进制）不做严格校验：调用方只会把它用于
+     * 已由本类写出的事件文件名，以及游标值；宽松解析不会放宽任何安全边界。
+     */
+    private fun parseEventSequence(name: String): Long? {
+        if (name.length < EVENT_SEQ_DIGITS + 1) return null
+        if (name[EVENT_SEQ_DIGITS] != '-') return null
+        for (i in 0 until EVENT_SEQ_DIGITS) {
+            val c = name[i]
+            if (c < '0' || c > '9') return null
+        }
+        return name.substring(0, EVENT_SEQ_DIGITS).toLongOrNull()
+    }
 
     fun deleteLeaseFile(category: String, name: String): Boolean {
         if (!isValidLeaseCategory(category)) return false
@@ -671,6 +769,77 @@ object DataBus {
             Log.e(TAG, "Failed to read cursor: $queue", e)
             ""
         }
+    }
+
+    /**
+     * 队列的**真实待消费深度**：文件名严格大于持久化游标的事件数。
+     *
+     * `events/<queue>/` 目录里的文件只被游标越过、**从不删除**，所以目录文件数是
+     * “累计写入量”，不是积压量。直接拿它当积压量会产生永远为真的告警：
+     * 实测 `filesystem=561 / consumed=561` 且 `cursors/filesystem.cursor` 正好等于
+     * 目录里最新的 `...000561-*.json`，队列其实已经清空，却每 60s 报一次 backlog。
+     */
+    fun pendingEventCount(queue: String): Int {
+        if (!isValidEventQueue(queue)) return 0
+        val eventDir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
+        if (!Files.isDirectory(eventDir.toPath(), LinkOption.NOFOLLOW_LINKS)) return 0
+        val cursor = readCursor(queue)
+        return eventDir.listFiles()
+            ?.count {
+                isRegularFileNoFollow(it) && it.name.endsWith(".json") && it.name > cursor
+            }
+            ?: 0
+    }
+
+    /**
+     * 队列目录累计文件数（含已消费，仅用于诊断展示，不等于积压）。
+     */
+    fun archivedEventCount(queue: String): Int {
+        if (!isValidEventQueue(queue)) return 0
+        return countJsonFiles("$BUS_ROOT/$DIR_EVENTS/$queue")
+    }
+
+    /**
+     * 清理队列目录中**游标及之前**的已消费事件文件。
+     *
+     * 为什么需要：游标机制让文件永不删除，`events/<queue>/` 会随运行时间无界增长
+     * （实测 10:52~11:03 的 11 分钟内该目录已有 561 个文件）。每个消费者每轮都会
+     * 对该目录做 `listFiles()`（`readEventFiles` / `maxEventSequence`），文件数膨胀
+     * 会直接拖慢发布与消费路径。
+     *
+     * 安全性：只删除 `name <= cursor` 的文件 —— 游标是唯一读取起点，这些条目
+     * 不可能再被读出，删除既不会造成重复也不会造成丢失。`consumed/` 归档仍按
+     * 自身的 TTL / 上限保留审计副本。
+     *
+     * @param keepAtMost 低水位：文件数不超过该值时不做任何删除（避免高频 unlink）
+     * @return 实际删除的文件数
+     */
+    fun pruneConsumedEvents(queue: String, keepAtMost: Int): Int {
+        if (!isValidEventQueue(queue)) return 0
+        val eventDir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
+        if (!Files.isDirectory(eventDir.toPath(), LinkOption.NOFOLLOW_LINKS)) return 0
+
+        // 只用 list() 取文件名：listFiles() 会对每个条目做一次 stat，
+        // 而上限判定与游标比较都只需要名字。旧实现是"先 listFiles + 逐文件 stat
+        // + 全量排序，再判断是否超过低水位"，即在**无需清理**的绝大多数轮次里
+        // 也付了 O(n log n) + n 次 stat。
+        val names = eventDir.list() ?: return 0
+        if (names.isEmpty() || names.size <= keepAtMost) return 0
+
+        val cursor = readCursor(queue)
+        if (cursor.isEmpty()) return 0
+
+        // 待删集合 = 文件名 <= cursor（与旧的"排序后 break 到 name > cursor"等价）。
+        val consumed = names.filter { it.endsWith(".json") && it <= cursor }
+        if (consumed.isEmpty()) return 0
+
+        // 只对待删候选做类型校验（防符号链接/目录），不扫全目录。
+        var deleted = 0
+        for (name in consumed.sorted()) {
+            val file = File(eventDir, name)
+            if (isRegularFileNoFollow(file) && file.delete()) deleted++
+        }
+        return deleted
     }
 
     private fun sanitizeFileName(value: String): String =
@@ -798,19 +967,20 @@ object DataBus {
             ?: 0
     }
 
+    /**
+     * 设置文件/目录的跨进程可访问权限。
+     *
+     * **只发一次 `chmod`。** 末尾的 `Os.chmod(path, mode)` 用的是**绝对 mode**，
+     * 会把之前任何 `File.setReadable/setWritable/setExecutable` 的结果完全覆盖；
+     * 而那些调用每一个内部都要 `stat` + `chmod`（2 次系统调用），在绝对 chmod 之下
+     * 属纯冗余。本函数在每次事件写入路径上被调用两次（计数器文件 + 事件文件），
+     * 去掉冗余调用可让**每个事件少 6~8 次系统调用**。
+     *
+     * 唯一的语义差异：`Os.chmod` 失败时旧实现还残留 setXxx 的部分效果作为兜底。
+     * 该路径仅在非 root 进程调用时出现（此时 setXxx 同样会失败），
+     * 失败仍会打 WARN，行为可观测。
+     */
     private fun makeWorldAccessible(file: File, executable: Boolean, writable: Boolean = true) {
-        file.setReadable(true, false)
-        if (writable) {
-            file.setWritable(true, false)
-        } else {
-            file.setWritable(false, false)
-            file.setWritable(true, true)
-        }
-        if (executable) {
-            file.setExecutable(true, false)
-        } else {
-            file.setExecutable(false, false)
-        }
         val mode = if (executable) {
             directoryMode(file)
         } else if (writable) {

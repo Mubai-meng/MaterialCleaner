@@ -93,8 +93,14 @@
             android:title="@string/record_external_app_specific_storage_title"
             app:iconSpaceReserved="false" />
 
+        <!--
+          决策 D1 的子开关：是否连 fuse_bpf_fill_entries 的"移除"语义一起拦截。
+          刻意**不加** android:dependency：该属性会让本开关在其父开关
+          （记录外部应用专属存储空间，其自身又依赖"记录共享存储空间"）关闭时
+          被置灰且完全不可点击，用户既无法查看说明也无法预先设定取值。
+          依赖关系改由 summary 文案显式说明，取值始终可编辑并由服务端按需使用。
+        -->
         <SwitchPreferenceCompat
-            android:dependency="@string/record_external_app_specific_storage_key"
             android:key="@string/fuse_bpf_block_all_key"
             android:summary="@string/fuse_bpf_block_all_summary"
             android:title="@string/fuse_bpf_block_all_title"

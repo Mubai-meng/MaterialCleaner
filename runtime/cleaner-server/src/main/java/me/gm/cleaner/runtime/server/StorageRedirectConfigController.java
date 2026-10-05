@@ -42,10 +42,16 @@ public class StorageRedirectConfigController {
     public void onStorageRedirectChanged() {
         final var previousPackages = currentStorageRedirectPackages();
         ServicePreferences.INSTANCE.invalidateSrCache();
-        PackageInfoMapper.invalidate();
-        // 同 M1：refreshPolicy 前置 → VFS 先切 → 发布同一份策略快照 → Hook 异步跟进。
+        // 顺序治理（关键）：策略刷新必须**先于**映射表失效。
+        // PackageInfoMapper 的映射表是惰性重建的——下一次 getUid() 调用才真正建表，
+        // 而建表读的是当时的 VfsRuntimeConfigStore 策略。如果先 invalidate 再 refreshPolicy，
+        // 两者之间任何一次 getUid()（logcat 观察线程在每个进程启动时都会调用）
+        // 都会用**旧**包集合建表并把 sInitialized 置回 true，此后该包永远无法解析，
+        // 进程启动事件被静默丢弃、bind mount 不再触发，且全程不产生任何日志。
         final me.gm.cleaner.core.storage.redirect.domain.RedirectPolicySnapshot snapshot =
                 VfsRuntimeConfigStore.INSTANCE.refreshPolicy();
+        PackageInfoMapper.invalidate();
+        // 同 M1：refreshPolicy 前置 → VFS 先切 → 发布同一份策略快照 → Hook 异步跟进。
         remountAffectedStorageRedirectPackages(previousPackages);
         SnapshotPublisher.INSTANCE.publishStorageRedirectPolicySet(snapshot);
         MediaProviderHookGateway.refreshPolicyFromDataBus();

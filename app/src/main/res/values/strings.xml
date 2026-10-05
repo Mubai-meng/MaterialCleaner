@@ -108,7 +108,7 @@
     <string name="record_external_app_specific_storage_title">(Experimental) Record file operations in external app-specific storage</string>
     <string name="record_external_app_specific_storage_summary">Enabling apps to access their specific storage via FUSE, which will cause a significant performance regression.</string>
     <string name="fuse_bpf_block_all_title">(Experimental) Fully intercept FUSE BPF calls (including removal)</string>
-    <string name="fuse_bpf_block_all_summary">Off (recommended): only the BPF backing “install” is intercepted, while the platform’s own “remove” is passed through — the smallest intervention, and no kernel BPF program is left behind. On: the “remove” is intercepted as well, fully replicating the legacy fuse_bpf_install behavior — but a kernel BPF program may then linger on Android/data package directories, letting that subtree bypass FUSE and escape redirection.</string>
+    <string name="fuse_bpf_block_all_summary">Off (recommended): only the BPF backing “install” is intercepted, while the platform’s own “remove” is passed through — the smallest intervention, and no kernel BPF program is left behind. On: the “remove” is intercepted as well, fully replicating the legacy fuse_bpf_install behavior — but a kernel BPF program may then linger on Android/data package directories, letting that subtree bypass FUSE and escape redirection.\nThis switch only takes effect while \"(Experimental) Record file operations in external app-specific storage\" is enabled.</string>
     <string name="upsert_title">Save data using upsert</string>
     <string name="upsert_summary">Only keep the latest one for duplicate data.</string>
     <string name="storage_redirect_prompt">Storage Redirect Prompt</string>
@@ -332,6 +332,7 @@
     <string name="filesystem_record_enable">Enable file system record</string>
     <string name="filesystem_record_database_too_large">The database file is too large. Loading it may cause the app to malfunction.</string>
     <string name="filesystem_record_database_load_anyway">Load anyway</string>
+    <string name="filesystem_record_empty">No records yet\nNo file operation has been captured so far. Start the service and make sure \"Record file operations in shared storage\" is enabled, then read or write files in another app to generate records.</string>
     <string name="filesystem_record_prune_records">Prune records</string>
     <string name="filesystem_record_database_size">%1$d records, database size %2$s.</string>
     <string name="filesystem_record_clear">Delete all records</string>

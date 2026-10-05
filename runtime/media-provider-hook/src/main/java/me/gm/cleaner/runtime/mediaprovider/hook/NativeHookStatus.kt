@@ -464,12 +464,14 @@ object NativeHookStatus {
         hookedMethods: List<String>,
         unknownMethods: List<String>,
         failedMethods: List<String>,
+        skippedMethods: List<String>,
     ) {
         fuseJavaGateStatus = FuseJavaGateStatus(
             discoveredCount = discoveredCount,
             hookedMethods = hookedMethods,
             unknownMethods = unknownMethods,
             failedMethods = failedMethods,
+            skippedMethods = skippedMethods,
         )
         publishSnapshot()
     }
@@ -808,15 +810,18 @@ object NativeHookStatus {
         val hookedMethods: List<String> = emptyList(),
         val unknownMethods: List<String> = emptyList(),
         val failedMethods: List<String> = emptyList(),
+        val skippedMethods: List<String> = emptyList(),
     ) {
         fun toJson(): JSONObject = JSONObject().apply {
             put("discoveredCount", discoveredCount)
             put("hookedCount", hookedMethods.size)
             put("unknownCount", unknownMethods.size)
             put("failedCount", failedMethods.size)
+            put("skippedCount", skippedMethods.size)
             put("hookedMethods", JSONArray(hookedMethods))
             put("unknownMethods", JSONArray(unknownMethods))
             put("failedMethods", JSONArray(failedMethods))
+            put("skippedMethods", JSONArray(skippedMethods))
         }
     }
 }

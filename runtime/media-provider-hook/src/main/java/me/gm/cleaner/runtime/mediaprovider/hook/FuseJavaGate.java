@@ -84,13 +84,15 @@ public class FuseJavaGate {
         final List<String> hookedMethods = new ArrayList<>();
         final List<String> unknownMethods = new ArrayList<>();
         final List<String> failedMethods = new ArrayList<>();
+        final List<String> skippedMethods = new ArrayList<>();
 
         for (final DiscoveredMethod dm : discovered) {
-            final BehaviorHandler handler = registry.lookup(dm.method.getName());
-            if (handler == null) {
+            final Match match = registry.lookup(dm.method.getName());
+            if (match == null) {
                 unknownMethods.add(dm.method.getName() + " " + Arrays.toString(dm.method.getParameterTypes()));
                 continue;
             }
+            final BehaviorHandler handler = match.handler;
             // 语义门：仅 rename 行为需要第二路径，其余行为即使有两个 String 也不标 path2。
             // 与 BehaviorRegistry 的 "rename" 启发式保持一致（精确 renameForFuse 亦含该子串）。
             final boolean needPath2 = dm.method.getName().toLowerCase(Locale.ROOT).contains("rename");
@@ -110,6 +112,28 @@ public class FuseJavaGate {
                 continue;
             }
             final String signature = dm.method.getName() + " " + Arrays.toString(dm.method.getParameterTypes());
+
+            // ── 语义门（uid 必需）──
+            // uid 是事件归属（packageName）与只读规则判定的**唯一**依据。启发式匹配只是
+            // 按方法名猜测，若签名里连一个可静态定位的 uid 参数都没有，resolveUid 的运行时
+            // 回退（扫描 args 中 >= 10000 的 int）也必然失败，于是：
+            //   - fileOp / accessCheck / multiArgConsistency：每次调用 Log.w("cannot find uid")
+            //     后丢弃事件 —— 纯死 hook + 日志洪泛；
+            //   - renameOp：path2Index = -1 时先对 param.args[-1] 取值，直接抛 AIOOBE，
+            //     被 GuardedHook 兜住后打一整条错误栈。
+            // 实测 Android 17（一加 15 / ColorOS 17）上 25 个候选中 17 个属于这类内部维护
+            // 方法（*ForFuseRename*、handleDeletedRowForFuse、markPathAsDeletedAndInvalidateFuseDentry、
+            // insertFileForFuse、onFileCreatedForFuse …），全部是死 hook，
+            // 只会吃掉 ColorOS 每进程约 300 行的日志配额。
+            //
+            // 精确注册表条目不受本门限制：它们已人工核对签名语义，且当前 ROM 上全部能静态定位 uid。
+            if (!match.exact && roles.uidIndex < 0) {
+                // match.how 自身已带来源前缀（"heuristic:\"delete\""），此处不可再拼一次
+                // "heuristic "，否则快照里会出现 [heuristic heuristic:"delete"]。
+                skippedMethods.add(signature + " [" + match.how + "]");
+                continue;
+            }
+
             try {
                 installHook(dm.method, handler, roles);
                 hookedMethods.add(signature);
@@ -123,17 +147,45 @@ public class FuseJavaGate {
         for (final String s : hookedMethods) {
             Log.i("MC_REDIRECT", "[FuseJavaGate] hooked " + s);
         }
-        for (final String s : unknownMethods) {
-            Log.w("MC_REDIRECT", "[FuseJavaGate] UNKNOWN FUSE method: " + s);
+        // 未知方法合并成一行。逐条 WARN 在 ColorOS 上会吃掉每进程日志配额
+        // （LOG_FLOWCTRL ≈300 行），反而淹没真正有用的日志；实测 Android 17 上
+        // 每次 MediaProvider 启动都会一次刷出 14~15 条。完整签名（含参数类型）
+        // 仍由 NativeHookStatus.markFuseJavaGateScanned 保存，诊断包内可见。
+        if (!unknownMethods.isEmpty()) {
+            Log.w("MC_REDIRECT", "[FuseJavaGate] UNKNOWN FUSE methods ("
+                    + unknownMethods.size() + ", full signatures in diagnostic archive): "
+                    + methodNamesOnly(unknownMethods));
+        }
+        if (!skippedMethods.isEmpty()) {
+            Log.w("MC_REDIRECT", "[FuseJavaGate] SKIPPED FUSE methods ("
+                    + skippedMethods.size() + ", heuristic match without uid parameter): "
+                    + methodNamesOnly(skippedMethods));
         }
         for (final String s : failedMethods) {
             Log.e("MC_REDIRECT", "[FuseJavaGate] FAILED FUSE method: " + s);
         }
         Log.i("MC_REDIRECT", "[FuseJavaGate] initFuseHooks complete: "
                 + hookedMethods.size() + " hooked, " + unknownMethods.size()
-                + " unknown, " + failedMethods.size() + " failed");
+                + " unknown, " + skippedMethods.size() + " skipped(no uid), "
+                + failedMethods.size() + " failed");
         NativeHookStatus.INSTANCE.markFuseJavaGateScanned(
-                discovered.size(), hookedMethods, unknownMethods, failedMethods);
+                discovered.size(), hookedMethods, unknownMethods, failedMethods, skippedMethods);
+    }
+
+    /**
+     * 把 "方法名 参数类型数组" 形式的签名列表压成只含方法名的一行，
+     * 供汇总日志使用（完整签名进诊断快照）。
+     */
+    private static String methodNamesOnly(final List<String> signatures) {
+        final StringBuilder names = new StringBuilder();
+        for (final String s : signatures) {
+            if (names.length() > 0) {
+                names.append(", ");
+            }
+            final int space = s.indexOf(' ');
+            names.append(space > 0 ? s.substring(0, space) : s);
+        }
+        return names.toString();
     }
 
     /**
@@ -224,6 +276,15 @@ public class FuseJavaGate {
      */
     private BehaviorHandler renameOp() {
         return (param, roles, methodName) -> {
+            // path2Index < 0 说明签名里没有第二个路径（例如厂商内部辅助方法）。
+            // 旧实现会直接读 param.args[-1] → AIOOBE，被 GuardedHook 兜住后打一整条
+            // 错误栈；这里提前返回，保持"永不阻断文件系统操作"的约定。
+            if (roles.path2Index < 0 || roles.path2Index >= param.args.length) {
+                Log.w("MC_REDIRECT", "[FuseJavaGate] " + methodName
+                        + " renameOp needs a second path but path2Index=" + roles.path2Index
+                        + ", skipping");
+                return;
+            }
             final String oldPath = (String) param.args[roles.pathIndex];
             final String newPath = (String) param.args[roles.path2Index];
             final int uid = resolveUid(param, roles, methodName);
@@ -444,21 +505,21 @@ public class FuseJavaGate {
          * 查找方法名对应的行为模板。
          *
          * @param methodName 方法名（不含包名）
-         * @return 行为模板，或 null 如果无法匹配
+         * @return 匹配结果（含来源标记），或 null 如果无法匹配
          */
-        BehaviorHandler lookup(final String methodName) {
+        Match lookup(final String methodName) {
             final String normalizedName = methodName.toLowerCase(Locale.ROOT);
             // 1. 精确匹配
             final BehaviorHandler exact = exactRegistry.get(normalizedName);
             if (exact != null) {
-                return exact;
+                return new Match(exact, true, "exact");
             }
             // 2. 启发式回退
             for (final HeuristicRule rule : heuristicRules) {
                 if (rule.matches(normalizedName)) {
                     Log.i("MC_REDIRECT", "[FuseJavaGate] heuristic match: " + methodName
                             + " (rule: \"" + rule.substring + "\")");
-                    return rule.handler;
+                    return new Match(rule.handler, false, "heuristic:\"" + rule.substring + "\"");
                 }
             }
             return null;
@@ -502,6 +563,26 @@ public class FuseJavaGate {
 
         DiscoveredMethod(Method method) {
             this.method = method;
+        }
+    }
+
+    /**
+     * BehaviorRegistry 的匹配结果 —— 除 handler 外还携带"匹配来源"。
+     *
+     * 精确注册表条目是人工核对过的真实用户态入口；启发式匹配只是按方法名猜测，
+     * 可信度不同。安装前的 uid 语义门只对启发式匹配生效（见 {@link #initFuseHooks}）。
+     */
+    private static class Match {
+        final BehaviorHandler handler;
+        /** true = 命中精确注册表；false = 启发式猜测 */
+        final boolean exact;
+        /** 命中说明，用于日志与状态快照 */
+        final String how;
+
+        Match(BehaviorHandler handler, boolean exact, String how) {
+            this.handler = handler;
+            this.exact = exact;
+            this.how = how;
         }
     }
 

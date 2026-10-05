@@ -43,6 +43,22 @@ public class HooksBridgeProvider extends ContentProvider {
     private static final String METHOD_GET_HOOKS_SERVICE = "get_hooks_service";
     private static final String EXTRA_BINDER = "binder";
     private static final String EXTRA_REGISTERED = "registered";
+    private static final String EXTRA_APP_BRIDGE = "app_bridge";
+
+    /**
+     * 回传给 MediaProvider 侧的“应用进程存活探针” Binder。
+     *
+     * <p>MediaProvider 侧对它 linkToDeath，从而在**本应用进程**被划掉 / 回收时
+     * 第一时间重新注册 hooks 回调。缺少这条反向死亡通知时，应用进程换新后
+     * MediaProvider 无从得知桥已被替换（它手上的 {@code mCleanerServerBinder}
+     * 指向 root server，不受影响），服务端只好靠 force-stop MediaProvider 逼它重启，
+     * 而那次 force-stop 会连累前台应用（实测 10:54:50 与 11:02:13 两次
+     * “划掉 me.gm.cleaner → force-stop media.module → 前台 com.coolapk.market 死亡”）。</p>
+     *
+     * <p>必须是进程生命周期内稳定的同一实例：MediaProvider 每次重注册都会重新
+     * link 一次死亡通知，实例不稳定会导致重复 link。</p>
+     */
+    private static final IBinder sAppBridgeWatchBinder = new Binder();
     private static final int AID_USER_OFFSET = 100000;
     private static final String[] MEDIA_PROVIDER_PACKAGES = {
             "com.android.providers.media",
@@ -437,6 +453,11 @@ public class HooksBridgeProvider extends ContentProvider {
                 }
                 Bundle result = new Bundle();
                 result.putBoolean(EXTRA_REGISTERED, registered);
+                if (registered) {
+                    // 附带应用进程存活探针：MediaProvider 侧 linkToDeath 后，
+                    // 本进程一旦死亡即可自动重注册（见 sAppBridgeWatchBinder 注释）。
+                    result.putBinder(EXTRA_APP_BRIDGE, sAppBridgeWatchBinder);
+                }
                 return result;
             }
             case METHOD_GET_HOOKS_SERVICE: {

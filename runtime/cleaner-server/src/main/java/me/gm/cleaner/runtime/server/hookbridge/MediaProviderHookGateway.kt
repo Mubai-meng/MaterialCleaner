@@ -23,6 +23,24 @@ object MediaProviderHookGateway {
     @Volatile
     private var lastMountSignalTimestamp: Long = 0L
 
+    /**
+     * 桥（应用进程 HooksBridgeProvider）成功建立的单调代数，每成功重连一次 +1。
+     *
+     * 用途：桥一旦换代，新桥手上必然没有 MediaProvider 的 Binder，
+     * `isMediaProviderHookConnected()` 会立刻返回 false。这是**过渡态**，
+     * 必须与"MediaProvider 侧真的没注册"区分开，否则恢复策略会把每次
+     * 应用进程回收都当成故障去 force-stop MediaProvider。
+     */
+    @Volatile
+    private var bridgeConnectionEpoch: Long = 0L
+
+    fun bridgeConnectionEpoch(): Long = bridgeConnectionEpoch
+
+    /** 由 [CleanerHooksClient] 在每次成功建立桥连接后调用。 */
+    fun onBridgeConnected() {
+        bridgeConnectionEpoch++
+    }
+
     fun start(server: CleanerServer) {
         CleanerHooksClient.onStart(server)
     }
@@ -128,11 +146,13 @@ object MediaProviderHookGateway {
     }
 
     /**
-     * Binder 进程死亡时重置 native 状态缓存。
+     * 丢弃 configured_mount_points snapshot generation 缓存，使其下次强制重读 DataBus。
      *
-     * 使后续的恢复路径从零开始重新建立 native 挂载点，
-     * 避免残留的 DataBus 缓存（snapshot generation）在 Binder 死后
-     * 导致 collectStatus 产生误导性的 STALE 状态评估。
+     * 注意：**不要**在桥 Binder 死亡时调用。桥的宿主是 me.gm.cleaner 应用进程，
+     * 它死亡完全不影响 MediaProvider 进程内的 native 挂载点；当时清零只会让
+     * `nativeHookHealthCheck` 出现一次虚假的 "nativeGen=0 < snapshotGen=N"。
+     * 当前唯一调用点是恢复策略在**真的**决定 force-stop MediaProvider 之前，
+     * 用于保证 MediaProvider 重启后重新计算 generation 时不会读到旧缓存值。
      */
     fun resetNativeStateForReconnect() {
         cachedMountPointsGeneration = 0L

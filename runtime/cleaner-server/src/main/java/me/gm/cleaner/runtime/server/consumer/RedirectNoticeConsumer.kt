@@ -51,7 +51,7 @@ object RedirectNoticeConsumer {
 
         var consumed = 0
         var skipped = 0
-        var failed = false
+        var quarantined = 0
         for (eventFile in events) {
             try {
                 val eventJson = eventFile.content
@@ -112,17 +112,28 @@ object RedirectNoticeConsumer {
                 consumed++
                 advanceCursor(eventFile)
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to consume redirect notice ${eventFile.name}, keeping cursor", e)
-                failed = true
-                break
+                // 与 FileSystemEventConsumer 同样的毒丸处理。
+                // 提示事件是 5 分钟 TTL 的瞬时 UI 提示，不值得为它重试：
+                // 直接结清并推进游标，否则一个坏事件会让整条 notice 队列永久卡死
+                // （表现为 eventQueueRedirectNotice 只增不减 + backlog 告警）。
+                val settled = EventDeadLetter.quarantine(
+                    DataBus.EVENT_REDIRECT_NOTICE,
+                    eventFile.name,
+                    "consume failed",
+                    e,
+                )
+                if (settled == EventDeadLetter.Settlement.QUARANTINED) {
+                    quarantined++
+                }
+                advanceCursor(eventFile)
             }
         }
-        if (failed) {
-            lastSignalTimestamp = 0L
-        }
 
-        if (consumed > 0 || skipped > 0) {
-            Log.d(TAG, "Consumed $consumed, skipped $skipped, cursor='$cursor'")
+        if (consumed > 0 || skipped > 0 || quarantined > 0) {
+            Log.d(
+                TAG,
+                "Consumed $consumed, skipped $skipped, quarantined $quarantined, cursor='$cursor'",
+            )
         }
         return consumed
     }

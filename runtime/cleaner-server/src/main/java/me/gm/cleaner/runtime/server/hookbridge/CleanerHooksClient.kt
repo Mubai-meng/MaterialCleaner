@@ -64,6 +64,8 @@ object CleanerHooksClient {
         binder = newBinder
         service = newService
         deathRecipient = newDeathRecipient
+        // 桥换代：通知网关递增代数，供恢复策略区分"过渡态"与"真故障"。
+        MediaProviderHookGateway.onBridgeConnected()
         Log.i("MC_REDIRECT", "[CleanerHooksClient] $reason: connected")
         return true
     }

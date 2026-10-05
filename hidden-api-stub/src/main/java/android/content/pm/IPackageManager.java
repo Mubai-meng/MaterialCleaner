@@ -41,6 +41,17 @@ public interface IPackageManager extends IInterface {
     ParceledListSlice<PackageInfo> getInstalledPackages(int flags, int userId)
             throws RemoteException;
 
+    /**
+     * @deprecated Android 17 (API 37) 把该重载的返回类型从
+     * {@code ParceledListSlice} 改成了 {@code PackageInfoList}
+     * （{@code PackageInfoList extends ParceledListSlice<PackageInfo>}），
+     * 因此这里的声明在 API 37 上不再匹配，直连调用会抛
+     * {@code NoSuchMethodError: No interface method
+     * getInstalledPackages(JI)Landroid/content/pm/ParceledListSlice;}。
+     * <p>
+     * 桩保持旧签名以维持 API 33~36 的直连快路径；
+     * API 37 由 {@code api.SystemService#getInstalledPackages} 反射兜底。
+     */
     @RequiresApi(33)
     ParceledListSlice<PackageInfo> getInstalledPackages(long flags, int userId)
             throws RemoteException;
@@ -48,6 +59,10 @@ public interface IPackageManager extends IInterface {
     ParceledListSlice<ApplicationInfo> getInstalledApplications(int flags, int userId)
             throws RemoteException;
 
+    /**
+     * Android 17 (API 37) 未变更该重载（仍返回 {@code ParceledListSlice}），
+     * 与 {@link #getInstalledPackages(long, int)} 的变化形成对照。
+     */
     @RequiresApi(33)
     ParceledListSlice<ApplicationInfo> getInstalledApplications(long flags, int userId)
             throws RemoteException;

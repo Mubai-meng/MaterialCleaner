@@ -10,6 +10,7 @@ final class HookBridgeRegistrar {
     private static final String TAG = "HookBridgeRegistrar";
     private static final Uri HOOKS_URI = Uri.parse("content://me.gm.cleaner.hooks_bridge");
     private static final String EXTRA_REGISTERED = "registered";
+    private static final String EXTRA_APP_BRIDGE = "app_bridge";
 
     private HookBridgeRegistrar() {
     }
@@ -33,6 +34,12 @@ final class HookBridgeRegistrar {
                 return false;
             }
             NativeHookStatus.INSTANCE.markBridgeRegistered();
+            // 把 Provider 回传的应用进程存活探针交给 MediaProviderHooksService 看护：
+            // 应用进程被划掉 / 回收时，本进程会在桥换新后立刻重新注册，
+            // 从而避免服务端因“桥换新但 MediaProvider 未重注册”而 force-stop MediaProvider。
+            // 旧版 Provider 不回传该字段 → getBinder 返回 null → 行为与改动前一致。
+            MediaProviderHooksService.watchAppBridge(
+                    result == null ? null : result.getBinder(EXTRA_APP_BRIDGE));
             return true;
         } catch (Throwable e) {
             if (e instanceof VirtualMachineError) {

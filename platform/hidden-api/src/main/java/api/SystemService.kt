@@ -234,12 +234,73 @@ object SystemService {
         }
     }
 
+    /**
+     * API 33 起 `getInstalledPackages` 增加了 `long flags` 重载；Android 17（API 37）
+     * 又把该重载的**返回类型**由 `ParceledListSlice` 改成 `PackageInfoList`
+     * （`PackageInfoList extends ParceledListSlice<PackageInfo>`）。
+     *
+     * JVM 方法描述符包含返回类型，所以桩里按旧签名编译出的调用点
+     * `getInstalledPackages(JI)Landroid/content/pm/ParceledListSlice;`
+     * 在 API 37 设备上首次链接即抛 `NoSuchMethodError`
+     * （实测：DataAppDirObserver / PackageReceiver / PackageInfoMapper /
+     * CleanerService.getInstalledPackages 全线失败，getInstalledPackagesNoThrow 退化成空列表）。
+     *
+     * 修复策略：保留 API 33~36 的直连快路径，一旦观察到 `NoSuchMethodError` 就永久
+     * 切到反射调用。反射按"方法名 + 形参类型"解析，与返回类型无关；且
+     * `PackageInfoList` 是 `ParceledListSlice` 子类，返回值可直接沿用原返回类型，
+     * 因此 API 33~37 全区间可用，且不破坏 API 34 行为。
+     */
+    @Volatile
+    private var directGetInstalledPackagesUsable = true
+
+    private val getInstalledPackagesLongMethod: java.lang.reflect.Method? by lazy {
+        runCatching {
+            IPackageManager::class.java.getMethod(
+                "getInstalledPackages",
+                java.lang.Long.TYPE,
+                java.lang.Integer.TYPE,
+            )
+        }.getOrNull()
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun getInstalledPackagesLong(
+        pm: IPackageManager,
+        flags: Long,
+        userId: Int,
+    ): ParceledListSlice<PackageInfo>? {
+        if (directGetInstalledPackagesUsable) {
+            try {
+                return pm.getInstalledPackages(flags, userId)
+            } catch (e: NoSuchMethodError) {
+                directGetInstalledPackagesUsable = false
+                LOGGER.w(
+                    e,
+                    "IPackageManager.getInstalledPackages(long,int) descriptor mismatch " +
+                            "(API 37 returns PackageInfoList), switching to reflection"
+                )
+            }
+        }
+        val method = getInstalledPackagesLongMethod
+            ?: throw RemoteException("IPackageManager.getInstalledPackages(long,int) not found")
+        return try {
+            method.invoke(pm, flags, userId) as? ParceledListSlice<PackageInfo>
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            when (val cause = e.targetException) {
+                is RemoteException -> throw cause
+                is RuntimeException -> throw cause
+                is Error -> throw cause
+                else -> throw RemoteException("getInstalledPackages failed: $cause")
+            }
+        }
+    }
+
     @JvmStatic
     @Throws(RemoteException::class)
     fun getInstalledPackages(flags: Int, userId: Int): ParceledListSlice<PackageInfo>? {
         val pm = packageManager ?: throw RemoteException("can't get IPackageManager")
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.getInstalledPackages(flags.toLong(), userId)
+            getInstalledPackagesLong(pm, flags.toLong(), userId)
         } else {
             pm.getInstalledPackages(flags, userId)
         }
