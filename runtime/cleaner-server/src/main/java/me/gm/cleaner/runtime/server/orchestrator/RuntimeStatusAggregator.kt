@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import me.gm.cleaner.model.LayerStatus as IpcLayerStatus
 import me.gm.cleaner.model.OrchestratedStatus as IpcOrchestratedStatus
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
 /**
  * 三层运行状态聚合器。
@@ -65,7 +66,7 @@ class RuntimeStatusAggregator(
     fun publishStatusSnapshot() {
         if (!DataBus.ensureInitialized()) return
         val status = collectStatusJson()
-        DataBus.writeSnapshot(DataBus.SNAPSHOT_ORCHESTRATED_STATUS, status)
+        DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_ORCHESTRATED_STATUS, status)
     }
 
     private fun collectStatus(): OrchestratedStatus {

@@ -24,10 +24,14 @@ import me.gm.cleaner.client.ui.storageredirect.MountWizard
 import me.gm.cleaner.dao.AppLabelCache
 import me.gm.cleaner.dao.RootPreferences
 import me.gm.cleaner.dao.ServiceMoreOptionsPreferences
+import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.config.getPackageSrZipped
+import me.gm.cleaner.core.config.removeRedirectRules
+import me.gm.cleaner.core.config.replaceRedirectRules
 import me.gm.cleaner.net.OnlineAppCategory
 import me.gm.cleaner.starter.Starter
-import me.gm.cleaner.util.FileUtils.toUserId
+import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.util.PermissionUtils.notifySafe
 import me.gm.cleaner.util.getParcelableExtraCompat
 
@@ -73,9 +77,19 @@ class NotificationService : Service() {
                         computeHashCode(packageInfo.packageName, NOTIFICATION_CHANNEL_ADDED)
                     )
                     MainScope().launch(Dispatchers.IO) {
-                        ServicePreferences.removeStorageRedirect(
+                        val sharedProcessPackages =
                             getSharedProcessPackages(packageInfo).map { it.packageName }
-                        )
+                        val store = ConfiguredPolicyStoreProvider.instance
+                        val removeResult = store.updateRedirect(store.snapshots.value.redirect.revision) {
+                            it.removeRedirectRules(sharedProcessPackages)
+                        }
+                        if (!removeResult.success) {
+                            Log.e("MC/Policy", "remove redirect failed: ${removeResult.error}")
+                            return@launch
+                        }
+                        if (!removeResult.changed) {
+                            return@launch
+                        }
                         if (CleanerClient.pingBinder()) {
                             CleanerClient.service?.notifySrChanged()
                         }
@@ -158,24 +172,41 @@ class NotificationService : Service() {
                 val wizard = MountWizard(packageInfo)
                 val answers = ServiceMoreOptionsPreferences.editMountRulesTemplate
                 val rulesByTemplate = wizard.createRules(answers)
-                ServicePreferences.putStorageRedirect(
-                    rulesByTemplate, getSharedProcessPackages(packageInfo).map { it.packageName }
-                )
-                CleanerClient.service?.notifySrChanged()
-                buildPackageAddedNotification(context, packageInfo)
-                MainScope().launch {
-                    OnlineAppCategory.fetch(context, packageInfo).onSuccess { appTypeMarks ->
-                        appTypeMarks ?: return@onSuccess
-                        wizard.answerBasedOnRecord(answers, emptyList(), appTypeMarks)
+                val templatePackages = getSharedProcessPackages(packageInfo).map { it.packageName }
+                val store = ConfiguredPolicyStoreProvider.instance
+                val putResult = store.updateRedirect(store.snapshots.value.redirect.revision) {
+                    it.replaceRedirectRules(rulesByTemplate, templatePackages)
+                }
+                if (!putResult.success) {
+                    Log.e("MC/Policy", "put redirect failed: ${putResult.error}")
+                } else {
+                    if (putResult.changed) {
+                        CleanerClient.service?.notifySrChanged()
+                    }
+                    buildPackageAddedNotification(context, packageInfo)
+                    MainScope().launch {
+                        OnlineAppCategory.fetch(context, packageInfo).onSuccess { appTypeMarks ->
+                            appTypeMarks ?: return@onSuccess
+                            wizard.answerBasedOnRecord(answers, emptyList(), appTypeMarks)
 
-                        if (rulesByTemplate ==
-                            ServicePreferences.getPackageSrZipped(packageInfo.packageName)
-                        ) {
-                            ServicePreferences.putStorageRedirect(
-                                wizard.createRules(answers),
-                                getSharedProcessPackages(packageInfo).map { it.packageName }
-                            )
-                            CleanerClient.service?.notifySrChanged()
+                            if (rulesByTemplate ==
+                                ConfiguredPolicyStoreProvider.instance.getPackageSrZipped(packageInfo.packageName)
+                            ) {
+                                val refreshPackages =
+                                    getSharedProcessPackages(packageInfo).map { it.packageName }
+                                val store = ConfiguredPolicyStoreProvider.instance
+                                val refreshResult = store.updateRedirect(store.snapshots.value.redirect.revision) {
+                                    it.replaceRedirectRules(wizard.createRules(answers), refreshPackages)
+                                }
+                                if (!refreshResult.success) {
+                                    Log.e("MC/Policy", "put redirect failed: ${refreshResult.error}")
+                                    return@launch
+                                }
+                                if (!refreshResult.changed) {
+                                    return@launch
+                                }
+                                CleanerClient.service?.notifySrChanged()
+                            }
                         }
                     }
                 }
@@ -255,7 +286,7 @@ class NotificationService : Service() {
         )
         val notification = NotificationCompat
             .Builder(context, NOTIFICATION_CHANNEL_UPDATED)
-            .setContentTitle(context.getString(R.string.service_need_upgrade))
+            .setContentTitle(context.getString(R.string.service_need_reboot))
             .setAutoCancel(true)
             .setSmallIcon(R.drawable.ic_outline_update_24)
             .setColor(context.getColor(R.color.color_primary))
@@ -264,7 +295,7 @@ class NotificationService : Service() {
         NotificationManagerCompat.from(context).run {
             val channel = NotificationChannelCompat
                 .Builder(NOTIFICATION_CHANNEL_UPDATED, NotificationManager.IMPORTANCE_MAX)
-                .setName(context.getString(R.string.service_need_upgrade))
+                .setName(context.getString(R.string.service_need_reboot))
                 .setSound(null, null)
                 .build()
             createNotificationChannel(channel)

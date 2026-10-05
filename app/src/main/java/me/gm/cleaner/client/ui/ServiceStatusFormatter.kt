@@ -273,6 +273,36 @@ object ServiceStatusFormatter {
         }
     }
 
+    /**
+     * 版本过期横幅：任一运行中组件与已安装包版本不一致时，提示重启手机。
+     * 输入全部来自状态快照 metrics + 调用方版本，纯函数，可单测。
+     */
+    fun staleCause(
+        s: StatusStrings,
+        controlMetrics: Map<String, String>,
+        nativeMetrics: Map<String, String>,
+        appRunning: Long,
+        installed: Long,
+        hookAvailable: Boolean,
+    ): String? {
+        val serverRunning = controlMetrics["serverVersionCode"]?.toLongOrNull() ?: 0L
+        val hookRunning = nativeMetrics["hookVersionCode"]?.toLongOrNull() ?: 0L
+        val staleness = evaluateVersionStaleness(
+            appRunning = appRunning,
+            installed = installed,
+            serverRunning = serverRunning,
+            hookRunning = hookRunning,
+            hookAvailable = hookAvailable,
+        )
+        if (staleness == VersionStaleness.OK) return null
+        val (who, running) = when (staleness) {
+            VersionStaleness.STALE_APP -> "App" to appRunning
+            VersionStaleness.STALE_SERVER -> "Server" to serverRunning
+            else -> "Hook" to hookRunning
+        }
+        return s.get(R.string.service_status_stale_reboot, "$who $running≠$installed")
+    }
+
     // ── 正常态（orchestrated 可用）标题 ────────────────────────────
 
     fun orchestratedTitle(s: StatusStrings, health: String, configured: Int): String = when (health) {

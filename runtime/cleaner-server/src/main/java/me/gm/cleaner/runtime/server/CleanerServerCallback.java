@@ -9,6 +9,7 @@ import api.SystemService;
 import me.gm.cleaner.core.common.RuntimeFileUtils;
 import me.gm.cleaner.core.storage.redirect.databus.DataBus;
 import me.gm.cleaner.server.ICleanerServerCallback;
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol;
 
 /**
  * Server-side DataBus proxy exposed to the MediaProvider Hook process.
@@ -74,14 +75,14 @@ public class CleanerServerCallback extends ICleanerServerCallback.Stub {
     }
 
     private static boolean isHookWritableSnapshot(String name) {
-        return DataBus.SNAPSHOT_NATIVE_HOOK_STATUS.equals(name);
+        return DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS.equals(name);
     }
 
     private static boolean isHookWritableSignal(String name) {
-        return DataBus.SIGNAL_FILESYSTEM_EVENTS_CHANGED.equals(name) ||
-                DataBus.SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED.equals(name) ||
-                DataBus.SIGNAL_QUERY_SESSION_LEASES_CHANGED.equals(name) ||
-                DataBus.SIGNAL_NATIVE_HOOK_STATUS_CHANGED.equals(name);
+        return DataBusProtocol.SIGNAL_FILESYSTEM_EVENTS_CHANGED.equals(name) ||
+                DataBusProtocol.SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED.equals(name) ||
+                DataBusProtocol.SIGNAL_QUERY_SESSION_LEASES_CHANGED.equals(name) ||
+                DataBusProtocol.SIGNAL_NATIVE_HOOK_STATUS_CHANGED.equals(name);
     }
 
     @Override

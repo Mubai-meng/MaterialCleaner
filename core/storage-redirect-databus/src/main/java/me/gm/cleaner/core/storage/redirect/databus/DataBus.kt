@@ -22,11 +22,9 @@ import java.util.concurrent.atomic.AtomicLong
  *   snapshots/
  *     redirect_policy.json
  *     read_only.json
- *     configured_mount_points.json
  *   signals/
  *     redirect_policy_changed
  *     read_only_changed
- *     configured_mount_points_changed
  *     platform_capabilities_changed
  *     filesystem_events_changed
  *   events/
@@ -77,99 +75,11 @@ object DataBus {
     private const val DIR_CONSUMED = "consumed"
     private const val DIR_TMP = "tmp"
 
-    // ── 快照文件名 ──
-    const val SNAPSHOT_REDIRECT_POLICY = "redirect_policy.json"
-    const val SNAPSHOT_READ_ONLY = "read_only.json"
-    const val SNAPSHOT_CONFIGURED_MOUNT_POINTS = "configured_mount_points.json"
-    const val SNAPSHOT_PLATFORM_CAPABILITIES = "platform_capabilities.json"
-    const val SNAPSHOT_ORCHESTRATED_STATUS = "orchestrated_status.json"
-    const val SNAPSHOT_NATIVE_HOOK_STATUS = "native_hook_status.json"
-
-    // ── 信号文件名 ──
-    const val SIGNAL_REDIRECT_POLICY_CHANGED = "redirect_policy_changed"
-    const val SIGNAL_READ_ONLY_CHANGED = "read_only_changed"
-    const val SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED = "configured_mount_points_changed"
-    const val SIGNAL_PLATFORM_CAPABILITIES_CHANGED = "platform_capabilities_changed"
-    const val SIGNAL_NATIVE_HOOK_STATUS_CHANGED = "native_hook_status_changed"
-    const val SIGNAL_FILESYSTEM_EVENTS_CHANGED = "filesystem_events_changed"
-    const val SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED = "redirect_notice_events_changed"
-    const val SIGNAL_QUERY_SESSION_LEASES_CHANGED = "query_session_leases_changed"
-
-    // ── 事件子目录 ──
-    const val EVENT_FILESYSTEM = "filesystem"
-    const val EVENT_REDIRECT_NOTICE = "redirect_notice"
-
-    // ── Lease 子目录 ──
-    const val LEASE_QUERY_SESSIONS = "query_sessions"
-
-    private val validSnapshotNames = setOf(
-        SNAPSHOT_REDIRECT_POLICY,
-        SNAPSHOT_READ_ONLY,
-        SNAPSHOT_CONFIGURED_MOUNT_POINTS,
-        SNAPSHOT_PLATFORM_CAPABILITIES,
-        SNAPSHOT_ORCHESTRATED_STATUS,
-        SNAPSHOT_NATIVE_HOOK_STATUS,
-    )
-    private val validSignalNames = setOf(
-        SIGNAL_REDIRECT_POLICY_CHANGED,
-        SIGNAL_READ_ONLY_CHANGED,
-        SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED,
-        SIGNAL_PLATFORM_CAPABILITIES_CHANGED,
-        SIGNAL_NATIVE_HOOK_STATUS_CHANGED,
-        SIGNAL_FILESYSTEM_EVENTS_CHANGED,
-        SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED,
-        SIGNAL_QUERY_SESSION_LEASES_CHANGED,
-    )
-    private val validEventQueues = setOf(
-        EVENT_FILESYSTEM,
-        EVENT_REDIRECT_NOTICE,
-    )
-    private val validLeaseCategories = setOf(
-        LEASE_QUERY_SESSIONS,
-    )
-
     @Volatile
     private var initialized = false
 
-    private val EVENT_FILE_NAME_PATTERN = Regex("^(\\d{20})-\\d+-\\d+-[0-9a-fA-F]{4}\\.json$")
-
     // 进程内序号下界；真实事件序号会通过 counters/ 持久化分配。
     private val eventSeqCounter = AtomicLong(0)
-
-    data class SnapshotHealth(
-        val name: String,
-        val exists: Boolean,
-        val validJson: Boolean,
-        val error: String? = null,
-    )
-
-    data class HealthReport(
-        val initialized: Boolean,
-        val missingDirectories: List<String>,
-        val permissionIssues: List<String>,
-        val snapshots: List<SnapshotHealth>,
-        val eventQueueCounts: Map<String, Int>,
-        val leaseCounts: Map<String, Int>,
-    ) {
-        fun hasSnapshot(name: String): Boolean =
-            snapshots.any { it.name == name && it.exists && it.validJson }
-
-        val criticalSnapshotsReady: Boolean
-            get() = hasSnapshot(SNAPSHOT_REDIRECT_POLICY) &&
-                    hasSnapshot(SNAPSHOT_READ_ONLY) &&
-                    hasSnapshot(SNAPSHOT_CONFIGURED_MOUNT_POINTS)
-
-        val healthy: Boolean
-            get() = initialized &&
-                    missingDirectories.isEmpty() &&
-                    permissionIssues.isEmpty() &&
-                    criticalSnapshotsReady
-    }
-
-    data class EventFile(
-        val name: String,
-        val content: String,
-    )
 
     /**
      * 确保总线目录结构存在，设置跨进程可访问权限。
@@ -351,7 +261,7 @@ object DataBus {
     /**
      * 读取游标之后的所有事件，并保留文件名供消费者精确推进游标。
      */
-    fun readEventFiles(queue: String, afterCursor: String): List<EventFile> {
+    fun readEventFiles(queue: String, afterCursor: String): List<DataBusProtocol.EventFile> {
         if (!isValidEventQueue(queue)) return emptyList()
         val eventDir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
         if (!eventDir.exists()) return emptyList()
@@ -365,7 +275,7 @@ object DataBus {
                 ?.sortedBy { it.name }
                 ?.mapNotNull { file ->
                     readRegularText(file, "events/$queue/${file.name}")?.let {
-                        EventFile(file.name, it)
+                        DataBusProtocol.EventFile(file.name, it)
                     }
                 }
                 ?: emptyList()
@@ -430,7 +340,7 @@ object DataBus {
         }
     }
 
-    fun writeCursorToEvent(queue: String, event: EventFile): Boolean =
+    fun writeCursorToEvent(queue: String, event: DataBusProtocol.EventFile): Boolean =
         writeCursor(queue, event.name)
 
     // ── Lease（短期会话） ──
@@ -515,7 +425,7 @@ object DataBus {
         return file.readText(Charsets.UTF_8)
     }
 
-    fun readLeaseFiles(category: String): List<EventFile> {
+    fun readLeaseFiles(category: String): List<DataBusProtocol.EventFile> {
         if (!isValidLeaseCategory(category)) return emptyList()
         val leaseDir = File("$BUS_ROOT/$DIR_LEASES/$category")
         if (!leaseDir.exists()) return emptyList()
@@ -526,7 +436,7 @@ object DataBus {
                 ?.sortedBy { it.name }
                 ?.mapNotNull { file ->
                     readRegularText(file, "leases/$category/${file.name}")?.let {
-                        EventFile(file.name, it)
+                        DataBusProtocol.EventFile(file.name, it)
                     }
                 }
                 ?: emptyList()
@@ -642,7 +552,7 @@ object DataBus {
     }
 
     private fun parseEventSequence(name: String): Long? =
-        EVENT_FILE_NAME_PATTERN.matchEntire(name)
+        DataBusProtocol.EVENT_FILE_NAME_PATTERN.matchEntire(name)
             ?.groupValues
             ?.get(1)
             ?.toLongOrNull()
@@ -677,16 +587,16 @@ object DataBus {
         value.replace(Regex("[^A-Za-z0-9._-]"), "_").take(180).ifBlank { "lease" }
 
     private fun isValidSnapshotName(name: String): Boolean =
-        isValidName("snapshot", name, validSnapshotNames)
+        isValidName("snapshot", name, DataBusProtocol.validSnapshotNames)
 
     private fun isValidSignalName(name: String): Boolean =
-        isValidName("signal", name, validSignalNames)
+        isValidName("signal", name, DataBusProtocol.validSignalNames)
 
     private fun isValidEventQueue(queue: String): Boolean =
-        isValidName("event queue", queue, validEventQueues)
+        isValidName("event queue", queue, DataBusProtocol.validEventQueues)
 
     private fun isValidLeaseCategory(category: String): Boolean =
-        isValidName("lease category", category, validLeaseCategories)
+        isValidName("lease category", category, DataBusProtocol.validLeaseCategories)
 
     private fun isValidName(kind: String, value: String, allowed: Set<String>): Boolean {
         if (value in allowed) {
@@ -701,8 +611,9 @@ object DataBus {
      *
      * @param repair true 时会尝试创建缺失目录并修复权限。
      */
-    fun checkHealth(repair: Boolean = false): HealthReport {
-        val init = if (repair) ensureInitialized() else initialized || File(BUS_ROOT).exists()
+    fun checkHealth(repair: Boolean = false): DataBusProtocol.HealthReport {
+        val init = if (repair) ensureInitialized() else initialized ||
+            File(BUS_ROOT).exists()
         val missingDirs = mutableListOf<String>()
         val permissionIssues = mutableListOf<String>()
 
@@ -731,18 +642,24 @@ object DataBus {
             }
         }
 
-        return HealthReport(
+        return DataBusProtocol.HealthReport(
             initialized = init && missingDirs.isEmpty(),
             missingDirectories = missingDirs,
             permissionIssues = permissionIssues,
-            snapshots = snapshotNames().map { inspectSnapshot(it) },
+            snapshots = DataBusProtocol.snapshotNames().map { inspectSnapshot(it) },
             eventQueueCounts = mapOf(
-                EVENT_FILESYSTEM to countJsonFiles("$BUS_ROOT/$DIR_EVENTS/$EVENT_FILESYSTEM"),
-                EVENT_REDIRECT_NOTICE to countJsonFiles("$BUS_ROOT/$DIR_EVENTS/$EVENT_REDIRECT_NOTICE"),
+                DataBusProtocol.EVENT_FILESYSTEM to countJsonFiles(
+                    "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_FILESYSTEM}",
+                ),
+                DataBusProtocol.EVENT_REDIRECT_NOTICE to countJsonFiles(
+                    "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_REDIRECT_NOTICE}",
+                ),
                 DIR_CONSUMED to countJsonFiles("$BUS_ROOT/$DIR_EVENTS/$DIR_CONSUMED"),
             ),
             leaseCounts = mapOf(
-                LEASE_QUERY_SESSIONS to countJsonFiles("$BUS_ROOT/$DIR_LEASES/$LEASE_QUERY_SESSIONS"),
+                DataBusProtocol.LEASE_QUERY_SESSIONS to countJsonFiles(
+                    "$BUS_ROOT/$DIR_LEASES/${DataBusProtocol.LEASE_QUERY_SESSIONS}",
+                ),
             ),
         )
     }
@@ -752,36 +669,27 @@ object DataBus {
         BUS_ROOT,
         "$BUS_ROOT/$DIR_SNAPSHOTS",
         "$BUS_ROOT/$DIR_SIGNALS",
-        "$BUS_ROOT/$DIR_EVENTS/$EVENT_FILESYSTEM",
-        "$BUS_ROOT/$DIR_EVENTS/$EVENT_REDIRECT_NOTICE",
+        "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_FILESYSTEM}",
+        "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_REDIRECT_NOTICE}",
         "$BUS_ROOT/$DIR_EVENTS/$DIR_CONSUMED",
-        "$BUS_ROOT/$DIR_LEASES/$LEASE_QUERY_SESSIONS",
+        "$BUS_ROOT/$DIR_LEASES/${DataBusProtocol.LEASE_QUERY_SESSIONS}",
         "$BUS_ROOT/$DIR_CURSORS",
         "$BUS_ROOT/$DIR_COUNTERS",
         "$BUS_ROOT/$DIR_TMP",
     )
 
-    private fun snapshotNames(): List<String> = listOf(
-        SNAPSHOT_REDIRECT_POLICY,
-        SNAPSHOT_READ_ONLY,
-        SNAPSHOT_CONFIGURED_MOUNT_POINTS,
-        SNAPSHOT_PLATFORM_CAPABILITIES,
-        SNAPSHOT_ORCHESTRATED_STATUS,
-        SNAPSHOT_NATIVE_HOOK_STATUS,
-    )
-
-    private fun inspectSnapshot(name: String): SnapshotHealth {
+    private fun inspectSnapshot(name: String): DataBusProtocol.SnapshotHealth {
         val file = File("$BUS_ROOT/$DIR_SNAPSHOTS/$name")
         if (!Files.exists(file.toPath(), LinkOption.NOFOLLOW_LINKS)) {
-            return SnapshotHealth(name, exists = false, validJson = false)
+            return DataBusProtocol.SnapshotHealth(name, exists = false, validJson = false)
         }
         return try {
             val content = readRegularText(file, "snapshot/$name")
-                ?: return SnapshotHealth(name, exists = true, validJson = false)
+                ?: return DataBusProtocol.SnapshotHealth(name, exists = true, validJson = false)
             JSONObject(content)
-            SnapshotHealth(name, exists = true, validJson = true)
+            DataBusProtocol.SnapshotHealth(name, exists = true, validJson = true)
         } catch (e: Exception) {
-            SnapshotHealth(
+            DataBusProtocol.SnapshotHealth(
                 name = name,
                 exists = true,
                 validJson = false,
@@ -827,9 +735,9 @@ object DataBus {
 
     private fun directoryMode(dir: File): Int = when (dir.path) {
         "$BUS_ROOT/$DIR_SIGNALS",
-        "$BUS_ROOT/$DIR_EVENTS/$EVENT_FILESYSTEM",
-        "$BUS_ROOT/$DIR_EVENTS/$EVENT_REDIRECT_NOTICE",
-        "$BUS_ROOT/$DIR_LEASES/$LEASE_QUERY_SESSIONS",
+        "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_FILESYSTEM}",
+        "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_REDIRECT_NOTICE}",
+        "$BUS_ROOT/$DIR_LEASES/${DataBusProtocol.LEASE_QUERY_SESSIONS}",
         "$BUS_ROOT/$DIR_COUNTERS" -> MODE_DIR_SHARED_STICKY
         else -> MODE_DIR_WORLD_READABLE
     }

@@ -2,6 +2,8 @@ package me.gm.cleaner.core.storage.redirect.domain
 
 /**
  * Pure derivation helpers for storage redirect policy snapshots.
+ *
+ * 挂载点推导经唯一的 [MountPlanDeriver] 投影桥，不直接持有解释器。
  */
 object RedirectPolicyDeriver {
 
@@ -14,11 +16,10 @@ object RedirectPolicyDeriver {
     fun buildConfiguredMountPoints(policy: RedirectPolicySnapshot): ConfiguredMountPointsSnapshot {
         val points = mutableListOf<String>()
 
-        for ((_, userRules) in policy.storageRedirectRules) {
-            for ((_, rules) in userRules) {
-                val zipped = rules.map { it.source to it.target }
-                val mountRules = MountRules(zipped)
-                points.addAll(mountRules.mountPoint)
+        for ((packageName, userRules) in policy.storage.redirectRules) {
+            for ((userId, rules) in userRules) {
+                val plan = MountPlanDeriver.derive(packageName, userId, rules) ?: continue
+                points.addAll(plan.mountPoints)
             }
         }
 
@@ -39,8 +40,7 @@ object RedirectPolicyDeriver {
         userId: Int,
         path: String,
     ): String {
-        val rules = policy.storageRedirectRules[packageName]?.get(userId) ?: return path
-        val zipped = rules.map { it.source to it.target }
-        return MountRules(zipped).getMountedPath(path)
+        val rules = policy.storage.redirectRules[packageName]?.get(userId) ?: return path
+        return MountPlanDeriver.resolveMountedPath(rules, path)
     }
 }

@@ -4,6 +4,7 @@ import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway
 import org.json.JSONArray
 import org.json.JSONObject
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
 object NativeHookLayerReporter {
     private const val NATIVE_HOOK_STATUS_MAX_AGE_MS = 15_000L
@@ -72,6 +73,7 @@ object NativeHookLayerReporter {
             lastError = nativeError,
             metrics = linkedMapOf(
                 "nativeHookState" to nativeStatus.inlineState,
+                "hookVersionCode" to nativeStatus.hookVersionCode.toString(),
                 "nativeCapabilityLevel" to nativeStatus.capabilityLevel,
                 "nativeCoreAvailable" to nativeStatus.coreAvailable.toString(),
                 "nativeMissingSymbols" to nativeStatus.missingSymbols,
@@ -118,7 +120,7 @@ object NativeHookLayerReporter {
     }
 
     private fun readPlatformSupportedNativeHookMode(): String {
-        val json = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_PLATFORM_CAPABILITIES)
+        val json = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES)
             ?: return "UNKNOWN"
         return runCatching {
             JSONObject(json).optString("supportedNativeHookMode", "UNKNOWN")
@@ -135,7 +137,7 @@ object NativeHookLayerReporter {
     }
 
     private fun readNativeHookStatusFromDataBus(now: Long): NativeHookRuntimeStatus? {
-        val json = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_NATIVE_HOOK_STATUS) ?: return null
+        val json = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS) ?: return null
         val createdAt = runCatching {
             JSONObject(json).optLong("createdAt", 0L)
         }.getOrDefault(0L)
@@ -173,6 +175,7 @@ object NativeHookLayerReporter {
             val policy = root.optJSONObject("policy")
             val fuseJavaGate = root.optJSONObject("fuseJavaGate")
             NativeHookRuntimeStatus(
+                hookVersionCode = root.optInt("hookVersionCode", 0),
                 mediaProviderLoaded = mediaProvider?.optBoolean("loaded", false) ?: false,
                 policyCacheInitialized = policyCache?.optBoolean("initialized", false) ?: false,
                 inlineState = inline?.optString("state", "NOT_LOADED") ?: "NOT_LOADED",
@@ -241,6 +244,7 @@ object NativeHookLayerReporter {
     }
 
     private data class NativeHookRuntimeStatus(
+        val hookVersionCode: Int = 0,
         val mediaProviderLoaded: Boolean = false,
         val policyCacheInitialized: Boolean = false,
         val inlineState: String = "NOT_LOADED",

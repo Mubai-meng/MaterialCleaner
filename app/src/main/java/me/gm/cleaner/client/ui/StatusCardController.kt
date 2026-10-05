@@ -16,7 +16,8 @@ import me.gm.cleaner.client.OrchestratedLayerStatus
 import me.gm.cleaner.client.OrchestratedRuntimeStatus
 import me.gm.cleaner.client.ServerState
 import me.gm.cleaner.client.ServerStateMachine
-import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
+import me.gm.cleaner.core.config.srPackages
 
 /**
  * 状态卡视图引用：Fragment 在 onCreateView 中组装，onDestroyView 时 detach。
@@ -78,9 +79,11 @@ class StatusCardController(
     private val strings: StatusStrings,
     private val getOrchestratedStatus: () -> OrchestratedRuntimeStatus? = CleanerClient::getOrchestratedStatus,
     private val isRoot: () -> Boolean = { runCatching { Shell.getShell().isRoot }.getOrDefault(false) },
-    private val configuredCount: () -> Int = { ServicePreferences.srPackages.size },
+    private val configuredCount: () -> Int = { ConfiguredPolicyStoreProvider.instance.srPackages.size },
     private val isManuallyStopped: () -> Boolean = { ServerStateMachine.isSessionManuallyStopped },
     private val guard: () -> Boolean = { true },
+    private val appVersionCode: () -> Long = { 0L },
+    private val installedVersionCode: () -> Long = { 0L },
 ) {
     var orchestratedStatus: OrchestratedRuntimeStatus? = null
         private set
@@ -209,11 +212,20 @@ class StatusCardController(
         }
         val namedLayers: List<Pair<String, OrchestratedLayerStatus>> = layerNames.zip(layers)
         val (dotIcon, dotColor) = ServiceStatusFormatter.statusIconRes(orchestrated.health)
+        // 版本过期优先于层状态问题：静默失效比可见降级更需要用户动作（重启手机）。
+        val staleCause = ServiceStatusFormatter.staleCause(
+            s,
+            orchestrated.controlPlane.metrics,
+            orchestrated.fuseNativeHook.metrics,
+            appVersionCode(),
+            installedVersionCode(),
+            xposedConnected,
+        )
         return StatusCardViewState(
             title = ServiceStatusFormatter.orchestratedTitle(s, orchestrated.health, configured),
             subtitle = ServiceStatusFormatter.topSummary(s, orchestrated, configured),
             rows = rows,
-            cause = ServiceStatusFormatter.firstProblem(s, namedLayers),
+            cause = staleCause ?: ServiceStatusFormatter.firstProblem(s, namedLayers),
             dotIconRes = dotIcon,
             dotColorRes = dotColor,
             toggleLabel = toggleLabel,

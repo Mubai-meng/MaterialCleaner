@@ -1,5 +1,6 @@
 package me.gm.cleaner.runtime.server.orchestrator
 
+import me.gm.cleaner.runtime.server.BuildConfig
 import me.gm.cleaner.runtime.server.CleanerServer
 
 object ControlPlaneLayerReporter {
@@ -35,6 +36,7 @@ object ControlPlaneLayerReporter {
             },
             metrics = mapOf(
                 "appBinderRegistered" to appBinderRegistered.toString(),
+                "serverVersionCode" to BuildConfig.VERSION_CODE.toString(),
                 "hooksBridgeConnected" to hooksBridgeConnected.toString(),
                 "mediaProviderHookConnected" to mediaProviderHookConnected.toString(),
                 "hooksRetryCount" to hookRecovery.hooksRetryCount.toString(),

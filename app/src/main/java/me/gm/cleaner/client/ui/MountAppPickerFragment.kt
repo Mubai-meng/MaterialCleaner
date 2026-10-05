@@ -1,6 +1,7 @@
 package me.gm.cleaner.client.ui
 
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.Menu
 import android.view.MenuInflater
@@ -24,6 +25,8 @@ import me.gm.cleaner.app.BaseFragment
 import me.gm.cleaner.app.ConfirmationDialog
 import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.config.removeReadOnlyRules
+import me.gm.cleaner.core.config.removeRedirectRules
 import me.gm.cleaner.databinding.MountAppPickerFragmentBinding
 import me.gm.cleaner.util.buildStyledTitle
 import me.gm.cleaner.util.colorAccent
@@ -95,8 +98,19 @@ class MountAppPickerFragment : BaseFragment() {
                     )
                     .apply {
                         addOnPositiveButtonClickListener {
-                            ServicePreferences.removeStorageRedirect(uninstalledPackages)
-                            ServicePreferences.removeReadOnly(uninstalledPackages)
+                            val store = ConfiguredPolicyStoreProvider.instance
+                            val redirectResult = store
+                                .updateRedirect(store.snapshots.value.redirect.revision) { it.removeRedirectRules(uninstalledPackages) }
+                            if (!redirectResult.success) {
+                                Log.e("MC/Policy", "remove redirect failed: ${redirectResult.error}")
+                                return@addOnPositiveButtonClickListener
+                            }
+                            val readOnlyResult = ConfiguredPolicyStoreProvider.instance
+                                .updateReadOnly(ConfiguredPolicyStoreProvider.instance.snapshots.value.readOnly.revision) { it.removeReadOnlyRules(uninstalledPackages) }
+                            if (!readOnlyResult.success) {
+                                Log.e("MC/Policy", "remove read-only failed: ${readOnlyResult.error}")
+                                return@addOnPositiveButtonClickListener
+                            }
                             val denyList = ServicePreferences.denylist - uninstalledPackages.toSet()
                             ServicePreferences.denylist = denyList
                         }

@@ -7,9 +7,9 @@ import hidden.HiddenApiBridge.UserHandle_isIsolated
 import me.gm.cleaner.core.common.RuntimeFileUtils
 import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.model.PackageStatus
-import me.gm.cleaner.runtime.server.observer.BaseProcessObserver
-import me.gm.cleaner.runtime.server.observer.ObserverManager
-import me.gm.cleaner.runtime.server.observer.StorageEventListenerDelegate
+import me.gm.cleaner.runtime.server.process.BaseProcessObserver
+import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
+import me.gm.cleaner.runtime.server.storage.StorageEventListenerDelegate
 import me.gm.cleaner.runtime.server.orchestrator.LayerId
 import me.gm.cleaner.runtime.server.orchestrator.LayerReport
 import me.gm.cleaner.runtime.server.orchestrator.LayerState
@@ -120,7 +120,7 @@ class VfsLayerController {
         val startUpAwarePids = observer.getAllStartUpAwarePids()
         val mountFailedPids = observer.getMountFailedPids()
         val mountedPackages = observer.getMountedPackages()
-        val srPackages = VfsRuntimeConfigStore.getStorageRedirectPackages()
+        val srPackages = VfsRuntimePolicy.getStorageRedirectPackages()
         val processes = selectProcesses(flags, startUpAwarePids)
         val statuses = TreeMap<String, MutablePackageStatus>()
 
@@ -158,6 +158,7 @@ class VfsLayerController {
             val mountFailedPids = observer.getMountFailedPids().size
             val mountTotalAttempts = observer.getTotalMountAttempts()
             val mountFailureCount = observer.getMountFailureCount()
+            val mountGateRefusals = observer.getGateRefusalCount()
             val lastFailure = observer.getLastMountFailure()
             val lastMountErrorCode = observer.getLastMountErrorCode()
             val state = if (mountFailedPids > 0) {
@@ -178,7 +179,7 @@ class VfsLayerController {
                 },
                 metrics = mapOf(
                     "started" to "true",
-                    "configuredPackages" to VfsRuntimeConfigStore
+                    "configuredPackages" to VfsRuntimePolicy
                         .getStorageRedirectPackages()
                         .size
                         .toString(),
@@ -187,6 +188,7 @@ class VfsLayerController {
                     "mountFailedPids" to mountFailedPids.toString(),
                     "mountTotalAttempts" to mountTotalAttempts.toString(),
                     "mountFailureCount" to mountFailureCount.toString(),
+                    "mountGateRefusals" to mountGateRefusals.toString(),
                     "lastMountFailureAt" to (lastFailure?.timeMillis ?: 0L).toString(),
                     "lastMountFailurePackage" to (lastFailure?.packageName ?: ""),
                     "lastMountFailurePid" to (lastFailure?.pid ?: 0).toString(),
@@ -221,7 +223,7 @@ class VfsLayerController {
     private fun switchAppDataDirOwnersAsync() {
         Thread {
             for (userId in SystemService.getUserIdsNoThrow()) {
-                for (packageName in VfsRuntimeConfigStore.getStorageRedirectPackages()) {
+                for (packageName in VfsRuntimePolicy.getStorageRedirectPackages()) {
                     val ai = SystemService.getApplicationInfoNoThrow(packageName, 0, userId)
                         ?: continue
                     RuntimeFileUtils.switch_owner(
@@ -254,7 +256,7 @@ class VfsLayerController {
         mountFailedPids: Set<Int>,
         mkdir: Boolean,
     ): Int {
-        val targets = VfsRuntimeConfigStore.getMountTargets(packageName, userId)
+        val targets = VfsRuntimePolicy.getMountTargets(packageName, userId)
         val mountedIndices = RuntimeFileUtils.check_mounts(pid, targets.toTypedArray())
         var pidFlag = 0
         if (mountedIndices == null) {

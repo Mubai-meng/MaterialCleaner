@@ -9,6 +9,7 @@ import me.gm.cleaner.core.storage.redirect.domain.RedirectPolicyDeriver
 import me.gm.cleaner.core.storage.redirect.domain.RedirectPolicySnapshot
 import org.json.JSONArray
 import org.json.JSONObject
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
 /**
  * 策略快照发布器。
@@ -37,8 +38,8 @@ object SnapshotPublisher {
         }
 
         val userIds = SystemService.getUserIdsNoThrow()
-        val policy = RuntimeRedirectPolicyFactory.build(userIds)
-        VfsRuntimeConfigStore.updatePolicy(policy)
+        val policy = RuntimePolicyProjector.project(userIds)
+        VfsRuntimePolicy.updatePolicy(policy)
 
         // 关键三件套批量提交：全部写入成功后才统一发信号，
         // 避免 Hook 观察到半批状态造成三层不一致。
@@ -71,12 +72,12 @@ object SnapshotPublisher {
     fun publishRedirectPolicy(policy: RedirectPolicySnapshot? = null): Boolean {
         if (!DataBus.ensureInitialized()) return false
 
-        val snapshot = policy ?: RuntimeRedirectPolicyFactory.build(SystemService.getUserIdsNoThrow())
-        VfsRuntimeConfigStore.updatePolicy(snapshot)
+        val snapshot = policy ?: RuntimePolicyProjector.project(SystemService.getUserIdsNoThrow())
+        VfsRuntimePolicy.updatePolicy(snapshot)
 
         val json = serializeRedirectPolicy(snapshot)
-        val written = DataBus.writeSnapshot(DataBus.SNAPSHOT_REDIRECT_POLICY, json)
-        val signaled = written && DataBus.signal(DataBus.SIGNAL_REDIRECT_POLICY_CHANGED)
+        val written = DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_REDIRECT_POLICY, json)
+        val signaled = written && DataBus.signal(DataBusProtocol.SIGNAL_REDIRECT_POLICY_CHANGED)
         Log.d(TAG, "publishRedirectPolicy: generation=${snapshot.generation}")
         return written && signaled
     }
@@ -93,15 +94,15 @@ object SnapshotPublisher {
      * 规则变更时必须保持两者 generation/publisherEpoch 一致，避免 Hook
      * 和 native 层看到来自不同策略代数的事实。
      *
-     * @param policy 传入时复用调用方已构建并更新到 VfsRuntimeConfigStore 的
+     * @param policy 传入时复用调用方已构建并更新到 VfsRuntimePolicy 的
      *   同一份快照，保证 remount 与发布使用同一代策略（顺序治理）。
      */
     @JvmOverloads
     fun publishStorageRedirectPolicySet(policy: RedirectPolicySnapshot? = null): Boolean {
         if (!DataBus.ensureInitialized()) return false
 
-        val snapshot = policy ?: RuntimeRedirectPolicyFactory.build(SystemService.getUserIdsNoThrow())
-        VfsRuntimeConfigStore.updatePolicy(snapshot)
+        val snapshot = policy ?: RuntimePolicyProjector.project(SystemService.getUserIdsNoThrow())
+        VfsRuntimePolicy.updatePolicy(snapshot)
         val batchResult = SnapshotBatchCommitter.commit(
             publications = listOf(
                 redirectPolicyPublication(snapshot),
@@ -124,8 +125,8 @@ object SnapshotPublisher {
             return false
         }
 
-        val snapshot = RuntimeRedirectPolicyFactory.buildStopped()
-        VfsRuntimeConfigStore.updatePolicy(snapshot)
+        val snapshot = RuntimePolicyProjector.projectStopped()
+        VfsRuntimePolicy.updatePolicy(snapshot)
 
         val batchResult = SnapshotBatchCommitter.commit(
             publications = listOf(
@@ -148,13 +149,13 @@ object SnapshotPublisher {
     fun publishReadOnly(policy: RedirectPolicySnapshot? = null): Boolean {
         if (!DataBus.ensureInitialized()) return false
 
-        val snapshot = policy ?: RuntimeRedirectPolicyFactory.build(SystemService.getUserIdsNoThrow())
-        VfsRuntimeConfigStore.updatePolicy(snapshot)
+        val snapshot = policy ?: RuntimePolicyProjector.project(SystemService.getUserIdsNoThrow())
+        VfsRuntimePolicy.updatePolicy(snapshot)
 
         val json = serializeReadOnly(snapshot)
-        val written = DataBus.writeSnapshot(DataBus.SNAPSHOT_READ_ONLY, json)
-        val signaled = written && DataBus.signal(DataBus.SIGNAL_READ_ONLY_CHANGED)
-        Log.d(TAG, "publishReadOnly: packages=${snapshot.readOnlyRules.size}")
+        val written = DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_READ_ONLY, json)
+        val signaled = written && DataBus.signal(DataBusProtocol.SIGNAL_READ_ONLY_CHANGED)
+        Log.d(TAG, "publishReadOnly: packages=${snapshot.storage.readOnlyRules.size}")
         return written && signaled
     }
 
@@ -165,13 +166,13 @@ object SnapshotPublisher {
     fun publishConfiguredMountPoints(policy: RedirectPolicySnapshot? = null): Boolean {
         if (!DataBus.ensureInitialized()) return false
 
-        val snapshot = policy ?: RuntimeRedirectPolicyFactory.build(SystemService.getUserIdsNoThrow())
-        VfsRuntimeConfigStore.updatePolicy(snapshot)
+        val snapshot = policy ?: RuntimePolicyProjector.project(SystemService.getUserIdsNoThrow())
+        VfsRuntimePolicy.updatePolicy(snapshot)
         val mountPoints = RedirectPolicyDeriver.buildConfiguredMountPoints(snapshot)
 
         val json = serializeConfiguredMountPoints(mountPoints)
-        val written = DataBus.writeSnapshot(DataBus.SNAPSHOT_CONFIGURED_MOUNT_POINTS, json)
-        val signaled = written && DataBus.signal(DataBus.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
+        val written = DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_CONFIGURED_MOUNT_POINTS, json)
+        val signaled = written && DataBus.signal(DataBusProtocol.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
         Log.d(TAG, "publishConfiguredMountPoints: count=${mountPoints.points.size}")
         return written && signaled
     }
@@ -183,10 +184,10 @@ object SnapshotPublisher {
         if (!DataBus.ensureInitialized()) return false
 
         val caps = PlatformCapabilitiesDetector.detect()
-        VfsRuntimeConfigStore.updateCapabilities(caps)
+        VfsRuntimePolicy.updateCapabilities(caps)
         val json = PlatformCapabilitiesDetector.toJson(caps)
-        val written = DataBus.writeSnapshot(DataBus.SNAPSHOT_PLATFORM_CAPABILITIES, json)
-        val signaled = written && DataBus.signal(DataBus.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
+        val written = DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES, json)
+        val signaled = written && DataBus.signal(DataBusProtocol.SIGNAL_PLATFORM_CAPABILITIES_CHANGED)
         Log.d(TAG, "publishPlatformCapabilities: sdk=${caps.sdkVersionInt}, " +
                 "fuseBpf=${caps.isFuseBpfEnabled}, fuse=${caps.fuseAvailable}, " +
                 "mediaProvider=${caps.mediaProviderPackageName}, " +
@@ -212,25 +213,25 @@ object SnapshotPublisher {
 
     private fun redirectPolicyPublication(snapshot: RedirectPolicySnapshot): SnapshotPublication =
         SnapshotPublication(
-            snapshotName = DataBus.SNAPSHOT_REDIRECT_POLICY,
+            snapshotName = DataBusProtocol.SNAPSHOT_REDIRECT_POLICY,
             content = serializeRedirectPolicy(snapshot),
-            signalName = DataBus.SIGNAL_REDIRECT_POLICY_CHANGED,
+            signalName = DataBusProtocol.SIGNAL_REDIRECT_POLICY_CHANGED,
         )
 
     private fun readOnlyPublication(snapshot: RedirectPolicySnapshot): SnapshotPublication =
         SnapshotPublication(
-            snapshotName = DataBus.SNAPSHOT_READ_ONLY,
+            snapshotName = DataBusProtocol.SNAPSHOT_READ_ONLY,
             content = serializeReadOnly(snapshot),
-            signalName = DataBus.SIGNAL_READ_ONLY_CHANGED,
+            signalName = DataBusProtocol.SIGNAL_READ_ONLY_CHANGED,
         )
 
     private fun mountPointsPublication(snapshot: RedirectPolicySnapshot): SnapshotPublication =
         SnapshotPublication(
-            snapshotName = DataBus.SNAPSHOT_CONFIGURED_MOUNT_POINTS,
+            snapshotName = DataBusProtocol.SNAPSHOT_CONFIGURED_MOUNT_POINTS,
             content = serializeConfiguredMountPoints(
                 RedirectPolicyDeriver.buildConfiguredMountPoints(snapshot)
             ),
-            signalName = DataBus.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED,
+            signalName = DataBusProtocol.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED,
         )
 
     // ── JSON 序列化 ──
@@ -247,7 +248,7 @@ object SnapshotPublisher {
 
         // storageRedirectRules: { pkg: { userId: [{source, target}] } }
         val rulesObj = JSONObject()
-        for ((pkg, userRules) in snapshot.storageRedirectRules) {
+        for ((pkg, userRules) in snapshot.storage.redirectRules) {
             val userObj = JSONObject()
             for ((userId, rules) in userRules) {
                 val rulesArr = JSONArray()
@@ -265,19 +266,19 @@ object SnapshotPublisher {
 
         // readOnlyRules: { pkg: [paths] }
         val roObj = JSONObject()
-        for ((pkg, paths) in snapshot.readOnlyRules) {
+        for ((pkg, paths) in snapshot.storage.readOnlyRules) {
             roObj.put(pkg, JSONArray(paths as Collection<*>))
         }
         root.put("readOnlyRules", roObj)
 
         // denylist
-        root.put("denylist", JSONArray(snapshot.denylist.toList() as Collection<*>))
+        root.put("denylist", JSONArray(snapshot.behavior.deniedPackages.toList() as Collection<*>))
 
         // booleans
-        root.put("recordSharedStorage", snapshot.recordSharedStorage)
-        root.put("recordExternalAppSpecificStorage", snapshot.recordExternalAppSpecificStorage)
-        root.put("aggressivelyPromptForReadingMediaFiles", snapshot.aggressivelyPromptForReadingMediaFiles)
-        root.put("upsertRecords", snapshot.upsertRecords)
+        root.put("recordSharedStorage", snapshot.behavior.recordSharedStorage)
+        root.put("recordExternalAppSpecificStorage", snapshot.behavior.recordExternalAppSpecificStorage)
+        root.put("aggressivelyPromptForReadingMediaFiles", snapshot.behavior.aggressivelyPromptForReadingMediaFiles)
+        root.put("upsertRecords", snapshot.behavior.upsertRecords)
 
         return root.toString(2)
     }
@@ -292,7 +293,7 @@ object SnapshotPublisher {
         root.put("readOnlyRevision", snapshot.readOnlyRevision)
 
         val roObj = JSONObject()
-        for ((pkg, paths) in snapshot.readOnlyRules) {
+        for ((pkg, paths) in snapshot.storage.readOnlyRules) {
             roObj.put(pkg, JSONArray(paths as Collection<*>))
         }
         root.put("readOnlyRules", roObj)

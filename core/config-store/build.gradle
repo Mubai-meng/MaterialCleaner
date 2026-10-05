@@ -16,10 +16,14 @@ android {
     }
     namespace 'me.gm.cleaner.core.config'
     buildFeatures { buildConfig true }
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {
     api project(':core:storage-redirect-domain')
+    implementation project(':core:common')
     implementation "androidx.core:core-ktx:$rootProject.coreVersion"
     implementation "androidx.lifecycle:lifecycle-common:$rootProject.lifecycleVersion"
     implementation "androidx.preference:preference-ktx:$rootProject.preferenceVersion"

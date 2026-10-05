@@ -147,6 +147,7 @@
     <string name="service_status_retry_with_max">第 %1$d/%2$d 次尝试</string>
     <string name="service_status_retry">第 %d 次尝试</string>
     <string name="service_status_problem_detail">问题：%1$s - %2$s</string>
+    <string name="service_status_stale_reboot">版本不一致（%1$s），请重启手机</string>
     <string name="runtime_layer_vfs">VFS 主重定向</string>
     <string name="runtime_layer_media_provider_hook">媒体库路径修正</string>
     <string name="runtime_layer_fuse_native">FUSE 兼容层</string>
@@ -204,6 +205,7 @@
     <string name="confirm_exit_restart">重新启动</string>
     <string name="no_root_access">无法访问 root</string>
     <string name="service_need_upgrade">服务需升级</string>
+    <string name="service_need_reboot">已安装更新，请重启手机</string>
     <string name="service_exception_logcat_shutdown">日志猫已退出，请重启 Cleaner 服务</string>
 
     <string name="service_settings">质感清理</string>
