@@ -16,7 +16,88 @@ import me.gm.cleaner.runtime.server.ServerConstants;
 import me.gm.cleaner.runtime.server.util.StringUtils;
 
 public class ActivityManagerLogsObserver extends BaseProcessObserver {
-    private static final int INDEX_OF_TAG = 33;
+
+    public static final class ParsedProcLine {
+        public final int pid;
+        public final String processName;
+        public final String principal;
+
+        ParsedProcLine(int pid, String processName, String principal) {
+            this.pid = pid;
+            this.processName = processName;
+            this.principal = principal;
+        }
+    }
+
+    /**
+     * Start-proc 行纯解析。threadtime 的 pid/tid 列非定宽，
+     * 禁止按 tag 下标过滤——历史教训：INDEX_OF_TAG 按发射线程位宽随机丢行。
+     * 校验顺序与原内联逻辑一致（分隔符先验再切分），仅把无副作用的
+     * 格式校验提前，避免为异形行触发 PackageInfoMapper 全量初始化。
+     */
+    static ParsedProcLine parseStartProcLine(String line, String amStartProc) {
+        final var indexOfStartProc = line.indexOf(amStartProc);
+        if (indexOfStartProc == -1) {
+            return null;
+        }
+        // $pid:$processName/$logFormatAppPrincipalName for pre-top-activity, content provider, service {$packageName/$className} caller=$packageName
+        final var indexOfBrace = line.indexOf('{');
+        if (indexOfBrace == -1) {
+            return null;
+        }
+        final var start = StringUtils.substring(line, indexOfStartProc + 28, indexOfBrace);
+        // 异形行（如厂商定制 kill-reason 行）可能缺分隔符，先验下标再切分。
+        final var startSlash = start.indexOf('/');
+        final var startSpace = start.indexOf(' ');
+        if (startSlash == -1 || startSpace == -1 || startSpace <= startSlash) {
+            return null;
+        }
+        final var startColon = start.indexOf(':');
+        if (startColon == -1 || startColon > startSlash) {
+            return null;
+        }
+        final var pidStr = StringUtils.substring(start, 0, startColon);
+        if (!isDigitsOnly(pidStr)) {
+            return null;
+        }
+        return new ParsedProcLine(
+                Integer.parseInt(pidStr),
+                StringUtils.substring(start, startColon + 1, startSlash),
+                StringUtils.substring(start, startSlash + 1, startSpace));
+    }
+
+    /**
+     * Killing 行纯解析，同上禁止下标过滤。
+     * $pid:$processName/$logFormatAppPrincipalName (adj 0): stop $packageName due to from pid $pid
+     */
+    static ParsedProcLine parseKillingLine(String line, String amKilling, String phantomProcessRecord) {
+        final var indexOfKilling = line.indexOf(amKilling);
+        if (indexOfKilling == -1 || line.length() < indexOfKilling + 25) {
+            return null;
+        }
+        final var killing = StringUtils.substring(line, indexOfKilling + 25);
+        if (killing.startsWith(phantomProcessRecord)) {
+            return null;
+        }
+        // 同 start 分支：异形行缺分隔符时跳过，避免 substring 抛异常。
+        final var killingSlash = killing.indexOf('/');
+        final var killingSpace = killing.indexOf(' ');
+        if (killingSlash == -1 || killingSpace == -1 || killingSpace <= killingSlash) {
+            return null;
+        }
+        final var killingColon = killing.indexOf(':');
+        if (killingColon == -1 || killingColon > killingSlash) {
+            return null;
+        }
+        final var pidStr = StringUtils.substring(killing, 0, killingColon);
+        if (!isDigitsOnly(pidStr)) {
+            return null;
+        }
+        return new ParsedProcLine(
+                Integer.parseInt(pidStr),
+                StringUtils.substring(killing, killingColon + 1, killingSlash),
+                StringUtils.substring(killing, killingSlash + 1, killingSpace));
+    }
 
     private final CleanerServer mServer;
     private volatile boolean mHasAmStart = false;
@@ -233,29 +314,12 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                         // 时 readLine 不返回，心跳停滞，看门狗据此判假活（区别于 executor 关闭的真死）。
                         mLastReadAtMs = android.os.SystemClock.elapsedRealtime();
                         try {
-                            final var indexOfStartProc = line.indexOf(new String(amStartProc));
-                            if (indexOfStartProc != -1) {
-                                if (indexOfStartProc != INDEX_OF_TAG) {
-                                    continue;
-                                }
-                                // $pid:$processName/$logFormatAppPrincipalName for pre-top-activity, content provider, service {$packageName/$className} caller=$packageName
-                                final var indexOfBrace = line.indexOf('{');
-                                if (indexOfBrace == -1) {
-                                    continue;
-                                }
+                            final var parsedStart = parseStartProcLine(line, new String(amStartProc));
+                            if (parsedStart != null) {
                                 if (!mHasAmStart) {
                                     mHasAmStart = true;
                                 }
-                                final var start = StringUtils.substring(line, indexOfStartProc + 28, indexOfBrace);
-                                // 异形行（如厂商定制 kill-reason 行）可能缺分隔符，先验下标再切分，
-                                // 否则 substring 抛异常，debug 包还会连带杀死观察线程。
-                                final var startSlash = start.indexOf('/');
-                                final var startSpace = start.indexOf(' ');
-                                if (startSlash == -1 || startSpace == -1 || startSpace <= startSlash) {
-                                    continue;
-                                }
-                                final var logFormatAppPrincipalName = StringUtils.substring(start, startSlash + 1, startSpace);
-                                final var uid = PackageInfoMapper.getUid(logFormatAppPrincipalName);
+                                final var uid = PackageInfoMapper.getUid(parsedStart.principal);
                                 // 与 BaseProcessObserver 候选资格一致：隔离进程不进挂载链。
                                 if (RuntimeFileUtils.INSTANCE.isIsolatedUid(uid)) {
                                     continue;
@@ -263,63 +327,30 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                                 if (!isMounterActiveForUid(uid)) {
                                     continue;
                                 }
-                                final var startColon = start.indexOf(':');
-                                if (startColon == -1 || startColon > startSlash) {
-                                    continue;
-                                }
-                                final var processName = StringUtils.substring(start, startColon + 1, startSlash);
-
                                 final String packageName;
                                 if (getMounter().mountForAllPackages()) {
-                                    packageName = PackageInfoMapper.getPackageName(uid, processName);
+                                    packageName = PackageInfoMapper.getPackageName(uid, parsedStart.processName);
                                 } else {
-                                    packageName = PackageInfoMapper.getSrPackageName(uid, processName);
+                                    packageName = PackageInfoMapper.getSrPackageName(uid, parsedStart.processName);
                                 }
                                 if (!TextUtils.isEmpty(packageName)) {
-                                    final var pidStr = StringUtils.substring(start, 0, startColon);
-                                    if (!TextUtils.isDigitsOnly(pidStr)) {
-                                        continue;
-                                    }
-                                    final var pid = Integer.parseInt(pidStr);
-                                    Log.i("MC_REDIRECT", "[AMLogsObserver] Process start detected: pkg=" + packageName + " pid=" + pid + " uid=" + uid);
+                                    Log.i("MC_REDIRECT", "[AMLogsObserver] Process start detected: pkg=" + packageName + " pid=" + parsedStart.pid + " uid=" + uid);
                                     Log.i("MC_REDIRECT", "[AMLogsObserver] Triggering bindMount for " + packageName);
-                                    getMounter().bindMountAsync(packageName, pid, uid);
+                                    getMounter().bindMountAsync(packageName, parsedStart.pid, uid);
                                 }
                             } else {
-                                // $pid:$processName/$logFormatAppPrincipalName (adj 0): stop $packageName due to from pid $pid
-                                final var indexOfKilling = line.indexOf(new String(amKilling));
-                                if (indexOfKilling != INDEX_OF_TAG || line.length() < indexOfKilling + 25) {
+                                final var parsedKilling = parseKillingLine(
+                                        line, new String(amKilling), new String(phantomProcessRecord));
+                                if (parsedKilling == null) {
                                     continue;
                                 }
-                                final var killing = StringUtils.substring(line, indexOfKilling + 25);
-                                if (killing.startsWith(new String(phantomProcessRecord))) {
-                                    continue;
-                                }
-                                // 同 start 分支：异形行缺分隔符时跳过，避免 substring 抛异常。
-                                final var killingSlash = killing.indexOf('/');
-                                final var killingSpace = killing.indexOf(' ');
-                                if (killingSlash == -1 || killingSpace == -1 || killingSpace <= killingSlash) {
-                                    continue;
-                                }
-                                final var logFormatAppPrincipalName = StringUtils.substring(killing, killingSlash + 1, killingSpace);
-                                final var uid = PackageInfoMapper.getUid(logFormatAppPrincipalName);
+                                final var uid = PackageInfoMapper.getUid(parsedKilling.principal);
                                 if (!isMounterActiveForUid(uid)) {
                                     continue;
                                 }
-                                final var killingColon = killing.indexOf(':');
-                                if (killingColon == -1 || killingColon > killingSlash) {
-                                    continue;
-                                }
-                                final var processName = StringUtils.substring(killing, killingColon + 1, killingSlash);
-
-                                final var packageName = PackageInfoMapper.getPackageName(uid, processName);
+                                final var packageName = PackageInfoMapper.getPackageName(uid, parsedKilling.processName);
                                 if (!TextUtils.isEmpty(packageName)) {
-                                    final var pidStr = StringUtils.substring(killing, 0, killingColon);
-                                    if (!TextUtils.isDigitsOnly(pidStr)) {
-                                        continue;
-                                    }
-                                    final var pid = Integer.parseInt(pidStr);
-                                    getMounter().notifyProcessKilled(packageName, pid);
+                                    getMounter().notifyProcessKilled(packageName, parsedKilling.pid);
                                 }
                             }
                         } catch (StringIndexOutOfBoundsException e) {
@@ -344,6 +375,23 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                 mExecutor.shutdown();
             }
         });
+    }
+
+    /**
+     * 纯 JVM 数字判定（android.text.TextUtils 在单测不可 mock）。
+     * 空串返回 false：原 TextUtils 空串语义会导致 parseInt 抛 NumberFormatException，
+     * 该异常不在外层 StringIndexOutOfBounds 捕获内，会直接杀死单线程观察者。
+     */
+    static boolean isDigitsOnly(String value) {
+        if (value == null || value.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            if (!Character.isDigit(value.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public boolean hasAmStart() {
