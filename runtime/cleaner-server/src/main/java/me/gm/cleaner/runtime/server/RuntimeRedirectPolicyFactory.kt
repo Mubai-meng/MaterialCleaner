@@ -95,6 +95,7 @@ object RuntimeRedirectPolicyFactory {
             } else {
                 false
             },
+            fuseBpfBlockAll = if (preferencesReady) ServicePreferences.fuseBpfBlockAll else false,
             aggressivelyPromptForReadingMediaFiles = if (preferencesReady) {
                 ServicePreferences.aggressivelyPromptForReadingMediaFiles
             } else {
@@ -123,6 +124,7 @@ object RuntimeRedirectPolicyFactory {
             denylist = emptySet(),
             recordSharedStorage = false,
             recordExternalAppSpecificStorage = false,
+            fuseBpfBlockAll = false,
             aggressivelyPromptForReadingMediaFiles = false,
             upsertRecords = false,
         )

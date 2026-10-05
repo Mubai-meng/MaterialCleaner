@@ -33,6 +33,7 @@ private const val AGGRESSIVELY_PROMPT_FOR_READING_MEDIA_FILES_KEY = "aggressivel
 private const val AUTO_LOGGING_KEY = "auto_logging"
 private const val RECORD_SHARED_STORAGE_KEY = "record_shared_storage"
 private const val RECORD_EXTERNAL_APP_SPECIFIC_STORAGE_KEY = "record_external_app_specific_storage"
+private const val FUSE_BPF_BLOCK_ALL_KEY = "fuse_bpf_block_all"
 private const val UPSERT_KEY = "upsert"
 
 object ServicePreferences {
@@ -620,6 +621,19 @@ object ServicePreferences {
     // @Server
     val recordExternalAppSpecificStorage: Boolean
         get() = recordSharedStorage && preferences.getBoolean(RECORD_EXTERNAL_APP_SPECIFIC_STORAGE_KEY, false)
+
+    /**
+     * FUSE BPF 拦截范围开关（决策 D1）。
+     *
+     * `false`（默认）：只拦截 BPF 短路的"安装"，放行平台自身的"移除"操作——干预面最小。
+     * `true`：连"移除"一起拦截，完整复刻旧版对 `fuse_bpf_install` 整函数跳过的行为。
+     *
+     * 仅在 [recordExternalAppSpecificStorage] 生效时才有实际意义。
+     */
+    // @App
+    // @Server
+    val fuseBpfBlockAll: Boolean
+        get() = preferences.getBoolean(FUSE_BPF_BLOCK_ALL_KEY, false)
 
     // @App
     // @Server

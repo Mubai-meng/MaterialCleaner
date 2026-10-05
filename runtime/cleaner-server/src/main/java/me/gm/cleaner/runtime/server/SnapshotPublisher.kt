@@ -276,6 +276,7 @@ object SnapshotPublisher {
         // booleans
         root.put("recordSharedStorage", snapshot.recordSharedStorage)
         root.put("recordExternalAppSpecificStorage", snapshot.recordExternalAppSpecificStorage)
+        root.put("fuseBpfBlockAll", snapshot.fuseBpfBlockAll)
         root.put("aggressivelyPromptForReadingMediaFiles", snapshot.aggressivelyPromptForReadingMediaFiles)
         root.put("upsertRecords", snapshot.upsertRecords)
 

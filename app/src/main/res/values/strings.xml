@@ -107,6 +107,8 @@
     <string name="record_shared_storage_title">Record file operations in shared storage</string>
     <string name="record_external_app_specific_storage_title">(Experimental) Record file operations in external app-specific storage</string>
     <string name="record_external_app_specific_storage_summary">Enabling apps to access their specific storage via FUSE, which will cause a significant performance regression.</string>
+    <string name="fuse_bpf_block_all_title">(Experimental) Fully intercept FUSE BPF calls (including removal)</string>
+    <string name="fuse_bpf_block_all_summary">Off (recommended): only the BPF backing “install” is intercepted, while the platform’s own “remove” is passed through — the smallest intervention, and no kernel BPF program is left behind. On: the “remove” is intercepted as well, fully replicating the legacy fuse_bpf_install behavior — but a kernel BPF program may then linger on Android/data package directories, letting that subtree bypass FUSE and escape redirection.</string>
     <string name="upsert_title">Save data using upsert</string>
     <string name="upsert_summary">Only keep the latest one for duplicate data.</string>
     <string name="storage_redirect_prompt">Storage Redirect Prompt</string>

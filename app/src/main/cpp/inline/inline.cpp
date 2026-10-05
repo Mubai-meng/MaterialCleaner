@@ -63,7 +63,7 @@ jint JNI_OnLoad(JavaVM *jvm, void *v __unused) {
     auto a = AY_OBFUSCATE("a"); // "a" - short method name
     auto init = AY_OBFUSCATE("init"); // "init"
     JNINativeMethod methods[] = {
-            {a, AY_OBFUSCATE("([Ljava/lang/String;Z)V"), // "([Ljava/lang/String;Z)V"
+            {a, AY_OBFUSCATE("([Ljava/lang/String;ZZ)V"), // "([Ljava/lang/String;ZZ)V"
              (void *) bpf_hook::commitPolicy},
             {init, AY_OBFUSCATE("()Ljava/lang/String;"), (void *) xhook_init_jni},
     };

@@ -82,6 +82,8 @@
     <string name="record_shared_storage_title">記錄共享儲存空間中的文件操作</string>
     <string name="record_external_app_specific_storage_title">（實驗性）記錄外部應用專屬儲存空間中的文件操作</string>
     <string name="record_external_app_specific_storage_summary">使應用通過 FUSE 訪問其專屬儲存空間，會使得性能顯著下降</string>
+    <string name="fuse_bpf_block_all_title">（實驗性）完整攔截 FUSE BPF 呼叫（含「移除」）</string>
+    <string name="fuse_bpf_block_all_summary">關閉（推薦）：只攔截 BPF 短路的「安裝」，放行平台自身的「移除」操作——干預面最小，且不會殘留核心 BPF 程式。開啟：連「移除」一起攔截，完整複製舊版 fuse_bpf_install 的行為——但可能讓 Android/data 下的套件名稱目錄殘留核心 BPF 程式，使其子樹穿透 FUSE 而繞過重導向。</string>
     <string name="upsert_title">使用 upsert 保存數據</string>
     <string name="upsert_summary">重複的數據只保留最新的一份</string>
     <string name="storage_redirect_prompt">儲存重定向提示</string>

@@ -6,6 +6,23 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// ── 单 ABI 收敛（任务名驱动）────────────────────────────────────
+// 本项目 externalNativeBuild 默认对全部 ABI 各编译一遍并打成通用 APK，
+// 日常迭代既慢又浪费。约定：构建任务名中出现 ABI 关键字时只编译该 ABI，
+// 例：./gradlew assembleArm64Release  → 仅 arm64-v8a。
+// 未命中任何关键字（如直接 assembleRelease）时保持 AGP 默认行为，
+// 不改变既有语义，也不影响通用 APK 的产出。
+// 注意：必须在 android{} 求值前完成判定，故置于脚本顶部。
+// ────────────────────────────────────────────────────────────────
+def abiFromTaskName = {
+    def names = gradle.startParameter.taskNames.join(' ').toLowerCase(Locale.ROOT)
+    if (names.contains('arm64')) return 'arm64-v8a'
+    if (names.contains('armeabi') || names.contains('armv7')) return 'armeabi-v7a'
+    if (names.contains('x86_64') || names.contains('x8664')) return 'x86_64'
+    if (names.contains('x86')) return 'x86'
+    return null
+}()
+
 android {
     compileSdk rootProject.ext.compileSdk
     buildToolsVersion = rootProject.ext.buildToolsVersion
@@ -21,6 +38,12 @@ android {
         externalNativeBuild.cmake {
             arguments '-DANDROID_STL=none'
             cFlags ''
+        }
+
+        // 任务名驱动单 ABI：仅当任务名显式带上 ABI 关键字时才收敛，
+        // 常规构建（assembleRelease 等）继续产出通用 APK。
+        if (abiFromTaskName != null) {
+            ndk { abiFilters abiFromTaskName }
         }
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -229,6 +252,18 @@ tasks.matching { it.name == 'mergeDebugAssets' }.configureEach {
 }
 tasks.matching { it.name == 'mergeReleaseAssets' }.configureEach {
     dependsOn releaseMainJarTask
+}
+
+// ── 单 ABI 构建入口别名 ────────────────────────────────────────
+// 任务名本身即 ABI 开关（判定见脚本顶部 abiFromTaskName），
+// 这里只负责把请求路由到官方 assemble 任务，不重复实现构建逻辑。
+// 用法：./gradlew assembleArm64Release  → 仅 arm64-v8a 的 release 产物。
+['Debug', 'Release'].each { variant ->
+    tasks.register("assembleArm64${variant}") {
+        group = 'Cleaner'
+        description = "仅 arm64-v8a 的 ${variant} 构建（等价 assemble${variant}，ABI 由任务名收敛）"
+        dependsOn "assemble${variant}"
+    }
 }
 
 dependencies {

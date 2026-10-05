@@ -20,6 +20,7 @@ package me.gm.cleaner.core.storage.redirect.domain
  * @property denylist 黑名单包名集合（不参与重定向的包）
  * @property recordSharedStorage 是否记录共享存储事件
  * @property recordExternalAppSpecificStorage 是否处理外部应用专属存储
+ * @property fuseBpfBlockAll FUSE BPF 拦截范围开关：true 表示连"移除"语义一起拦截（默认只拦"安装"）
  * @property aggressivelyPromptForReadingMediaFiles 是否激进提示媒体文件读取
  * @property upsertRecords 是否 upsert 文件系统记录
  */
@@ -38,6 +39,7 @@ data class RedirectPolicySnapshot(
     val denylist: Set<String> = emptySet(),
     val recordSharedStorage: Boolean = false,
     val recordExternalAppSpecificStorage: Boolean = false,
+    val fuseBpfBlockAll: Boolean = false,
     val aggressivelyPromptForReadingMediaFiles: Boolean = false,
     val upsertRecords: Boolean = true,
 )

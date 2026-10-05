@@ -319,6 +319,18 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                 super.onPreferenceChange(preference, newValue)
         }
 
+        // 决策 D1：是否连 fuse_bpf_fill_entries 的“移除”语义一起拦截。
+        // 属于“记录外部应用专属目录”的子开关，随父开关一起下发到 MediaProvider Hook。
+        val fuseBpfBlockAll = findPreference<SwitchPreferenceCompat>(
+            getString(me.gm.cleaner.shared.R.string.fuse_bpf_block_all_key)
+        )
+        fuseBpfBlockAll?.onPreferenceChangeListener = object :
+            NotifyServerPreferenceChangeListener() {
+
+            override fun onPreferenceChange(preference: Preference, newValue: Any?): Boolean =
+                super.onPreferenceChange(preference, newValue)
+        }
+
         val upsert = findPreference<SwitchPreferenceCompat>(
             getString(me.gm.cleaner.shared.R.string.upsert_key)
         )

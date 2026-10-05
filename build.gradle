@@ -39,9 +39,22 @@ allprojects {
     }
 }
 
-def gitCommitCount = Integer.parseInt(
-        ['git', 'rev-list', '--count', 'HEAD'].execute(null, project.rootDir).text.trim()
-)
+// versionCode 单一真源：优先取当前仓库提交数（与上游一致，随每次提交自动递增）。
+// 防御性回退：无 git 的分发场景（tarball 解包、git 不可用、浅拷贝失败）下，
+// ['git', ...].execute() 会产出空串或直接抛 IOException，原实现在此处
+// Integer.parseInt("") 会抛 NumberFormatException，使整个构建在配置期就失败。
+// 回退到基线 1，保证任何环境下都能完成配置；有 git 时语义与上游完全一致。
+def FALLBACK_VERSION_CODE = 1
+def resolveGitCommitCount = {
+    try {
+        def text = ['git', 'rev-list', '--count', 'HEAD']
+                .execute(null, project.rootDir).text.trim()
+        return text.isInteger() ? Integer.parseInt(text) : FALLBACK_VERSION_CODE
+    } catch (Throwable ignored) {
+        return FALLBACK_VERSION_CODE
+    }
+}
+def gitCommitCount = resolveGitCommitCount()
 
 ext {
     minSdk = 26

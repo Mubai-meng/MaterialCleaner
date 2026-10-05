@@ -94,6 +94,13 @@
             app:iconSpaceReserved="false" />
 
         <SwitchPreferenceCompat
+            android:dependency="@string/record_external_app_specific_storage_key"
+            android:key="@string/fuse_bpf_block_all_key"
+            android:summary="@string/fuse_bpf_block_all_summary"
+            android:title="@string/fuse_bpf_block_all_title"
+            app:iconSpaceReserved="false" />
+
+        <SwitchPreferenceCompat
             android:defaultValue="true"
             android:key="@string/upsert_key"
             android:summary="@string/upsert_summary"

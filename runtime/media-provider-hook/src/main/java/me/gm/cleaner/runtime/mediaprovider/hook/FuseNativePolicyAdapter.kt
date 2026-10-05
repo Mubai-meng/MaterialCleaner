@@ -59,9 +59,11 @@ object FuseNativePolicyAdapter {
                     "Native hook not ready, state=" + NativeHookStatus.currentInlineState()
                 )
             }
-            // 单次 JNI 调用原子应用两维度，消除分次调用的不一致窗口。
+            // 单次 JNI 调用原子应用三维度，消除分次调用的不一致窗口。
             InlineHookConfig.commitPolicy(
-                points, HookPolicyCache.recordExternalAppSpecificStorage
+                points,
+                HookPolicyCache.recordExternalAppSpecificStorage,
+                HookPolicyCache.fuseBpfBlockAll,
             )
             NativeHookStatus.markMountPointsApplySucceeded(
                 generation,
