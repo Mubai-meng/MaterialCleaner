@@ -1,28 +1,20 @@
 package me.gm.cleaner.client.ui.storageredirect
 
+import me.gm.cleaner.core.storage.redirect.domain.MountPlanDeriver
+import me.gm.cleaner.core.storage.redirect.domain.RedirectRule
+
 /**
  * 向导/界面可达性分析：无意义规则标灰与可达路径预览。
  *
  * P8 外迁：原 `MountRules.meaninglessRulesIndices/getAccessiblePlaces` 的逐字
  * 搬运，语义不变。运行时挂载/Hook/推导已改走规范解释器，不再经过这里；
- * 本对象仅服务界面展示，可独立于领域层演进。
+ * 本对象仅服务界面展示，展示分析复用领域解释器。
  */
 object RedirectReachabilityAnalyzer {
 
     fun mountedPath(rules: List<Pair<String, String>>, path: String): String {
-        val lastMatch = rules.indexOfLast { (_, target) ->
-            startsWithPath(path, target)
-        }
-        if (lastMatch == -1) {
-            return path
-        }
-        var mountedPath = path
-        rules.subList(lastMatch, rules.size).forEach { (source, target) ->
-            if (startsWithPath(mountedPath, target)) {
-                mountedPath = source + mountedPath.substring(target.length)
-            }
-        }
-        return mountedPath
+        val domainRules = rules.map { (source, target) -> RedirectRule(source, target) }
+        return MountPlanDeriver.resolveMountedPath(domainRules, path)
     }
 
     fun redundantIndices(rules: List<Pair<String, String>>): List<Int> {
