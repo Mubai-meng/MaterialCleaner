@@ -75,6 +75,11 @@ class LayerOrchestrator(
 
         val dataBusReady = SnapshotPublisher.publishAll()
 
+        // 启动即收敛：publish 只更新快照，不管存量进程命名空间；
+        // 不在这里 remountAll 的话，重启前挂上的进程将永久失 cover，
+        // 直到下一次规则变更（挂载 decay 的根因之一）。
+        ObserverManager.getObserver(BaseProcessObserver::class.java)?.remountAll()
+
         MediaProviderHookGateway.registerAndRefreshFromDataBus(server)
         if (!dataBusReady) {
             Log.w(TAG, "DataBus unavailable during initialize, snapshots will be published on reconnect")
