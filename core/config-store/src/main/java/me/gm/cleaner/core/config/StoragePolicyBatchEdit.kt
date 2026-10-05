@@ -30,28 +30,53 @@ class StoragePolicyBatchEdit(
         pendingReadOnly = stageReadOnly(pendingReadOnly, rawRules, packageNames)
     }
 
-    fun commit(): Boolean {
+    fun commitStructured(): BatchCommitResult {
         check(!committed) { "批量编辑已提交，不可复用" }
         committed = true
         if (stageFailed) {
-            return false
+            return BatchCommitResult(
+                overall = BatchCommitResult.Overall.FAILURE,
+                redirect = null,
+                readOnly = null,
+                stageFailed = true,
+            )
         }
-        var ok = true
+        var redirectResult: PolicyStoreResult? = null
+        var readOnlyResult: PolicyStoreResult? = null
         pendingRedirect?.let { pending ->
             val result = store.updateRedirect(baseRedirectRevision!!) { pending }
+            redirectResult = result
             if (!result.success) {
                 Log.e(TAG, "Failed to commit redirect policy batch: ${result.error}")
-                ok = false
             }
         }
         pendingReadOnly?.let { pending ->
             val result = store.updateReadOnly(baseReadOnlyRevision!!) { pending }
+            readOnlyResult = result
             if (!result.success) {
                 Log.e(TAG, "Failed to commit read-only policy batch: ${result.error}")
-                ok = false
             }
         }
-        return ok
+        val attempted = listOfNotNull(redirectResult, readOnlyResult)
+        val overall = when {
+            attempted.all { it.success } -> BatchCommitResult.Overall.SUCCESS
+            attempted.any { it.success } -> BatchCommitResult.Overall.PARTIAL
+            else -> BatchCommitResult.Overall.FAILURE
+        }
+        return BatchCommitResult(
+            overall = overall,
+            redirect = redirectResult,
+            readOnly = readOnlyResult,
+            stageFailed = false,
+        )
+    }
+
+    @Deprecated(
+        message = "请改用 commitStructured 以区分 SUCCESS / PARTIAL / FAILURE",
+        replaceWith = ReplaceWith("commitStructured().overall == BatchCommitOverall.SUCCESS"),
+    )
+    fun commit(): Boolean {
+        return commitStructured().overall == BatchCommitResult.Overall.SUCCESS
     }
 
     private fun stageRedirect(

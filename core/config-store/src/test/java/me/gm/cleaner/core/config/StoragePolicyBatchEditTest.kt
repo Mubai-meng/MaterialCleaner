@@ -2,11 +2,14 @@ package me.gm.cleaner.core.config
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
+@Suppress("DEPRECATION")
 class StoragePolicyBatchEditTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()
@@ -71,5 +74,48 @@ class StoragePolicyBatchEditTest {
         assertFalse(tx.commit())
         assertEquals(listOf("/other" to "/target"), store.getPackageSrZipped("p2"))
         assertTrue(store.getPackageSrZipped("p1").isEmpty())
+    }
+
+    @Test
+    fun `redirect 成功与 readOnly 冲突时返回 PARTIAL 且不回滚`() {
+        val store = FileConfiguredPolicyStore(temporaryFolder.root)
+        val tx = StoragePolicyBatchEdit(store)
+        tx.putRedirect(listOf("/a" to "/b"), listOf("p1"))
+        tx.putReadOnly(listOf("/ro"), listOf("p1"))
+        // 外部推进 read-only 版本，制造该域的 revision 冲突；redirect 版本不受影响。
+        store.updateReadOnly(store.readReadOnly().revision) {
+            it.replaceReadOnlyRules(listOf("/other"), listOf("p2"))
+        }
+
+        val result = tx.commitStructured()
+
+        assertEquals(BatchCommitResult.Overall.PARTIAL, result.overall)
+        assertFalse(result.stageFailed)
+        assertNotNull(result.redirect)
+        assertTrue(result.redirect!!.success)
+        assertNotNull(result.readOnly)
+        assertFalse(result.readOnly!!.success)
+        assertEquals(PolicyStoreFailureKind.REVISION_CONFLICT, result.readOnly!!.failureKind)
+        // 已成功的 redirect 不回滚，冲突的 read-only 未写入。
+        assertEquals(listOf("/a" to "/b"), store.getPackageSrZipped("p1"))
+        assertTrue(store.getPackageReadOnly("p1").isEmpty())
+        assertEquals(listOf("/other"), store.getPackageReadOnly("p2"))
+    }
+
+    @Test
+    fun `暂存失败时结构化结果两域为 null 且不写入`() {
+        val store = FileConfiguredPolicyStore(temporaryFolder.root)
+        val tx = StoragePolicyBatchEdit(store)
+        tx.putRedirect(listOf("/a" to "/b"), listOf("p1"))
+        tx.putReadOnly(listOf("/ro"), listOf(""))
+
+        val result = tx.commitStructured()
+
+        assertEquals(BatchCommitResult.Overall.FAILURE, result.overall)
+        assertTrue(result.stageFailed)
+        assertNull(result.redirect)
+        assertNull(result.readOnly)
+        assertTrue(store.getPackageSrZipped("p1").isEmpty())
+        assertTrue(store.getPackageReadOnly("p1").isEmpty())
     }
 }
