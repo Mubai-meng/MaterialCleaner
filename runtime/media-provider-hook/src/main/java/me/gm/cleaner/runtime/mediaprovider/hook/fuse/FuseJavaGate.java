@@ -36,10 +36,11 @@ import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol;
  * {@link BehaviorRegistry} 方法名匹配 + {@link ParameterAnalyzer} 参数推断，
  * 自动适配 Android 版本差异和厂商 ROM 自定义签名。
  * <p>
- * 行为模板（BehaviorHandler）六种：
+ * 行为模板（BehaviorHandler）七种：
  * - fileOp(eventType)：insert / delete 等文件操作（事件分发 + 只读检查 + 路径重定向）
  * - renameOp：重命名（双路径重定向 + 双事件 + 双只读检查）
- * - simpleRedirect：仅路径重定向（openWithFuse 等）
+ * - simpleRedirect：仅路径重定向
+ * - openOp：open 类重定向 + 已知 mode 才做 PFD 写判定与只读拒绝，未知 mode 只重定向
  * - multiArgConsistency：路径重定向 + 多 String 参数同步（onFileLookup/OpenForFuse 等）
  * - accessCheck：目录访问检查（自动识别 int / boolean 第三个参数变体）
  * - uidTracking：仅跟踪 uid 访问（isUidAllowedAccess...）
@@ -254,7 +255,7 @@ public class FuseJavaGate {
     }
 
     /**
-     * 品种 C — simpleRedirect：仅路径重定向（openWithFuse 等）。
+     * 品种 C — simpleRedirect：仅路径重定向。
      * <p>
      * 无事件分发、无只读检查 —— 只做路径替换。
      */
@@ -267,6 +268,46 @@ public class FuseJavaGate {
             }
             redirectFusePath(param, roles.pathIndex, uid, methodName);
         };
+    }
+
+    /**
+     * 品种 C2 — openOp：open 类方法的路径重定向 + 写入只读检查。
+     * <p>
+     * 行为链：路径重定向 → 同步匹配 String 参数 → mode 已知才做 PFD 写判定 → 写+只读则按方法契约拒绝。
+     * 未知 mode 一律 fail-open：只重定向，不做只读判定。
+     */
+    private BehaviorHandler openOp() {
+        return (param, roles, methodName) -> {
+            final String originalPath = (String) param.args[roles.pathIndex];
+            final int uid = resolveUid(param, roles, methodName);
+            if (uid < 0) {
+                Log.w("MC_REDIRECT", "[FuseJavaGate] " + methodName + " cannot find uid, skipping redirect");
+                return;
+            }
+            final String mountedPath = redirectFusePath(param, roles.pathIndex, uid, methodName);
+            redirectMatchingStringPathArgs(param, originalPath, mountedPath);
+            final Integer modeBits;
+            if (roles.modeIndex < 0 || roles.modeIndex >= param.args.length) {
+                modeBits = null;
+            } else {
+                final Object modeArg = param.args[roles.modeIndex];
+                modeBits = modeArg instanceof Integer ? (Integer) modeArg : null;
+            }
+            final boolean readOnly = mountedPath != null && mService.isReadOnly(mountedPath, uid);
+            if (FuseOpenModePolicyKt.shouldDenyOpen(modeBits, readOnly)) {
+                rejectOpenHandle(param, methodName);
+            }
+        };
+    }
+
+    /**
+     * open 句柄拒绝：按 openWithFuse 的 Java 契约抛异常，不返回 int errno。
+     * <p>
+     * openWithFuse 返回 ParcelFileDescriptor，直接 setResult(EPERM) 会造成调用方类型错配。
+     */
+    private void rejectOpenHandle(final XC_MethodHook.MethodHookParam param, final String methodName) {
+        Log.i("MC_REDIRECT", "[FuseJavaGate] " + methodName + " denied by read-only rule");
+        param.setThrowable(new java.io.FileNotFoundException("EPERM: denied by read-only rule"));
     }
 
     /**
@@ -393,7 +434,7 @@ public class FuseJavaGate {
     /**
      * 行为处理函数接口 —— 所有 FUSE 方法 Hook 回调的统一抽象。
      * <p>
-     * 六个实现品种：fileOp、renameOp、simpleRedirect、multiArgConsistency、accessCheck、uidTracking。
+     * 七个实现品种：fileOp、renameOp、simpleRedirect、openOp、multiArgConsistency、accessCheck、uidTracking。
      * 每个品种通过 {@link FuseJavaGate} 中的工厂方法创建。
      */
     @FunctionalInterface
@@ -426,9 +467,10 @@ public class FuseJavaGate {
             exactRegistry.put("insertfileifnecessaryforfuse", fileOp(FileObserver.CREATE));
             exactRegistry.put("deletefileforfuse", fileOp(FileObserver.DELETE));
             exactRegistry.put("renameforfuse", renameOp());
-            exactRegistry.put("openwithfuse", simpleRedirect());
+            exactRegistry.put("openwithfuse", openOp());
             exactRegistry.put("onfilelookupforfuse", multiArgConsistency());
             exactRegistry.put("onfileopenforfuse", multiArgConsistency());
+            exactRegistry.put("onfilecreatedforfuse", multiArgConsistency());
             exactRegistry.put("isdiraccessallowedforfuse", accessCheck());
             exactRegistry.put("isdirectorycreationordeletionallowedforfuse", accessCheck());
             exactRegistry.put("isuidallowedaccesstodataorobbpathforfuse", uidTracking());
@@ -438,7 +480,7 @@ public class FuseJavaGate {
             heuristicRules.add(new HeuristicRule("insert", fileOp(FileObserver.CREATE)));
             heuristicRules.add(new HeuristicRule("delete", fileOp(FileObserver.DELETE)));
             heuristicRules.add(new HeuristicRule("rename", renameOp()));
-            heuristicRules.add(new HeuristicRule("open", simpleRedirect()));
+            heuristicRules.add(new HeuristicRule("open", openOp()));
             // "onFile" 前缀 → multiArgConsistency
             heuristicRules.add(new HeuristicRule.PrefixRule("onfile", multiArgConsistency()));
             // "isDir" 或 "isDirectory" 前缀 → accessCheck
@@ -536,7 +578,7 @@ public class FuseJavaGate {
         }
         // 纯决策下沉到 FuseRoleSanitizer（零 Android 依赖，可单测），此处只做日志与组装。
         final int[] clean = FuseRoleSanitizerKt.sanitizeRoleIndices(
-                roles.pathIndex, roles.path2Index, roles.uidIndex, method.getParameterTypes());
+                roles.pathIndex, roles.path2Index, roles.uidIndex, roles.modeIndex, method.getParameterTypes());
         if (clean == null) {
             return null;
         }
@@ -548,10 +590,14 @@ public class FuseJavaGate {
             Log.w("MC_REDIRECT", "[FuseJavaGate] clamping uidIndex " + roles.uidIndex + " to -1 for "
                     + method.getName() + " " + Arrays.toString(method.getParameterTypes()));
         }
-        if (clean[1] == roles.path2Index && clean[2] == roles.uidIndex) {
+        if (clean[3] != roles.modeIndex) {
+            Log.w("MC_REDIRECT", "[FuseJavaGate] clamping modeIndex " + roles.modeIndex + " to -1 for "
+                    + method.getName() + " " + Arrays.toString(method.getParameterTypes()));
+        }
+        if (clean[1] == roles.path2Index && clean[2] == roles.uidIndex && clean[3] == roles.modeIndex) {
             return roles;
         }
-        return new ParamRoles(clean[0], clean[1], clean[2], roles.extraRole);
+        return new ParamRoles(clean[0], clean[1], clean[2], clean[3], roles.extraRole);
     }
 
     // ════════════════════════════════════════════════════════════════

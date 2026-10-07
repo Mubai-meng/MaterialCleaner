@@ -21,20 +21,23 @@ class ParamRoles {
     final int path2Index;
     /** uid 参数索引，-1 表示需运行时推断 */
     final int uidIndex;
+    /** open mode 参数索引，-1 表示未知/无需判定 */
+    final int modeIndex;
     /** 额外参数角色语义 */
     final ExtraParamRole extraRole;
 
-    ParamRoles(int pathIndex, int path2Index, int uidIndex, ExtraParamRole extraRole) {
+    ParamRoles(int pathIndex, int path2Index, int uidIndex, int modeIndex, ExtraParamRole extraRole) {
         this.pathIndex = pathIndex;
         this.path2Index = path2Index;
         this.uidIndex = uidIndex;
+        this.modeIndex = modeIndex;
         this.extraRole = extraRole;
     }
 
     @Override
     public String toString() {
         return "ParamRoles{path=" + pathIndex + ", path2=" + path2Index
-                + ", uid=" + uidIndex + ", extra=" + extraRole + "}";
+                + ", uid=" + uidIndex + ", mode=" + modeIndex + ", extra=" + extraRole + "}";
     }
 }
 
@@ -95,7 +98,7 @@ class ParameterAnalyzer {
         // isUid* 系列：参数反转 (int uid, String path)
         if (name.startsWith("isuid") && types.length >= 2) {
             return new ParamRoles(/*pathIndex=*/1, /*path2Index=*/-1,
-                    /*uidIndex=*/0, ExtraParamRole.NONE);
+                    /*uidIndex=*/0, /*modeIndex=*/-1, ExtraParamRole.NONE);
         }
 
         // ── 路径参数发现 ──
@@ -128,7 +131,21 @@ class ParameterAnalyzer {
                     extra = ExtraParamRole.ACCESS_TYPE_INT;
                 }
             }
-            return new ParamRoles(pathIndex, path2Index, uidIdx, extra);
+            return new ParamRoles(pathIndex, path2Index, uidIdx, /*modeIndex=*/-1, extra);
+        }
+
+        // ── 已知 openWithFuse 精确签名：mode 是独立位置角色，不做泛化推断 ──
+        // (String path, int uid, int mediaCapabilitiesUid, int modeBits, boolean, boolean, int)
+        if (name.equals("openwithfuse") && types.length == 7
+                && types[0] == String.class
+                && types[1] == int.class
+                && types[2] == int.class
+                && types[3] == int.class
+                && types[4] == boolean.class
+                && types[5] == boolean.class
+                && types[6] == int.class) {
+            return new ParamRoles(pathIndex, /*path2Index=*/-1,
+                    /*uidIndex=*/1, /*modeIndex=*/3, ExtraParamRole.NONE);
         }
 
         // ── Level 2: 参数类型序列分析 ──
@@ -145,13 +162,13 @@ class ParameterAnalyzer {
 
         if (intIndices.isEmpty()) {
             // 无 int 参数 → 运行时推断 uid
-            return new ParamRoles(pathIndex, path2Index, -1, ExtraParamRole.NONE);
+            return new ParamRoles(pathIndex, path2Index, -1, /*modeIndex=*/-1, ExtraParamRole.NONE);
         }
 
         // 单 int 参数 → 一定是 uid
         if (intIndices.size() == 1) {
             uidIndex = intIndices.get(0);
-            return new ParamRoles(pathIndex, path2Index, uidIndex, ExtraParamRole.NONE);
+            return new ParamRoles(pathIndex, path2Index, uidIndex, /*modeIndex=*/-1, ExtraParamRole.NONE);
         }
 
         // 多 int 参数 —— 根据方法名判断
@@ -161,8 +178,9 @@ class ParameterAnalyzer {
             // deleteFileForFuse(String, int, int) → 第三个 int 忽略
             extra = ExtraParamRole.IGNORE;
         }
-        // 其他情况（如 openWithFuse 多重建载）：第一个 int 是 uid，多余的静默忽略
+        // 其他情况（如 openWithFuse 多重建载）：第一个 int 是 uid，多余的静默忽略；
+        // mode 仅对已知精确签名标定，未知一律 -1 走 fail-open。
 
-        return new ParamRoles(pathIndex, path2Index, uidIndex, extra);
+        return new ParamRoles(pathIndex, path2Index, uidIndex, /*modeIndex=*/-1, extra);
     }
 }
