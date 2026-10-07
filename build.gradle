@@ -64,8 +64,8 @@ ext {
     // 本适配分支按发布节奏**手工指定**版本号，不再随提交数自增。
     // 上游的"提交数即 versionCode"逻辑整体保留在上方 resolveGitCommitCount 中，
     // 若要切回，把下面一行改回 `versionCode = gitCommitCount` 即可。
-    versionCode = 426
-    versionName = '4.2.6'
+    versionCode = 427
+    versionName = '4.2.7'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 

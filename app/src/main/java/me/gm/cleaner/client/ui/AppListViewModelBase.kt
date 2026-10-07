@@ -60,29 +60,44 @@ abstract class AppListViewModelBase(application: Application) :
                         (it.packageInfo.sharedUserId ?: "").contains(queryText, true)
             }
         }
-        sequence = when (ServicePreferences.sortBy) {
-            ServicePreferences.SORT_BY_NAME ->
-                sequence.sortedWith(collatorComparator { it.label })
+        AppListState.Done(sequence.sortedWith(appListComparator()).toList())
+    }
 
-            ServicePreferences.SORT_BY_UPDATE_TIME ->
-                sequence.sortedByDescending { it.packageInfo.lastUpdateTime }
-
+    /**
+     * 应用列表排序的**唯一**入口。
+     *
+     * 首选项（排序方式 / 规则数 / 挂载状态）每次求值都重新读取 —— 排序菜单可以随时改，
+     * 不能缓存。真正的比较链与全序兜底在 [AppListOrdering.comparator]。
+     *
+     * 旧实现是三层独立的稳定排序（`sortedWith` 之后再 `sortedByDescending` 两次）。
+     * 稳定排序本身没问题，三层也确实是「后者为主键」，但三层主键的取值都很稀疏，
+     * 残余并列会一路漏到 `PackageManager` 的返回顺序上 —— 那个顺序没有稳定性保证。
+     */
+    private fun appListComparator(): Comparator<AppListModel> {
+        val byUpdateTime = when (ServicePreferences.sortBy) {
+            ServicePreferences.SORT_BY_NAME -> false
+            ServicePreferences.SORT_BY_UPDATE_TIME -> true
             else -> throw IllegalArgumentException()
         }
-        if (ServicePreferences.ruleCount) {
-            sequence = sequence.sortedByDescending {
-                val c1 = if (it.mountRulesCount > 0) 2 else 0
-                val c2 = if (it.readOnlyCount > 0) 1 else 0
-                c1 + c2
-            }
-        }
-        if (ServicePreferences.mountState) {
-            sequence = sequence.sortedByDescending {
-                it.mountState
-            }
-        }
-        AppListState.Done(sequence.toList())
+        val label = collatorComparator<String> { it }
+        return AppListOrdering.comparator(
+            mountStateFirst = ServicePreferences.mountState,
+            ruleCountFirst = ServicePreferences.ruleCount,
+            byUpdateTime = byUpdateTime,
+            compareLabel = { o1, o2 -> label.compare(o1, o2) },
+        )
     }
+
+    /**
+     * 主界面「已挂载应用」列表：过滤与排序的唯一入口。
+     *
+     * ⚠️ 主界面的**所有**提交路径都必须经由本方法。历史上
+     * `AppListFragment.loadMountedApps()` 直接 `submitList(loaded.filter{...})`，
+     * 完全没有排序，与 `appsFlow` 那条已排序的路径并发提交、互相覆盖，
+     * 列表就在「排序后」与「PackageManager 原始序」之间来回跳。
+     */
+    fun mountedApps(list: List<AppListModel>): List<AppListModel> =
+        AppListOrdering.mounted(appListComparator(), list)
 
     protected suspend fun loadAppsCommon() {
         if (BuildConfig.DEBUG) Log.i(

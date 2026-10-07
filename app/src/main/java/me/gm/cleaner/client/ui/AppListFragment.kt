@@ -173,13 +173,9 @@ class AppListFragment : BaseServiceSettingsFragment() {
                 viewModel.appsFlow.collect { state ->
                     when (state) {
                         is AppListState.Done -> {
-                            // "已挂载应用"列表 = 设置过**任意**规则的应用。
-                            // 只读规则（ReadOnlyRule）同样是有效规则，只是不走 bind mount，
-                            // 若只按 mountRulesCount 过滤，只配了只读规则的应用会整条消失。
-                            val mounted = state.list.filter {
-                                it.mountRulesCount > 0 || it.readOnlyCount > 0
-                            }
-                            adapter.submitList(mounted)
+                            // "已挂载应用"列表 = 设置过**任意**规则的应用（含只读规则）。
+                            // 过滤 + 排序统一走 ViewModel，见 AppListViewModelBase.mountedApps。
+                            adapter.submitList(viewModel.mountedApps(state.list))
                             listContainer.isRefreshing = false
                         }
                         is AppListState.Loading -> {
@@ -338,11 +334,10 @@ class AppListFragment : BaseServiceSettingsFragment() {
             }
             // Only update if load succeeded; don't overwrite existing data on failure
             if (loaded != null) {
-                // 与上方 appsFlow 的过滤口径保持一致：有任意规则（重定向或只读）即显示。
-                val mounted = loaded.filter {
-                    it.mountRulesCount > 0 || it.readOnlyCount > 0
-                }
-                adapter.submitList(mounted)
+                // 必须与上方 appsFlow 走**同一个** ViewModel 口径（过滤 + 排序）。
+                // 旧实现这里直接 submitList(loaded.filter{...})，完全没有排序，
+                // 与已排序的那条路径并发提交，列表顺序就在两者之间来回跳。
+                adapter.submitList(viewModel.mountedApps(loaded))
             }
         }
     }
