@@ -31,6 +31,11 @@ val ConfiguredPolicyStore.srPackages: Set<String>
     get() = readRedirect().envelope.redirectPolicies
         .map { it.scope.packageName }.toSet()
 
+/** 配置了只读规则的包名集合。 */
+val ConfiguredPolicyStore.readOnlyPackages: Set<String>
+    get() = readReadOnly().envelope.readOnlyRules
+        .map { it.scope.packageName }.toSet()
+
 /** @see getPackageSrZipped */
 val ConfiguredPolicyStore.srRulesCount: Int
     get() = readRedirect().envelope.redirectPolicies.sumOf { it.rules.size }

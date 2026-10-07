@@ -60,7 +60,6 @@ class AppListFragment : BaseServiceSettingsFragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 ConfiguredPolicyStoreProvider.instance.snapshots.collect {
-                    viewModel.updateAppsRuleCount()
                     val (serverState, xposedConnected) = currentServerInputs()
                     statusController.refresh(lifecycleScope, serverState, xposedConnected)
                     statusController.render(serverState, xposedConnected)
@@ -138,7 +137,7 @@ class AppListFragment : BaseServiceSettingsFragment() {
 
         // Pull-to-refresh: only refresh app list, not server/status
         listContainer.setOnRefreshListener {
-            viewModel.updateAppsRuleCount()
+            viewModel.loadApps()
         }
 
         // Initial status update
@@ -222,7 +221,6 @@ class AppListFragment : BaseServiceSettingsFragment() {
 
         // Observe preferences changes → refresh rule count, mount list, and status display
         ServicePreferences.preferencesChangeLiveData.observe(viewLifecycleOwner) {
-            viewModel.updateAppsRuleCount()
             currentServerInputs().let { (serverState, xposedConnected) ->
                 statusController.refresh(lifecycleScope, serverState, xposedConnected)
                 statusController.render(serverState, xposedConnected)
@@ -323,23 +321,21 @@ class AppListFragment : BaseServiceSettingsFragment() {
 
     private fun loadMountedApps(adapter: AppListAdapter) {
         lifecycleScope.launch {
-            // 如果本会话已手动停止或服务未处于启动/运行态，不等待，直接返回空列表
+            // 服务未就绪时不清空已有列表，交给本地降级数据驱动展示
             if (ServerStateMachine.isSessionManuallyStopped ||
                 ServerStateMachine.state.value == ServerState.STOPPED ||
                 ServerStateMachine.state.value == ServerState.FAILED
             ) {
-                adapter.submitList(emptyList())
                 return@launch
             }
 
             // 等待服务器就绪（最长重试 20 次 = ~10 秒）
             if (!CleanerClient.waitForBinder()) {
-                adapter.submitList(emptyList())
                 return@launch
             }
             val loaded = withContext(Dispatchers.Default) {
                 try {
-                    AppListLoader().load()
+                    AppListLoader(context = requireContext()).load()
                 } catch (e: Exception) {
                     if (BuildConfig.DEBUG) Log.e("CleanerTest", "AppListFragment.loadMountedApps: failed", e)
                     null
@@ -347,7 +343,7 @@ class AppListFragment : BaseServiceSettingsFragment() {
             }
             // Only update if load succeeded; don't overwrite existing data on failure
             if (loaded != null) {
-                val mounted = loaded.filter { it.mountRulesCount > 0 }
+                val mounted = loaded.list.filter { it.mountRulesCount > 0 }
                 adapter.submitList(mounted)
             }
         }
