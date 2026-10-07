@@ -48,6 +48,12 @@
     <string name="start_on_boot_summary">Make sure the service works fine on your device before ticking.</string>
     <string name="post_notification_key" translatable="false">post_notification</string>
     <string name="post_notification_title">Receive update notifications</string>
+    <string name="check_update_key" translatable="false">check_update</string>
+    <string name="check_update_title">Check for updates</string>
+    <string name="check_update_summary">Fetch the latest release from GitHub</string>
+    <string name="new_version_available">New version %s available</string>
+    <string name="click_to_view_release">Click to view release</string>
+    <string name="update_available_channel_name">Update available</string>
     <string name="sort_key" translatable="false">sort_by</string>
     <string name="length_key" translatable="false">length</string>
     <string name="monitor_key" translatable="false">monitor</string>

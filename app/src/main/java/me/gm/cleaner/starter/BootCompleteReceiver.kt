@@ -42,6 +42,11 @@ class BootCompleteReceiver : BroadcastReceiver() {
         }
         ServiceBootStateStore.ensureInitialized(context)
         val target = ServiceBootStateStore.initializeForBoot(isStartOnBoot)
+
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            me.gm.cleaner.net.UpdateChecker.checkAndNotify(context)
+        }
+
         if (!isStartOnBoot || target != BootTargetState.RUNNING ||
             ServiceBootStateStore.source != BootTargetSource.BOOT
         ) {

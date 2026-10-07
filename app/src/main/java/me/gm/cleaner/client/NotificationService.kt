@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
+import android.net.Uri
 import android.os.IBinder
 import android.os.Process
 import android.os.SystemClock
@@ -30,6 +31,8 @@ import me.gm.cleaner.core.config.getPackageSrZipped
 import me.gm.cleaner.core.config.removeRedirectRules
 import me.gm.cleaner.core.config.replaceRedirectRules
 import me.gm.cleaner.net.OnlineAppCategory
+import me.gm.cleaner.net.UpdateChecker
+import me.gm.cleaner.net.NOTIFICATION_CHANNEL
 import me.gm.cleaner.starter.Starter
 import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.util.PermissionUtils.notifySafe
@@ -353,6 +356,31 @@ class NotificationService : Service() {
     companion object {
         const val ACTION_REDIRECTED_TO_INTERNAL: String =
             "$APPLICATION_ID.intent.action.ACTION_REDIRECTED_TO_INTERNAL"
+
+        fun notifyUpdateAvailable(context: Context, release: UpdateChecker.ReleaseInfo) {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(release.htmlUrl))
+            val pendingIntent = PendingIntent.getActivity(
+                context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val notification = NotificationCompat
+                .Builder(context, NOTIFICATION_CHANNEL)
+                .setContentTitle(context.getString(R.string.new_version_available, release.tagName))
+                .setContentText(context.getString(R.string.click_to_view_release))
+                .setSmallIcon(R.drawable.ic_outline_update_24)
+                .setColor(context.getColor(R.color.color_primary))
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+            NotificationManagerCompat.from(context).run {
+                val channel = NotificationChannelCompat
+                    .Builder(NOTIFICATION_CHANNEL, NotificationManager.IMPORTANCE_DEFAULT)
+                    .setName(context.getString(R.string.update_available_channel_name))
+                    .build()
+                createNotificationChannel(channel)
+                notifySafe(context, NOTIFICATION_CHANNEL.hashCode(), notification)
+            }
+        }
+
         const val ACTION_MEDIA_NOT_FOUND: String =
             "$APPLICATION_ID.intent.action.ACTION_MEDIA_NOT_FOUND"
         private const val NOTIFICATION_CHANNEL_SRPROMPT: String =

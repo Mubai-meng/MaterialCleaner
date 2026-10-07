@@ -402,6 +402,14 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                 hasPermission
             }
 
+        val checkUpdate = findPreference<Preference>(getString(R.string.check_update_key))!!
+        checkUpdate.onPreferenceClickListener = Preference.OnPreferenceClickListener {
+            lifecycleScope.launch(Dispatchers.IO) {
+                me.gm.cleaner.net.UpdateChecker.checkAndNotify(requireContext())
+            }
+            true
+        }
+
         val language = findPreference<ListPreference>(getString(R.string.language_key))!!
         language.onPreferenceChangeListener =
             Preference.OnPreferenceChangeListener { _, _ ->

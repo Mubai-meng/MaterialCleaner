@@ -46,6 +46,11 @@
     <string name="start_on_boot_title">开机启动 Cleaner 服务</string>
     <string name="start_on_boot_summary">启用前请确保服务能在您的设备上正常工作</string>
     <string name="post_notification_title">接收更新通知</string>
+    <string name="check_update_title">检查更新</string>
+    <string name="check_update_summary">从 GitHub 获取最新版本</string>
+    <string name="new_version_available">发现新版本 %s</string>
+    <string name="click_to_view_release">点击查看更新说明</string>
+    <string name="update_available_channel_name">更新可用</string>
     <string name="language_header">语言</string>
     <string name="language_title">语言</string>
     <string name="theme_header">主题</string>
