@@ -220,7 +220,7 @@ class FileSystemRecordFragment : BaseServiceSettingsFragment() {
         when (item.itemId) {
             R.id.menu_hide_pick_apps -> AppPickerDialog()
                 .apply {
-                    setAllAppsSupplier { CleanerClient.getInstalledPackages(0) }
+                    setAllAppsSupplier { CleanerClient.getInstalledPackagesOrNull(0) ?: emptyList() }
                     setSelection(viewModel.checkedFilterApps)
                     addOnPositiveButtonClickListener { checkedApps ->
                         viewModel.checkedFilterApps = checkedApps.map { it.packageName }.toSet()

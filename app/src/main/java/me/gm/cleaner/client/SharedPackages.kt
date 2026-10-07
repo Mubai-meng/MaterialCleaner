@@ -3,7 +3,7 @@ package me.gm.cleaner.client
 import android.content.pm.PackageInfo
 
 fun getSharedUserIdPackages(packageInfo: PackageInfo): List<PackageInfo> {
-    val installedPackages = CleanerClient.getInstalledPackages(0)
+    val installedPackages = CleanerClient.getInstalledPackagesOrNull(0) ?: emptyList()
     val sharedUserId = packageInfo.sharedUserId ?: return listOf(packageInfo)
     val uid = packageInfo.applicationInfo.uid
     return installedPackages.filter {
@@ -12,7 +12,7 @@ fun getSharedUserIdPackages(packageInfo: PackageInfo): List<PackageInfo> {
 }
 
 fun getSharedProcessPackages(packageInfo: PackageInfo): List<PackageInfo> {
-    val installedPackages = CleanerClient.getInstalledPackages(0)
+    val installedPackages = CleanerClient.getInstalledPackagesOrNull(0) ?: emptyList()
     val processName = packageInfo.applicationInfo.processName ?: return listOf(packageInfo)
     val uid = packageInfo.applicationInfo.uid
     return installedPackages.filter {

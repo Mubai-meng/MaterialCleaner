@@ -232,9 +232,9 @@ class MoreOptionsFragment : BaseSettingsFragment() {
         applyReadOnlyTemplateTo?.setOnPreferenceClickListener {
             AppPickerDialog()
                 .apply {
-                    val installedNonsystemApps = CleanerClient.getInstalledPackages(0).filter {
+                    val installedNonsystemApps = CleanerClient.getInstalledPackagesOrNull(0)?.filter {
                         it.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM == 0
-                    }
+                    } ?: emptyList()
                     setAllAppsSupplier { installedNonsystemApps }
                     addOnPositiveButtonClickListener { checkedApps ->
                         val readOnlyPaths =
@@ -282,9 +282,9 @@ class MoreOptionsFragment : BaseSettingsFragment() {
         applyMountRulesTemplateTo?.setOnPreferenceClickListener {
             AppPickerDialog()
                 .apply {
-                    val installedNonSystemApps = CleanerClient.getInstalledPackages(0).filter {
+                    val installedNonSystemApps = CleanerClient.getInstalledPackagesOrNull(0)?.filter {
                         it.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM == 0
-                    }
+                    } ?: emptyList()
                     setAllAppsSupplier { installedNonSystemApps }
                     addOnPositiveButtonClickListener { checkedApps ->
                         val answers = ServiceMoreOptionsPreferences.editMountRulesTemplate

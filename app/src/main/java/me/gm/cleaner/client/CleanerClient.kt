@@ -146,14 +146,6 @@ object CleanerClient {
         ServerStateMachine.onBinderReceived()
     }
 
-    fun getInstalledPackages(flags: Int): List<PackageInfo> {
-        val result = service?.getInstalledPackages(flags)?.list ?: emptyList()
-        if (BuildConfig.DEBUG) {
-            Log.d("MC/Test", "getInstalledPackages: service=${service != null}, count=${result.size}")
-        }
-        return result
-    }
-
     /**
      * 区分“Binder/服务不可用或 RPC 失败”与“服务端合法空列表”。
      * 不可用时返回 null；服务端正常返回空时返回 emptyList()。
