@@ -32,7 +32,7 @@
     <string name="diagnostics_archive_privacy_message">The package may contain device details, process and mount state, logcat output, DataBus snapshots, redirect rules, and file paths. Basic identifiers are redacted, but please share it only with people you trust.</string>
     <string name="diagnostics_archive_privacy_confirm">Export</string>
     <string name="new_mount">New mount</string>
-    <string name="mounted_apps_title">Mounted apps</string>
+    <string name="mounted_apps_title">Configured apps</string>
     <string name="menu_add_to_hide_list">Add to hide list</string>
     <string name="delete">Delete</string>
     <string name="delete_all_mount_rules">Delete all mount rules</string>

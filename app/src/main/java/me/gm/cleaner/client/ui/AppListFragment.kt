@@ -186,8 +186,8 @@ class AppListFragment : BaseServiceSettingsFragment() {
                 viewModel.appsFlow.collect { state ->
                     when (state) {
                         is AppListState.Done -> {
-                            val mounted = state.list.filter { it.mountRulesCount > 0 }
-                            adapter.submitList(mounted)
+                            val configured = state.list.filter { it.mountRulesCount > 0 || it.readOnlyCount > 0 }
+                            adapter.submitList(configured)
                             listContainer.isRefreshing = false
                         }
                         is AppListState.Loading -> {
