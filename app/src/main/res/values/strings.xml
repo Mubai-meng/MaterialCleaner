@@ -42,7 +42,7 @@
     <string name="undo">Undo</string>
 
     <!-- Settings -->
-    <string name="enable_features_header">ENABLE FEATURES</string>
+    <string name="service_and_notification_header">Service &amp; Notifications</string>
     <string name="start_on_boot_key" translatable="false">start_on_boot</string>
     <string name="start_on_boot_title">Start Cleaner service on boot</string>
     <string name="start_on_boot_summary">Make sure the service works fine on your device before ticking.</string>

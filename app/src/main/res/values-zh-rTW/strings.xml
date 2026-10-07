@@ -42,7 +42,7 @@
     <string name="undo">撤銷</string>
 
     <!-- 设置 -->
-    <string name="enable_features_header">啟用特性</string>
+    <string name="service_and_notification_header">服務與通知</string>
     <string name="start_on_boot_title">開機啟動 Cleaner 服務</string>
     <string name="start_on_boot_summary">啟用前請確保服務能在您的設備上正常工作</string>
     <string name="post_notification_title">接收更新通知</string>

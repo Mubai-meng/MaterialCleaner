@@ -101,7 +101,7 @@
             app:iconSpaceReserved="false" />
     </PreferenceCategory>
 
-    <PreferenceCategory android:title="@string/enable_features_header">
+    <PreferenceCategory android:title="@string/service_and_notification_header">
         <SwitchPreferenceCompat
             android:icon="@drawable/ic_outline_start_24"
             android:key="@string/start_on_boot_key"
