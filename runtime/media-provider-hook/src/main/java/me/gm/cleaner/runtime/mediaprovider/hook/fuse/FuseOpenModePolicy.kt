@@ -24,3 +24,16 @@ internal fun isWriteModeBits(modeBits: Int): Boolean {
     val hasWriteModifier = (modeBits and (PFD_MODE_CREATE or PFD_MODE_TRUNCATE or PFD_MODE_APPEND)) != 0
     return hasWriteAccess || hasWriteModifier
 }
+
+/**
+ * open 只读拒绝决策（纯函数）。
+ *
+ * @param modeBits 已知 mode 才传值，未知传 null
+ * @param isReadOnly 挂载后路径是否命中只读规则
+ * @return true 表示应按 open 句柄契约拒绝；未知 mode 一律 false（fail-open）
+ */
+internal fun shouldDenyOpen(modeBits: Int?, isReadOnly: Boolean): Boolean {
+    if (modeBits == null) return false
+    if (!isWriteModeBits(modeBits)) return false
+    return isReadOnly
+}
