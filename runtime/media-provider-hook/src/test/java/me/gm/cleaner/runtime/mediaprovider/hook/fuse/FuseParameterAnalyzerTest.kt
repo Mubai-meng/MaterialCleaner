@@ -16,6 +16,15 @@ class FuseParameterAnalyzerTest {
     class FakeFuseMethods {
         fun renameForFuse(oldPath: String, newPath: String, uid: Int) {}
         fun openWithFuse(path: String, displayName: String, uid: Int) {}
+        fun openWithFuse(
+            path: String,
+            uid: Int,
+            mediaCapabilitiesUid: Int,
+            modeBits: Int,
+            shouldRedact: Boolean,
+            shouldTranscode: Boolean,
+            transcodeReason: Int,
+        ) {}
         fun onFileLookupForFuse(path: String, tag: String, uid: Int) {}
         fun isUidAllowedAccessToDataOrObbPathForFuse(uid: Int, path: String) {}
         fun isDirAccessAllowedForFuse(path: String, uid: Int, accessType: Int) {}
@@ -126,5 +135,36 @@ class FuseParameterAnalyzerTest {
         assertEquals(0, roles.pathIndex)
         assertEquals(-1, roles.path2Index)
         assertEquals(1, roles.uidIndex)
+    }
+
+    @Test
+    fun `openWithFuse七参标定mode`() {
+        val m = method(
+            "openWithFuse",
+            String::class.java,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+        )
+        val roles = ParameterAnalyzer.analyze(m)
+        assertNotNull(roles)
+        assertEquals(0, roles.pathIndex)
+        assertEquals(-1, roles.path2Index)
+        assertEquals(1, roles.uidIndex)
+        assertEquals(3, roles.modeIndex)
+    }
+
+    @Test
+    fun `未知open签名mode为负一`() {
+        val m = method(
+            "openWithFuse",
+            String::class.java, String::class.java, Int::class.javaPrimitiveType,
+        )
+        val roles = ParameterAnalyzer.analyze(m, false)
+        assertNotNull(roles)
+        assertEquals(-1, roles.modeIndex)
     }
 }
