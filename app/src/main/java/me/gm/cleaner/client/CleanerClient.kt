@@ -9,6 +9,7 @@ import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.delay
 import me.gm.cleaner.BuildConfig
 import me.gm.cleaner.model.LayerStatus
+import me.gm.cleaner.model.PackageStatus
 import me.gm.cleaner.server.ICleanerService
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
@@ -151,6 +152,27 @@ object CleanerClient {
             Log.d("MC/Test", "getInstalledPackages: service=${service != null}, count=${result.size}")
         }
         return result
+    }
+
+    /**
+     * 区分“Binder/服务不可用或 RPC 失败”与“服务端合法空列表”。
+     * 不可用时返回 null；服务端正常返回空时返回 emptyList()。
+     */
+    fun getInstalledPackagesOrNull(flags: Int): List<PackageInfo>? = try {
+        if (service == null) null else service?.getInstalledPackages(flags)?.list
+    } catch (e: Exception) {
+        Log.w("MC/Test", "getInstalledPackagesOrNull: failed", e)
+        null
+    }
+
+    /**
+     * 区分“Binder/服务不可用或 RPC 失败”与“服务端合法空 map”。
+     */
+    fun getSrPackagesStatusOrNull(flags: Int): Map<String, PackageStatus>? = try {
+        if (service == null) null else service?.getSrPackagesStatus(flags)
+    } catch (e: Exception) {
+        Log.w("MC/Test", "getSrPackagesStatusOrNull: failed", e)
+        null
     }
 
     val mountedDirs: List<String>

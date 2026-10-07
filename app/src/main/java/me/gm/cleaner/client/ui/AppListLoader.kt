@@ -30,23 +30,9 @@ class AppListLoader(
 
     suspend fun load(): AppListLoadResult = withContext(defaultDispatcher) {
         if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: start loading packages")
-        val serviceAvailable = try {
-            CleanerClient.pingBinder() && CleanerClient.service != null
-        } catch (e: Exception) {
-            false
-        }
-        if (!serviceAvailable) {
-            if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: service unavailable, using local fallback")
-            return@withContext AppListLoadResult(loadLocalFallback(), isFullList = false)
-        }
-        val installedPackages = try {
-            CleanerClient.getInstalledPackages(PackageManager.GET_PERMISSIONS)
-        } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.w("CleanerTest", "AppListLoader.load: failed to load packages", e)
-            null
-        }
+        val installedPackages = CleanerClient.getInstalledPackagesOrNull(PackageManager.GET_PERMISSIONS)
         if (installedPackages == null) {
-            if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: binder call failed, using local fallback")
+            if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: service unavailable or RPC failed, fallback")
             return@withContext AppListLoadResult(loadLocalFallback(), isFullList = false)
         }
         if (installedPackages.isNotEmpty()) {
@@ -54,14 +40,8 @@ class AppListLoader(
         } else if (BuildConfig.DEBUG) {
             Log.w("CleanerTest", "AppListLoader.load: server returned empty installed list, keep previous label cache")
         }
-        val srPackageStatus = try {
-            CleanerClient.service?.getSrPackagesStatus(
-                PackageStatus.GET_FROM_ALL_PROCESS
-            ) ?: emptyMap()
-        } catch (e: Exception) {
-            if (BuildConfig.DEBUG) Log.e("CleanerTest", "AppListLoader.load: failed to load srPackageStatus", e)
-            emptyMap()
-        }
+        val srPackageStatus = CleanerClient.getSrPackagesStatusOrNull(PackageStatus.GET_FROM_ALL_PROCESS)
+            ?: emptyMap()
         if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: srPackageStatus size=${srPackageStatus.size}")
         val result = installedPackages.map { pi ->
             ensureActive()
@@ -133,29 +113,13 @@ class AppListLoader(
 
     suspend fun updateRuleCount(old: List<AppListModel>): List<AppListModel> =
         withContext(defaultDispatcher) {
-            val stateQueryFailed = try {
-                CleanerClient.service == null || !CleanerClient.pingBinder()
-            } catch (e: Exception) {
-                true
-            }
-            val srPackageStatus = if (stateQueryFailed) {
-                emptyMap()
-            } else {
-                try {
-                    CleanerClient.service?.getSrPackagesStatus(
-                        PackageStatus.GET_FROM_ALL_PROCESS
-                    ) ?: emptyMap()
-                } catch (e: Exception) {
-                    if (BuildConfig.DEBUG) Log.e("CleanerTest", "AppListLoader.updateRuleCount: getSrPackagesStatus failed", e)
-                    emptyMap()
-                }
-            }
+            val srPackageStatus = CleanerClient.getSrPackagesStatusOrNull(PackageStatus.GET_FROM_ALL_PROCESS)
             old.map {
                 val packageName = it.packageInfo.packageName
                 it.copy(
                     mountRulesCount = ConfiguredPolicyStoreProvider.instance.getPackageSrCount(packageName),
                     readOnlyCount = ConfiguredPolicyStoreProvider.instance.getPackageReadOnly(packageName).size,
-                    mountState = if (stateQueryFailed) AppListModel.STATE_UNKNOWN else parseMountState(srPackageStatus[packageName]),
+                    mountState = if (srPackageStatus == null) AppListModel.STATE_UNKNOWN else parseMountState(srPackageStatus[packageName]),
                 )
             }
         }
