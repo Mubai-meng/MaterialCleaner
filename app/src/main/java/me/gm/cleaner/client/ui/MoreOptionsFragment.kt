@@ -197,7 +197,6 @@ class MoreOptionsFragment : BaseSettingsFragment() {
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         preferenceManager.setStorageDeviceProtected()
         addPreferencesFromResource(R.xml.service_more_options_preferences)
-        addPreferencesFromResource(R.xml.root_preferences)
 
         val aggressivelyPromptForReadingMediaFiles = findPreference<SwitchPreferenceCompat>(
             getString(me.gm.cleaner.R.string.aggressively_prompt_for_reading_media_files_key)
