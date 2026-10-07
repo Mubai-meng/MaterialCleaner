@@ -330,5 +330,12 @@
 
     <!-- 关于 -->
     <string name="slogan">质感设计的清理应用</string>
+    <string name="about_header">关于</string>
+    <string name="about_title">关于</string>
+    <string name="about_summary">版本与项目信息</string>
+    <string name="about_version">版本 %s</string>
+    <string name="about_project_url">项目地址：https://github.com/firesahc/MaterialCleaner</string>
+    <string name="open_project_url">打开项目地址</string>
+    <string name="cancel">取消</string>
 
 </resources>

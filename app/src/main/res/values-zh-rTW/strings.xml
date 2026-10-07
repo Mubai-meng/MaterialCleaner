@@ -328,7 +328,14 @@
     <string name="loading">載入中</string>
     <string name="network_connection_failed">網路連線失敗</string>
 
-    <!-- 关于 -->
+    <!-- 關於 -->
     <string name="slogan">質感設計的清理應用</string>
+    <string name="about_header">關於</string>
+    <string name="about_title">關於</string>
+    <string name="about_summary">版本與專案資訊</string>
+    <string name="about_version">版本 %s</string>
+    <string name="about_project_url">專案地址：https://github.com/firesahc/MaterialCleaner</string>
+    <string name="open_project_url">打開專案地址</string>
+    <string name="cancel">取消</string>
 
 </resources>

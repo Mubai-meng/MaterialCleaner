@@ -129,4 +129,11 @@
             android:key="@string/black_dark_theme_key"
             android:title="@string/black_dark_theme_title" />
     </PreferenceCategory>
+
+    <PreferenceCategory android:title="@string/about_header">
+        <Preference
+            android:key="@string/about_key"
+            android:summary="@string/about_summary"
+            android:title="@string/about_title" />
+    </PreferenceCategory>
 </PreferenceScreen>

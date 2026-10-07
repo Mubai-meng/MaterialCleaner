@@ -409,6 +409,26 @@ class MoreOptionsFragment : BaseSettingsFragment() {
             true
         }
 
+        val about = findPreference<Preference>(getString(R.string.about_key))!!
+        about.onPreferenceClickListener = Preference.OnPreferenceClickListener {
+            com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+                .setTitle(R.string.about_title)
+                .setMessage(
+                    "${getString(R.string.app_name)}\n" +
+                            getString(R.string.about_version, me.gm.cleaner.BuildConfig.VERSION_NAME) +
+                            "\n" + getString(R.string.about_project_url)
+                )
+                .setPositiveButton(R.string.open_project_url) { _, _ ->
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                        data = android.net.Uri.parse("https://github.com/firesahc/MaterialCleaner")
+                    }
+                    startActivity(intent)
+                }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
+            true
+        }
+
         val language = findPreference<ListPreference>(getString(R.string.language_key))!!
         language.onPreferenceChangeListener =
             Preference.OnPreferenceChangeListener { _, _ ->

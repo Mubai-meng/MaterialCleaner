@@ -360,5 +360,13 @@
 
     <!-- About -->
     <string name="slogan">Material Design cleanup application</string>
+    <string name="about_header">About</string>
+    <string name="about_key" translatable="false">about</string>
+    <string name="about_title">About</string>
+    <string name="about_summary">Version and project info</string>
+    <string name="about_version">Version %s</string>
+    <string name="about_project_url">Project: https://github.com/firesahc/MaterialCleaner</string>
+    <string name="open_project_url">Open project</string>
+    <string name="cancel">Cancel</string>
 
 </resources>
