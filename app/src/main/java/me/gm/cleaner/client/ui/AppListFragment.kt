@@ -227,9 +227,6 @@ class AppListFragment : BaseServiceSettingsFragment() {
             }
         }
 
-        // Load initial mounted apps（添加重试等待服务器就绪）
-        loadMountedApps(adapter)
-
         super.onCreateView(inflater, container, savedInstanceState)
         return view
     }
@@ -276,7 +273,7 @@ class AppListFragment : BaseServiceSettingsFragment() {
     }
 
     // ---------------------------------------------------------------
-    // TODO(Phase-2): startServer / stopServer / loadMountedApps 执行面迁入 ViewModel，
+    // TODO(Phase-2): startServer / stopServer 执行面迁入 ViewModel，
     // Fragment 只保留 collect + 转发。本次 Phase-1 为控制范围，保持原实现不动。
 
     private fun startServer() {
@@ -315,36 +312,6 @@ class AppListFragment : BaseServiceSettingsFragment() {
                 Toast.makeText(requireContext(), R.string.toast_stopped, Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.e("CleanerTest", "stopServer: exception", e)
-            }
-        }
-    }
-
-    private fun loadMountedApps(adapter: AppListAdapter) {
-        lifecycleScope.launch {
-            // 服务未就绪时不清空已有列表，交给本地降级数据驱动展示
-            if (ServerStateMachine.isSessionManuallyStopped ||
-                ServerStateMachine.state.value == ServerState.STOPPED ||
-                ServerStateMachine.state.value == ServerState.FAILED
-            ) {
-                return@launch
-            }
-
-            // 等待服务器就绪（最长重试 20 次 = ~10 秒）
-            if (!CleanerClient.waitForBinder()) {
-                return@launch
-            }
-            val loaded = withContext(Dispatchers.Default) {
-                try {
-                    AppListLoader(context = requireContext()).load()
-                } catch (e: Exception) {
-                    if (BuildConfig.DEBUG) Log.e("CleanerTest", "AppListFragment.loadMountedApps: failed", e)
-                    null
-                }
-            }
-            // Only update if load succeeded; don't overwrite existing data on failure
-            if (loaded != null) {
-                val mounted = loaded.list.filter { it.mountRulesCount > 0 }
-                adapter.submitList(mounted)
             }
         }
     }
