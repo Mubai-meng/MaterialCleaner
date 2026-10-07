@@ -3,6 +3,7 @@
 > 本文档为唯一架构事实源，以生产代码、调用链、构建依赖与测试为准。
 > `CONTEXT.md` 为术语表（非规范），`docs/adr` 为历史决策记录（状态见
 > `docs/architecture/adr-status.md`），与本文冲突处以本文为准。
+> 架构规范约束见 `spec.md`，设计理念见 `principles.md`。
 
 ## 模块与依赖方向
 
@@ -25,7 +26,8 @@ App（编辑意图，经 Binder 受控触发 remount）
     有序最终一致性：VFS 先切、总线后发、Hook 追平，同 publication set 同代同纪元）
   → VfsRuntimePolicy / HookPolicyCache / FuseMountPoints（各域独立投影缓存）
   → Mounter / Insert-Fuse（Query 仅记录） / Mount.cpp
-  → DataBus（transport only：快照/信号/事件/cursor/lease/原子写/权限/健康）
+  → DataBus（实现，包含物理布局）
+  → DataBusProtocol（契约，不反向依赖 DataBus 实现）
 ```
 
 ## 所有权
@@ -34,6 +36,8 @@ App（编辑意图，经 Binder 受控触发 remount）
   （`OrderedRedirectInterpreter` 为唯一解释器，经 `MountPlanDeriver` 消费）。
 * 只有 Projector 决定如何变成运行时；只有各执行端决定怎么执行。
 * 记录判定归 `RuntimeBehaviorPolicy`；VFS 只做视图委托。
+* 批量提交不可原子：`commitStructured()` 结构化表达 SUCCESS/PARTIAL/FAILURE，
+  生产已统一迁移，旧 Boolean 兼容入口已删除。
 * 兼容读写收拢于配置存储直读，旧适配器已删除。
 * 版本对账归状态聚合：orchestrated 状态携 installed/server/hook 三版本号，
   App 以纯函数判定 stale 并提示重启手机（更新后只重启服务不够，Hook 住在 Zygote 里）。
@@ -57,6 +61,7 @@ databus → domain / config / common / runtime / client / api
 Hook → server 实现；server → Hook 实现
 App → DataBus 直写；server/hook → legacy JSON 直读（经 Store）
 Hook/Mounter → 第二套 redirect 解释（经 MountPlanDeriver）
+DataBusProtocol → DataBus 传输实现（协议层不知道物理路径布局）
 ```
 
 ## 已知兼容层（只减不增）
