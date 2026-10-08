@@ -2,6 +2,30 @@
 -allowaccessmodification
 -overloadaggressively
 
+# ══════════════════════════════════════════════════════════════════════
+# AIDL 跨进程契约：Parcelable 的类名与 CREATOR 字段名不可混淆
+#
+# 故障现象（仅 release 复现，debug 不混淆故不复现）：
+#   进入「服务设置 / 文件记录」页即闪退，日志为
+#   android.os.BadParcelableException:
+#   ClassNotFoundException when unmarshalling: me.gm.cleaner.model.FileSystemEvent
+#
+# 机理：
+#   1) me.gm.cleaner.model 下的 Parcelable 会跨进程传递，例如
+#      ICleanerService#queryAllRecords 返回 BulkCursor<FileSystemEvent>；
+#   2) 反序列化端 BaseBulkCursor / BaseParceledListSlice 走的是
+#      Class.forName(Parcel 中读到的类名) + getField("CREATOR")
+#      的反射路径（见 core/ipc-contract/.../model/BulkCursor.java）；
+#   3) Xposed 侧 main.jar 由 d8 直接转 DEX、不做混淆，其类名保持原始
+#      FQN；而本 APK 经 R8 且顶部启用了 -repackageclasses "me.gm.cleaner"，
+#      会把 me.gm.cleaner.model.FileSystemEvent 改名（如 me.gm.cleaner.hg）。
+#      于是写入端写入原始类名、读取端按改名后的表查不到类 → 抛异常。
+#
+# 处置：契约模型整体保留原始类名与成员名（含反射读取的 CREATOR 字段）。
+# 新增 model 包下的 Parcelable 无需再改此处，通配规则已覆盖。
+# ══════════════════════════════════════════════════════════════════════
+-keep class me.gm.cleaner.model.** { *; }
+
 -keepclasseswithmembernames,includedescriptorclasses class * {
     native <methods>;
 }

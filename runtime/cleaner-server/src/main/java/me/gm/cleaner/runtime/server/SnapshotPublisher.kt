@@ -277,6 +277,8 @@ object SnapshotPublisher {
         // booleans
         root.put("recordSharedStorage", snapshot.behavior.recordSharedStorage)
         root.put("recordExternalAppSpecificStorage", snapshot.behavior.recordExternalAppSpecificStorage)
+        // 偏好层真相透传：Hook 侧按缺席容忍解析，缺席即视为 false。
+        root.put("fuseBpfBlockAll", snapshot.behavior.fuseBpfBlockAll)
         root.put("aggressivelyPromptForReadingMediaFiles", snapshot.behavior.aggressivelyPromptForReadingMediaFiles)
         root.put("upsertRecords", snapshot.behavior.upsertRecords)
 

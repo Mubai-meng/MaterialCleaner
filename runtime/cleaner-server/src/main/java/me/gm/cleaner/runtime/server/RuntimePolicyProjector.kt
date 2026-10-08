@@ -102,6 +102,8 @@ object RuntimePolicyProjector {
                 } else {
                     false
                 },
+                // 真相归偏好层：此处只做透传，不按 ROM 做条件改写。
+                fuseBpfBlockAll = if (preferencesReady) ServicePreferences.fuseBpfBlockAll else false,
                 aggressivelyPromptForReadingMediaFiles = if (preferencesReady) {
                     ServicePreferences.aggressivelyPromptForReadingMediaFiles
                 } else {

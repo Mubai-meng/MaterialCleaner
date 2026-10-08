@@ -113,6 +113,8 @@
     <string name="record_shared_storage_title">Record file operations in shared storage</string>
     <string name="record_external_app_specific_storage_title">(Experimental) Record file operations in external app-specific storage</string>
     <string name="record_external_app_specific_storage_summary">Enabling apps to access their specific storage via FUSE, which will cause a significant performance regression.</string>
+    <string name="fuse_bpf_block_all_title">(Experimental) FUSE BPF interception scope (reserved)</string>
+    <string name="fuse_bpf_block_all_summary">Reserved compatibility option: the install path is always intercepted per the recording policy and removal is always passed through, so this switch currently does not change native behavior. Kept for old platforms and future extension.</string>
     <string name="upsert_title">Save data using upsert</string>
     <string name="upsert_summary">Only keep the latest one for duplicate data.</string>
     <string name="storage_redirect_prompt">Storage Redirect Prompt</string>

@@ -41,8 +41,9 @@ class AppListLoader(
             Log.w("CleanerTest", "AppListLoader.load: server returned empty installed list, keep previous label cache")
         }
         val srPackageStatus = CleanerClient.getSrPackagesStatusOrNull(PackageStatus.GET_FROM_ALL_PROCESS)
-            ?: emptyMap()
-        if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: srPackageStatus size=${srPackageStatus.size}")
+        if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: srPackageStatus size=${srPackageStatus?.size}")
+        // 服务端映射就绪且查无记录等于真无，未就绪或链路失败一律按未知处理，不混用空表示两种含义。
+        val statusUnknown = srPackageStatus == null
         val result = installedPackages.map { pi ->
             ensureActive()
             AppListModel(
@@ -50,7 +51,7 @@ class AppListLoader(
                 AppLabelCache.getPackageLabel(pi),
                 ConfiguredPolicyStoreProvider.instance.getPackageSrCount(pi.packageName),
                 ConfiguredPolicyStoreProvider.instance.getPackageReadOnly(pi.packageName).size,
-                parseMountState(srPackageStatus[pi.packageName])
+                parseMountState(if (statusUnknown) null else srPackageStatus?.get(pi.packageName), statusUnknown)
             )
         }
         if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: result=${result.size} apps")
@@ -87,7 +88,12 @@ class AppListLoader(
         }
     }
 
-    private fun parseMountState(packageStatus: PackageStatus?): Int {
+    /**
+     * 服务端状态缺失分两种：映射就绪但查无记录等于真无，未就绪或链路失败等于未知。
+     * 用 statusUnknown 显式区分，不混用空值的两种含义。
+     */
+    private fun parseMountState(packageStatus: PackageStatus?, statusUnknown: Boolean): Int {
+        if (statusUnknown) return AppListModel.STATE_UNKNOWN
         packageStatus ?: return AppListModel.STATE_UNMOUNTED
         val mountedPids = mutableListOf<Int>()
         val unknownPids = mutableListOf<Int>()
@@ -119,7 +125,7 @@ class AppListLoader(
                 it.copy(
                     mountRulesCount = ConfiguredPolicyStoreProvider.instance.getPackageSrCount(packageName),
                     readOnlyCount = ConfiguredPolicyStoreProvider.instance.getPackageReadOnly(packageName).size,
-                    mountState = if (srPackageStatus == null) AppListModel.STATE_UNKNOWN else parseMountState(srPackageStatus[packageName]),
+                    mountState = if (srPackageStatus == null) AppListModel.STATE_UNKNOWN else parseMountState(srPackageStatus[packageName], false),
                 )
             }
         }

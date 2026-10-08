@@ -11,6 +11,8 @@ data class RuntimeBehaviorPolicy(
     val deniedPackages: Set<String> = emptySet(),
     val recordSharedStorage: Boolean = false,
     val recordExternalAppSpecificStorage: Boolean = false,
+    /** FUSE BPF 拦截范围开关：偏好层真相的透传字段，本层不解释其语义。 */
+    val fuseBpfBlockAll: Boolean = false,
     val aggressivelyPromptForReadingMediaFiles: Boolean = false,
     val upsertRecords: Boolean = true,
 ) {

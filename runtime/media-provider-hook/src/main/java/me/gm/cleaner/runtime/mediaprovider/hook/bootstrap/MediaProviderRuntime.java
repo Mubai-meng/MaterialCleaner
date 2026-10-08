@@ -21,26 +21,42 @@ public final class MediaProviderRuntime {
     private static MediaProviderHooksService sService;
     private static boolean sInlineHookInitialized;
 
+    private static volatile boolean sBootstrapped;
+    private static final Object BOOTSTRAP_LOCK = new Object();
+
+    public static boolean isBootstrapped() {
+        return sBootstrapped;
+    }
+
     private MediaProviderRuntime() {
     }
 
     public static void bootstrap(LoadPackageParam lpparam, Context context, MediaProviderHooksService service) {
-        sContext = context;
-        sService = service;
-        try {
-            final var mediaProviderClass = XposedHelpers.findClass(
-                    "com.android.providers.media.MediaProvider", lpparam.classLoader
-            );
-            Log.i("MC_REDIRECT", "[XposedInit] MediaProvider class found, registering hooks...");
-            NativeHookStatus.INSTANCE.markMediaProviderHookLoaded(lpparam.packageName);
-            initializeInlineHook(lpparam.packageName);
-            setupReRegisterOnDeath();
-            MediaProviderHooksService.requestReRegister("initial MediaProvider load");
-            service.initPolicyCache();
-            new MediaProviderHook(service, lpparam.classLoader, mediaProviderClass);
-            Log.i("MC_REDIRECT", "[XposedInit] MediaProviderHook created successfully");
-        } catch (XposedHelpers.ClassNotFoundError e) {
-            Log.e("MC_REDIRECT", "[XposedInit] MediaProvider hook setup FAILED", e);
+        synchronized (BOOTSTRAP_LOCK) {
+            if (sBootstrapped) {
+                Log.i("MC_REDIRECT", "[XposedInit] bootstrap already completed, ignoring duplicate trigger");
+                return;
+            }
+            sContext = context;
+            sService = service;
+            try {
+                final var mediaProviderClass = XposedHelpers.findClass(
+                        "com.android.providers.media.MediaProvider", lpparam.classLoader
+                );
+                Log.i("MC_REDIRECT", "[XposedInit] MediaProvider class found, registering hooks...");
+                NativeHookStatus.INSTANCE.markMediaProviderHookLoaded(lpparam.packageName);
+                initializeInlineHook(lpparam.packageName);
+                setupReRegisterOnDeath();
+                MediaProviderHooksService.requestReRegister("initial MediaProvider load");
+                service.initPolicyCache();
+                new MediaProviderHook(service, lpparam.classLoader, mediaProviderClass);
+                sBootstrapped = true;
+                Log.i("MC_REDIRECT", "[XposedInit] MediaProviderHook created successfully");
+            } catch (XposedHelpers.ClassNotFoundError e) {
+                Log.e("MC_REDIRECT", "[XposedInit] MediaProvider hook setup FAILED", e);
+            } catch (Throwable t) {
+                Log.e("MC_REDIRECT", "[XposedInit] MediaProvider hook setup FAILED", t);
+            }
         }
     }
 

@@ -1,11 +1,11 @@
 package me.gm.cleaner.runtime.mediaprovider.hook.policy
 import android.util.Log
 import me.gm.cleaner.core.common.err.ErrorCodes
-import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.HookDataBusBridge
 import org.json.JSONArray
 import org.json.JSONObject
 import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
+import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeStatusSnapshotParser.describe
 
 object NativeHookStatus {
     private const val TAG = "NativeHookStatus"
@@ -186,7 +186,7 @@ object NativeHookStatus {
     }
 
     fun markInlineLoadSucceeded(statusJson: String) {
-        val parsed = parseNativeStatus(statusJson)
+        val parsed = NativeStatusSnapshotParser.parse(statusJson)
         nativeStatus = parsed
         inlineLibraryLoaded = true
         inlineHookInitialized = parsed.coreAvailable
@@ -699,110 +699,6 @@ object NativeHookStatus {
         status.fuseLibraryLoaded -> STATE_HOOK_UNAVAILABLE
         inlineLibraryLoaded -> STATE_INLINE_LOADED
         else -> STATE_NOT_LOADED
-    }
-
-    private fun parseNativeStatus(json: String): NativeStatusSnapshot {
-        return try {
-            val root = JSONObject(json)
-            val symbols = root.optJSONObject("symbols")
-            val symbolMethods = root.optJSONObject("symbolMethods")
-            NativeStatusSnapshot(
-                fuseAvailable = root.optBoolean("fuseAvailable", true),
-                fuseLibraryLoaded = root.optBoolean("fuseLibraryLoaded", false),
-                fuseLibraryName = root.optString("fuseLibraryName", ""),
-                hookMode = root.optString("hookMode", "UNKNOWN"),
-                fuseJniLoadMode = root.optString("fuseJniLoadMode", "UNKNOWN"),
-                embeddedFuseJniFound = root.optBoolean("embeddedFuseJniFound", false),
-                containsMountHooked = symbols?.optBoolean("containsMount", false) ?: false,
-                startsWithHooked = symbols?.optBoolean("startsWith", false) ?: false,
-                isFuseBpfEnabledHooked = symbols?.optBoolean("isFuseBpfEnabled", false) ?: false,
-                fuseReqUserdataHooked = symbols?.optBoolean("fuseReqUserdata", false) ?: false,
-                fuseBpfInstallHooked = symbols?.optBoolean("fuseBpfInstall", false) ?: false,
-                containsMountMethod = symbolMethods?.optString("containsMount", "") ?: "",
-                startsWithMethod = symbolMethods?.optString("startsWith", "") ?: "",
-                isFuseBpfEnabledMethod = symbolMethods?.optString("isFuseBpfEnabled", "") ?: "",
-                fuseReqUserdataMethod = symbolMethods?.optString("fuseReqUserdata", "") ?: "",
-                fuseBpfInstallMethod = symbolMethods?.optString("fuseBpfInstall", "") ?: "",
-                xhookRefreshCalled = root.optBoolean("xhookRefreshCalled", false),
-                lastError = root.optString("lastError", ""),
-            )
-        } catch (e: Exception) {
-            NativeStatusSnapshot(lastError = "Invalid native status: ${describe(e)}")
-        }
-    }
-
-    private fun describe(error: Throwable): String {
-        val message = error.message?.takeIf { it.isNotBlank() }
-        return if (message == null) error.javaClass.name else "${error.javaClass.name}: $message"
-    }
-
-    private data class NativeStatusSnapshot(
-        val fuseAvailable: Boolean = true,
-        val fuseLibraryLoaded: Boolean = false,
-        val fuseLibraryName: String = "",
-        val hookMode: String = "UNKNOWN",
-        val fuseJniLoadMode: String = "UNKNOWN",
-        val embeddedFuseJniFound: Boolean = false,
-        val containsMountHooked: Boolean = false,
-        val startsWithHooked: Boolean = false,
-        val isFuseBpfEnabledHooked: Boolean = false,
-        val fuseReqUserdataHooked: Boolean = false,
-        val fuseBpfInstallHooked: Boolean = false,
-        val containsMountMethod: String = "",
-        val startsWithMethod: String = "",
-        val isFuseBpfEnabledMethod: String = "",
-        val fuseReqUserdataMethod: String = "",
-        val fuseBpfInstallMethod: String = "",
-        val xhookRefreshCalled: Boolean = false,
-        val lastError: String = "",
-    ) {
-        val coreAvailable: Boolean
-            get() = containsMountHooked
-
-        val fullAvailable: Boolean
-            get() = containsMountHooked &&
-                    startsWithHooked &&
-                    isFuseBpfEnabledHooked &&
-                    fuseReqUserdataHooked &&
-                    fuseBpfInstallHooked
-
-        private val missingSymbols: List<String>
-            get() = buildList {
-                if (!fuseLibraryLoaded) return@buildList
-                if (!containsMountHooked) add("containsMount")
-                if (!startsWithHooked) add("startsWith")
-                if (!isFuseBpfEnabledHooked) add("isFuseBpfEnabled")
-                if (!fuseReqUserdataHooked) add("fuseReqUserdata")
-                if (!fuseBpfInstallHooked) add("fuseBpfInstall")
-            }
-
-        fun toJson(): JSONObject = JSONObject().apply {
-            put("fuseAvailable", fuseAvailable)
-            put("fuseLibraryLoaded", fuseLibraryLoaded)
-            put("fuseLibraryName", fuseLibraryName)
-            put("hookMode", hookMode)
-            put("fuseJniLoadMode", fuseJniLoadMode)
-            put("embeddedFuseJniFound", embeddedFuseJniFound)
-            put("xhookRefreshCalled", xhookRefreshCalled)
-            put("coreAvailable", coreAvailable)
-            put("fullAvailable", fullAvailable)
-            put("symbols", JSONObject().apply {
-                put("containsMount", containsMountHooked)
-                put("startsWith", startsWithHooked)
-                put("isFuseBpfEnabled", isFuseBpfEnabledHooked)
-                put("fuseReqUserdata", fuseReqUserdataHooked)
-                put("fuseBpfInstall", fuseBpfInstallHooked)
-            })
-            put("symbolMethods", JSONObject().apply {
-                put("containsMount", containsMountMethod)
-                put("startsWith", startsWithMethod)
-                put("isFuseBpfEnabled", isFuseBpfEnabledMethod)
-                put("fuseReqUserdata", fuseReqUserdataMethod)
-                put("fuseBpfInstall", fuseBpfInstallMethod)
-            })
-            put("missingSymbols", JSONArray(missingSymbols))
-            put("lastError", lastError)
-        }
     }
 
     private data class FuseJavaGateStatus(
