@@ -67,15 +67,6 @@ object HookPolicyCache {
         val publisherEpoch: String = "",
     )
 
-    private data class PreferencesHolder(
-        val recordExternalAppSpecificStorage: Boolean = false,
-        // 真相归偏好层：本字段只做透传，不按 ROM 做条件改写。
-        val fuseBpfBlockAll: Boolean = false,
-        val aggressivelyPromptForReadingMediaFiles: Boolean = false,
-        val generation: Long = 0L,
-        val publisherEpoch: String = "",
-    )
-
     // ── ReadOnly 域 ──
     @Volatile
     private var readOnly: ReadOnlyHolder = ReadOnlyHolder()
@@ -282,9 +273,7 @@ object HookPolicyCache {
     // PlatformCapabilities
     // ═══════════════════════════════════════════════════════════
 
-    /**
-     * 从 DataBus 加载 platform_capabilities.json 并缓存关键能力字段。
-     */
+    /** 从 DataBus 加载 platform_capabilities.json 并缓存关键能力字段。 */
     private fun loadPlatformCapabilities() {
         val json = HookDataBusBridge.readSnapshot(DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES)
         if (json == null) {
@@ -582,9 +571,7 @@ object HookPolicyCache {
         return getMountedPath(packageName, extractUserIdFromPath(path), path)
     }
 
-    /**
-     * 从本地缓存按用户计算挂载后路径。
-     */
+    /** 从本地缓存按用户计算挂载后路径。 */
     fun getMountedPath(packageName: String, userId: Int, path: String): String? {
         val snapshot = rule
         val userRules = snapshot.data[packageName] ?: return null
@@ -592,9 +579,7 @@ object HookPolicyCache {
         return MountPlanDeriver.resolveMountedPath(rules, path)
     }
 
-    /**
-     * 检查指定包是否在 denylist 中。
-     */
+    /** 检查指定包是否在 denylist 中。 */
     fun isDenied(packageName: String): Boolean =
         rule.denylist.contains(packageName)
 
@@ -681,16 +666,8 @@ object HookPolicyCache {
         NativeHookStatus.markRedirectPolicyApplied(revision, generation, newCache.isNotEmpty())
 
         // 解析偏好标记；native 侧应用由挂载点全量刷新（commitPolicy）统一原子完成。
-        // 偏好独立 holder 发布，与 rule 域同代演进。
-        preferences = PreferencesHolder(
-            recordExternalAppSpecificStorage = root.optBoolean("recordExternalAppSpecificStorage", false),
-            // 只透传偏好层真相：缺席容忍为 false，不按 ROM 做条件改写。
-            fuseBpfBlockAll = root.optBoolean("fuseBpfBlockAll", false),
-            aggressivelyPromptForReadingMediaFiles =
-                root.optBoolean("aggressivelyPromptForReadingMediaFiles", false),
-            generation = generation,
-            publisherEpoch = publisherEpoch,
-        )
+        // 偏好独立 holder 发布，与 rule 域同代演进；解析见 PolicyPreferencesParser。
+        preferences = PolicyPreferencesParser.parse(root.toString())
     }
 
     private fun parseReadOnly(json: String) {
