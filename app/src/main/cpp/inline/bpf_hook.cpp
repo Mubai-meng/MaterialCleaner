@@ -61,6 +61,14 @@ namespace bpf_hook {
     static std::shared_mutex mountPointMutex;
     static std::atomic_bool recordExternalAppSpecificStorage{false};
 
+    // 决策 D1 开关：`fuse_bpf_fill_entries` 非移除语义的拦截范围。
+    //   false（默认）：按 bpf_fd >= 0 的“安装”语义拦截；
+    //   true         ：同样只拦非移除语义（移除语义恒放行，见 new_fuse_bpf_fill_entries）。
+    // 移除语义（bpf_fd < 0，即 BpfFd::REMOVE）只做移除、永不安装短路，放行它可保留平台
+    // “不把 bpf prog 残留在 Android/data/<pkg> inode 上”的不变量，故最高优先级绕过本开关。
+    // 由 Java 侧策略快照驱动，经 commitPolicy 单次 JNI 下发。
+    static std::atomic_bool fuseBpfBlockAll{false};
+
     bool (*old_StartsWith)(std::string_view s, std::string_view prefix);
 
     bool new_StartsWith(std::string_view s, std::string_view prefix) {
@@ -131,6 +139,58 @@ namespace bpf_hook {
         return old_fuse_bpf_install(fuse, e, child_path, backing_fd);
     }
 
+    // ---------------------------------------------------------------------
+    // Android 16/17 兼容：BPF 短路安装的真实拦截点已下移一层
+    // ---------------------------------------------------------------------
+    //
+    // AOSP 中 fuse_bpf_install() 只是 do_lookup 的中间层：
+    //
+    //   void fuse_bpf_install(struct fuse* fuse, struct fuse_entry_param* e,
+    //                         const std::string& child_path, int& backing_fd) {
+    //     if (android::base::StartsWith(child_path, PRIMARY_VOLUME_PREFIX)) {
+    //       if (is_bpf_backing_path(child_path)) {                  // .../Android/(data|obb)
+    //         fuse_bpf_fill_entries(child_path, fuse->bpf_fd.get(), e, backing_fd);
+    //       } else if (is_package_owned_path(child_path, fuse->path)) {  // .../Android/(data|obb)/<pkg>/...
+    //         fuse_bpf_fill_entries(child_path, static_cast<int>(BpfFd::REMOVE), e, backing_fd);
+    //       }
+    //     }
+    //   }
+    //
+    // 一加 15 / Android 17 实机 ELF 验证结论：
+    //   * fuse_bpf_install 已被内联进 do_lookup，独立导出符号零引用 = 死代码；
+    //   * do_lookup 只保留一处对 fuse_bpf_fill_entries 的调用（PLT/GOT 可拦截）；
+    //   * 上面两个分支被编译器合并为同一次调用，改用 bpf_fd 取值区分语义：
+    //         bpf_fd >= 0              → 安装 backing（内核短路，必须拦截才能让请求回到 FUSE daemon）
+    //         bpf_fd < 0（REMOVE）     → 移除 inode 继承的 bpf prog（必须放行）
+    //
+    // 因此这里以 fuse_bpf_fill_entries 为主拦截点，移除语义恒放行（最高优先级绕过 blockAll），
+    // 非移除语义按策略拦截；是否扩大拦截范围由开关 fuseBpfBlockAll 决定（决策 D1）。
+    void (*old_fuse_bpf_fill_entries)(const std::string &path, int bpf_fd,
+                                      struct fuse_entry_param *e, int &backing_fd);
+
+    void new_fuse_bpf_fill_entries(const std::string &path, int bpf_fd,
+                                   struct fuse_entry_param *e, int &backing_fd) {
+        if (old_fuse_bpf_fill_entries == nullptr) {
+            // 未捕获到原函数：宁可不装 BPF，也绝不能空指针跳转（会直接崩掉 MediaProvider）。
+            return;
+        }
+        // 移除语义（bpf_fd < 0，即 BpfFd::REMOVE）直接透传，最高优先级绕过 blockAll：
+        // 保留平台“不把 bpf prog 残留在 Android/data/<pkg> inode 上”的不变量。
+        if (bpf_fd < 0) {
+            return old_fuse_bpf_fill_entries(path, bpf_fd, e, backing_fd);
+        }
+        // 非移除语义：blockAll 或 bpf_fd >= 0 时按策略拦截（此处 bpf_fd >= 0 恒真，
+        // 保留 blockAll 显式表达策略语义，兼容旧平台与未来负值扩展）。
+        const bool interceptThisCall =
+                fuseBpfBlockAll.load(std::memory_order_relaxed) || bpf_fd >= 0;
+        if (interceptThisCall &&
+            (recordExternalAppSpecificStorage.load(std::memory_order_relaxed) ||
+             (fuse_req != nullptr && fuse_req->ctx.uid == 0))) {
+            return;
+        }
+        return old_fuse_bpf_fill_entries(path, bpf_fd, e, backing_fd);
+    }
+
     static void AppendJsonBool(std::ostringstream &out, const char *name, bool value) {
         out << '"' << name << "\":" << (value ? "true" : "false");
     }
@@ -160,13 +220,20 @@ namespace bpf_hook {
         bool containsMountHooked = false;
         bool isFuseBpfEnabledHooked = false;
         bool fuseReqUserdataHooked = false;
-        bool fuseBpfInstallHooked = false;
+        // BPF 诊断拆三字段：fill_entries 主拦截点、install 旧平台兼容点、effective 有效位。
+        // effective = fillEntriesHooked || installHooked，旧单字段不再复用。
+        bool fillEntriesHooked = false;
+        bool installHooked = false;
         // Diagnostic: which match method was used for each symbol
         MatchMethod startsWithMethod = MATCH_NONE;
         MatchMethod containsMountMethod = MATCH_NONE;
         MatchMethod isFuseBpfEnabledMethod = MATCH_NONE;
         MatchMethod fuseReqUserdataMethod = MATCH_NONE;
-        MatchMethod fuseBpfInstallMethod = MATCH_NONE;
+        MatchMethod fillEntriesMethod = MATCH_NONE;
+        MatchMethod installMethod = MATCH_NONE;
+
+        // 有效位：任一 BPF 拦截点命中即视为 BPF 链路有效。
+        bool effective() const { return fillEntriesHooked || installHooked; }
     };
 
     struct EmbeddedHookTarget {
@@ -190,12 +257,15 @@ namespace bpf_hook {
                                            bool containsMountHooked,
                                            bool isFuseBpfEnabledHooked,
                                            bool fuseReqUserdataHooked,
-                                           bool fuseBpfInstallHooked,
+                                           bool fillEntriesHooked,
+                                           bool installHooked,
+                                           bool effective,
                                            const char *startsWithMethod,
                                            const char *containsMountMethod,
                                            const char *isFuseBpfEnabledMethod,
                                            const char *fuseReqUserdataMethod,
-                                           const char *fuseBpfInstallMethod,
+                                           const char *fillEntriesMethod,
+                                           const char *installMethod,
                                            bool xhookRefreshCalled,
                                            const char *lastError) {
         std::ostringstream out;
@@ -222,7 +292,12 @@ namespace bpf_hook {
         out << ",";
         AppendJsonBool(out, "fuseReqUserdata", fuseReqUserdataHooked);
         out << ",";
-        AppendJsonBool(out, "fuseBpfInstall", fuseBpfInstallHooked);
+        // BPF 三字段分开上报：fillEntries 主拦截点、install 兼容点、effective 有效位。
+        AppendJsonBool(out, "fillEntries", fillEntriesHooked);
+        out << ",";
+        AppendJsonBool(out, "install", installHooked);
+        out << ",";
+        AppendJsonBool(out, "effective", effective);
         out << "},\"symbolMethods\":{";
         AppendJsonString(out, "containsMount", containsMountMethod);
         out << ",";
@@ -232,7 +307,9 @@ namespace bpf_hook {
         out << ",";
         AppendJsonString(out, "fuseReqUserdata", fuseReqUserdataMethod);
         out << ",";
-        AppendJsonString(out, "fuseBpfInstall", fuseBpfInstallMethod);
+        AppendJsonString(out, "fillEntries", fillEntriesMethod);
+        out << ",";
+        AppendJsonString(out, "install", installMethod);
         out << "},";
         AppendJsonString(out, "lastError", lastError);
         out << "}";
@@ -646,17 +723,25 @@ namespace bpf_hook {
         }
 
         result->foundFuseJni = true;
+        // 注意：libc++ 内联命名空间在不同 Android 版本间不同——Android 17 为 std::__1（NSt3__1），
+        // 旧平台为 std::__ndk1（NSt6__ndk1）。此处统一按 NSt3__1 精确匹配，
+        // 旧平台由 FuzzyMatchesTarget（短名 + 命名空间 + 参数个数）兜底。
         const char *startsWithSymbol = AY_OBFUSCATE(
-                "_ZN7android4base10StartsWithENSt6__ndk117basic_string_viewIcNS1_11char_traitsIcEEEES5_");
+                "_ZN7android4base10StartsWithENSt3__117basic_string_viewIcNS1_11char_traitsIcEEEES5_");
         const char *containsMount31Symbol = AY_OBFUSCATE(
-                "_ZN13mediaprovider4fuse13containsMountERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE");
+                "_ZN13mediaprovider4fuse13containsMountERKNSt3__112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE");
+        // API30 的 2 参重载：本机（Android 17）已不存在，保留仅为兼容旧平台（模糊匹配 paramCount=2）。
         const char *containsMount30Symbol = AY_OBFUSCATE(
-                "_ZN13mediaprovider4fuse13containsMountERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_");
+                "_ZN13mediaprovider4fuse13containsMountERKNSt3__112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_");
         const char *isFuseBpfEnabledSymbol = AY_OBFUSCATE(
                 "_ZN13mediaprovider4fuse16IsFuseBpfEnabledEv");
         const char *fuseReqUserdataSymbol = AY_OBFUSCATE("fuse_req_userdata");
+        // Android 16/17：真实生效的 BPF 安装点（有 PLT 槽，可 GOT/xhook 拦截）。
+        const char *fuseBpfFillEntriesSymbol = AY_OBFUSCATE(
+                "_ZN13mediaprovider4fuse21fuse_bpf_fill_entriesERKNSt3__112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEEiP16fuse_entry_paramRi");
+        // 旧平台（fuse_bpf_install 尚未内联）仍走此符号；本机零引用，仅作兼容保留。
         const char *fuseBpfInstallSymbol = AY_OBFUSCATE(
-                "_ZN13mediaprovider4fuse16fuse_bpf_installEP4fuseP16fuse_entry_paramRKNSt6__ndk112basic_stringIcNS5_11char_traitsIcEENS5_9allocatorIcEEEERi");
+                "_ZN13mediaprovider4fuse16fuse_bpf_installEP4fuseP16fuse_entry_paramRKNSt3__112basic_stringIcNS5_11char_traitsIcEENS5_9allocatorIcEEEERi");
 
         // Targets:
         //   symbol          shortName           namespace             paramCount  replacement              original                   hooked flag              method out
@@ -685,11 +770,17 @@ namespace bpf_hook {
                         reinterpret_cast<void *>(new_fuse_req_userdata),
                         reinterpret_cast<void **>(&old_fuse_req_userdata), &result->fuseReqUserdataHooked,
                         &result->fuseReqUserdataMethod},
+                // Android 16/17 主拦截点：放在 fuse_bpf_install 之前，命中后后者自动跳过。
+                {fuseBpfFillEntriesSymbol, AY_OBFUSCATE("fuse_bpf_fill_entries"),
+                        AY_OBFUSCATE("mediaprovider::fuse"), 4,
+                        reinterpret_cast<void *>(new_fuse_bpf_fill_entries),
+                        reinterpret_cast<void **>(&old_fuse_bpf_fill_entries), &result->fillEntriesHooked,
+                        &result->fillEntriesMethod},
                 {fuseBpfInstallSymbol,   AY_OBFUSCATE("fuse_bpf_install"),
                         AY_OBFUSCATE("mediaprovider::fuse"), -1,
                         reinterpret_cast<void *>(new_fuse_bpf_install),
-                        reinterpret_cast<void **>(&old_fuse_bpf_install), &result->fuseBpfInstallHooked,
-                        &result->fuseBpfInstallMethod},
+                        reinterpret_cast<void **>(&old_fuse_bpf_install), &result->installHooked,
+                        &result->installMethod},
         };
 
         const auto patchRelocations = [&](const auto *relocations, size_t count) {
@@ -755,7 +846,10 @@ namespace bpf_hook {
         bool containsMountHooked = false;
         bool isFuseBpfEnabledHooked = false;
         bool fuseReqUserdataHooked = false;
-        bool fuseBpfInstallHooked = false;
+        // BPF 诊断拆三字段：fillEntriesHooked 主拦截点、installHooked 兼容点、effective 有效位。
+        // effective = fillEntriesHooked || installHooked，不复用旧单字段。
+        bool fillEntriesHooked = false;
+        bool installHooked = false;
         bool xhookRefreshCalled = false;
         std::string lastError;
         const bool startsWithRequired = storage_platform::device_api_level() >= 31;
@@ -763,14 +857,15 @@ namespace bpf_hook {
         const char *containsMountMethod = "none";
         const char *isFuseBpfEnabledMethod = "none";
         const char *fuseReqUserdataMethod = "none";
-        const char *fuseBpfInstallMethod = "none";
+        const char *fillEntriesMethod = "none";
+        const char *installMethod = "none";
 
         if (!storage_platform::is_fuse_available()) {
             LOGE("%s", std::string(AY_OBFUSCATE("FUSE not available, skipping hook")).c_str()); // "FUSE not available, skipping hook"
             return BuildHookStatusJson(false, true, "libfuse_jni.so",
                                        "NONE", "UNKNOWN", false,
-                                       false, false, false, false, false,
-                                       "none", "none", "none", "none", "none",
+                                       false, false, false, false, false, false, false,
+                                       "none", "none", "none", "none", "none", "none",
                                        false, "FUSE not available");
         }
         LOGI("%s", std::string(AY_OBFUSCATE("Initializing bpf_hook")).c_str()); // "Initializing bpf_hook"
@@ -781,7 +876,9 @@ namespace bpf_hook {
             containsMountHooked = embeddedResult.containsMountHooked;
             isFuseBpfEnabledHooked = embeddedResult.isFuseBpfEnabledHooked;
             fuseReqUserdataHooked = embeddedResult.fuseReqUserdataHooked;
-            fuseBpfInstallHooked = embeddedResult.fuseBpfInstallHooked;
+            fillEntriesHooked = embeddedResult.fillEntriesHooked;
+            installHooked = embeddedResult.installHooked;
+            const bool effective = fillEntriesHooked || installHooked;
             if (embeddedResult.foundFuseJni) {
                 lastError = containsMountHooked ? "" : "embedded libfuse_jni.so found but GOT hook failed";
             }
@@ -791,21 +888,32 @@ namespace bpf_hook {
                                        embeddedResult.foundFuseJni,
                                        startsWithHooked, containsMountHooked,
                                        isFuseBpfEnabledHooked, fuseReqUserdataHooked,
-                                       fuseBpfInstallHooked,
+                                       fillEntriesHooked, installHooked, effective,
                                        MatchMethodName(embeddedResult.startsWithMethod),
                                        MatchMethodName(embeddedResult.containsMountMethod),
                                        MatchMethodName(embeddedResult.isFuseBpfEnabledMethod),
                                        MatchMethodName(embeddedResult.fuseReqUserdataMethod),
-                                       MatchMethodName(embeddedResult.fuseBpfInstallMethod),
+                                       MatchMethodName(embeddedResult.fillEntriesMethod),
+                                       MatchMethodName(embeddedResult.installMethod),
                                        false, lastError.c_str());
         }
         if (startsWithRequired) {
+            // 先按 Android 17 的 libc++ 内联命名空间 std::__1（NSt3__1）匹配，失败再回退旧 NDK 的 std::__ndk1。
             const char *startsWithSymbol = AY_OBFUSCATE(
-                    "_ZN7android4base10StartsWithENSt6__ndk117basic_string_viewIcNS1_11char_traitsIcEEEES5_");
+                    "_ZN7android4base10StartsWithENSt3__117basic_string_viewIcNS1_11char_traitsIcEEEES5_");
             auto startsWith = handle == nullptr ? nullptr : dlsym(handle, startsWithSymbol);
             auto startsWithRegistered = RegisterHook(startsWithSymbol, (void *) new_StartsWith,
                                                      (void **) &old_StartsWith);
             startsWithHooked = startsWith != nullptr && startsWithRegistered;
+            if (!startsWithHooked) {
+                const char *startsWithNdk1Symbol = AY_OBFUSCATE(
+                        "_ZN7android4base10StartsWithENSt6__ndk117basic_string_viewIcNS1_11char_traitsIcEEEES5_");
+                auto startsWithNdk1 = handle == nullptr ? nullptr : dlsym(handle, startsWithNdk1Symbol);
+                auto startsWithNdk1Registered = RegisterHook(startsWithNdk1Symbol,
+                                                             (void *) new_StartsWith,
+                                                             (void **) &old_StartsWith);
+                startsWithHooked = startsWithNdk1 != nullptr && startsWithNdk1Registered;
+            }
             if (startsWithHooked) {
                 startsWithMethod = "exact";
             }
@@ -817,11 +925,21 @@ namespace bpf_hook {
             }
         }
         const char *containsMount31Symbol = AY_OBFUSCATE(
-                "_ZN13mediaprovider4fuse13containsMountERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE");
+                "_ZN13mediaprovider4fuse13containsMountERKNSt3__112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE");
         auto containsMount_31 = handle == nullptr ? nullptr : dlsym(handle, containsMount31Symbol);
         auto containsMount31Registered = RegisterHook(containsMount31Symbol, (void *) new_containsMount_31,
                                                       (void **) &old_containsMount_31);
         containsMountHooked = containsMount_31 != nullptr && containsMount31Registered;
+        if (!containsMountHooked) {
+            const char *containsMount31Ndk1Symbol = AY_OBFUSCATE(
+                    "_ZN13mediaprovider4fuse13containsMountERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE");
+            auto containsMount_31ndk1 =
+                    handle == nullptr ? nullptr : dlsym(handle, containsMount31Ndk1Symbol);
+            auto containsMount31Ndk1Registered = RegisterHook(containsMount31Ndk1Symbol,
+                                                              (void *) new_containsMount_31,
+                                                              (void **) &old_containsMount_31);
+            containsMountHooked = containsMount_31ndk1 != nullptr && containsMount31Ndk1Registered;
+        }
         if (!containsMountHooked) {
             const char *containsMount30Symbol = AY_OBFUSCATE(
                     "_ZN13mediaprovider4fuse13containsMountERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_");
@@ -873,30 +991,61 @@ namespace bpf_hook {
             }
         }
 
-        const char *fuseBpfInstallSymbol = AY_OBFUSCATE(
-                "_ZN13mediaprovider4fuse16fuse_bpf_installEP4fuseP16fuse_entry_paramRKNSt6__ndk112basic_stringIcNS5_11char_traitsIcEENS5_9allocatorIcEEEERi");
-        auto fuse_bpf_install = handle == nullptr ? nullptr : dlsym(handle, fuseBpfInstallSymbol);
-        auto fuseBpfInstallRegistered = RegisterHook(fuseBpfInstallSymbol,
-                                                     (void *) new_fuse_bpf_install,
-                                                     (void **) &old_fuse_bpf_install);
-        fuseBpfInstallHooked = fuse_bpf_install != nullptr && fuseBpfInstallRegistered;
-        if (fuseBpfInstallHooked) {
-            fuseBpfInstallMethod = "exact";
+        // 主拦截点：fuse_bpf_fill_entries（Android 16/17，有 PLT 槽，xhook 可拦）。
+        // 回退顺序：fill(__1) -> install(__1) -> install(__ndk1)，最后由 GOT 模糊匹配兜底。
+        const char *fuseBpfFillEntriesSymbol = AY_OBFUSCATE(
+                "_ZN13mediaprovider4fuse21fuse_bpf_fill_entriesERKNSt3__112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEEiP16fuse_entry_paramRi");
+        auto fuse_bpf_fill_entries = handle == nullptr ? nullptr : dlsym(handle, fuseBpfFillEntriesSymbol);
+        auto fuseBpfFillEntriesRegistered = RegisterHook(fuseBpfFillEntriesSymbol,
+                                                         (void *) new_fuse_bpf_fill_entries,
+                                                         (void **) &old_fuse_bpf_fill_entries);
+        fillEntriesHooked = fuse_bpf_fill_entries != nullptr && fuseBpfFillEntriesRegistered;
+        if (fillEntriesHooked) {
+            fillEntriesMethod = "exact";
         }
-        if (!fuseBpfInstallHooked) {
-            LOGE("%s", std::string(AY_OBFUSCATE("failed to find fuse_bpf_install")).c_str()); // "failed to find fuse_bpf_install"
+        // 旧平台回退：fuse_bpf_install 尚未被内联时需直接拦它（两种 libc++ 命名空间都试）。
+        if (!fillEntriesHooked) {
+            const char *fuseBpfInstallSymbol = AY_OBFUSCATE(
+                    "_ZN13mediaprovider4fuse16fuse_bpf_installEP4fuseP16fuse_entry_paramRKNSt3__112basic_stringIcNS5_11char_traitsIcEENS5_9allocatorIcEEEERi");
+            auto fuse_bpf_install = handle == nullptr ? nullptr : dlsym(handle, fuseBpfInstallSymbol);
+            auto fuseBpfInstallRegistered = RegisterHook(fuseBpfInstallSymbol,
+                                                         (void *) new_fuse_bpf_install,
+                                                         (void **) &old_fuse_bpf_install);
+            installHooked = fuse_bpf_install != nullptr && fuseBpfInstallRegistered;
+            if (installHooked) {
+                installMethod = "exact";
+            }
+        }
+        if (!fillEntriesHooked && !installHooked) {
+            const char *fuseBpfInstallNdk1Symbol = AY_OBFUSCATE(
+                    "_ZN13mediaprovider4fuse16fuse_bpf_installEP4fuseP16fuse_entry_paramRKNSt6__ndk112basic_stringIcNS5_11char_traitsIcEENS5_9allocatorIcEEEERi");
+            auto fuse_bpf_install_ndk1 =
+                    handle == nullptr ? nullptr : dlsym(handle, fuseBpfInstallNdk1Symbol);
+            auto fuseBpfInstallNdk1Registered = RegisterHook(fuseBpfInstallNdk1Symbol,
+                                                             (void *) new_fuse_bpf_install,
+                                                             (void **) &old_fuse_bpf_install);
+            installHooked = fuse_bpf_install_ndk1 != nullptr && fuseBpfInstallNdk1Registered;
+            if (installHooked) {
+                installMethod = "exact";
+            }
+        }
+        if (!fillEntriesHooked && !installHooked) {
+            LOGE("%s", std::string(AY_OBFUSCATE(
+                    "failed to find fuse_bpf_fill_entries/fuse_bpf_install")).c_str());
             if (handle != nullptr) {
-                lastError = "failed to find fuse_bpf_install";
+                lastError = "failed to find fuse_bpf_fill_entries/fuse_bpf_install";
             }
         }
 
         xhook_refresh(0);
         xhookRefreshCalled = true;
 
-        // If any symbol failed exact xhook match, try GOT Patch as fallback
+        // If any symbol failed exact xhook match, try GOT Patch as fallback.
+        // BPF 有效位 effective = fillEntriesHooked || installHooked，任一命中即视为 BPF 链路有效。
+        bool effective = fillEntriesHooked || installHooked;
         const bool xhookAllSucceeded = (!startsWithRequired || startsWithHooked) && containsMountHooked
                                && isFuseBpfEnabledHooked && fuseReqUserdataHooked
-                               && fuseBpfInstallHooked;
+                               && effective;
 
         bool fallbackResolvedAny = false;
         if (!xhookAllSucceeded) {
@@ -922,15 +1071,21 @@ namespace bpf_hook {
                 fuseReqUserdataMethod = MatchMethodName(embeddedResult.fuseReqUserdataMethod);
                 fallbackResolvedAny = true;
             }
-            if (!fuseBpfInstallHooked && embeddedResult.fuseBpfInstallHooked) {
-                fuseBpfInstallHooked = true;
-                fuseBpfInstallMethod = MatchMethodName(embeddedResult.fuseBpfInstallMethod);
+            if (!fillEntriesHooked && embeddedResult.fillEntriesHooked) {
+                fillEntriesHooked = true;
+                fillEntriesMethod = MatchMethodName(embeddedResult.fillEntriesMethod);
                 fallbackResolvedAny = true;
             }
+            if (!installHooked && embeddedResult.installHooked) {
+                installHooked = true;
+                installMethod = MatchMethodName(embeddedResult.installMethod);
+                fallbackResolvedAny = true;
+            }
+            effective = fillEntriesHooked || installHooked;
             const bool hookAvailableAfterFallback =
                     (!startsWithRequired || startsWithHooked) && containsMountHooked
                     && isFuseBpfEnabledHooked && fuseReqUserdataHooked
-                    && fuseBpfInstallHooked;
+                    && effective;
             if (hookAvailableAfterFallback && fallbackResolvedAny) {
                 lastError = "some symbols resolved via GOT patch fallback";
             } else if (!hookAvailableAfterFallback) {
@@ -948,10 +1103,10 @@ namespace bpf_hook {
                                    "SYSTEM_LIB", false,
                                    startsWithHooked, containsMountHooked,
                                    isFuseBpfEnabledHooked, fuseReqUserdataHooked,
-                                   fuseBpfInstallHooked,
+                                   fillEntriesHooked, installHooked, effective,
                                    startsWithMethod, containsMountMethod,
                                    isFuseBpfEnabledMethod, fuseReqUserdataMethod,
-                                   fuseBpfInstallMethod,
+                                   fillEntriesMethod, installMethod,
                                    xhookRefreshCalled, lastError.c_str());
     }
 
@@ -1010,13 +1165,27 @@ namespace bpf_hook {
         recordExternalAppSpecificStorage.store(value == JNI_TRUE, std::memory_order_relaxed);
     }
 
+    /** 决策 D1 开关：非移除语义的 BPF 拦截范围，变更时打 LOG 留痕便于排障。 */
+    void setFuseBpfBlockAll(JNIEnv *env, jclass clazz, jboolean value) {
+        const bool next = (value == JNI_TRUE);
+        const bool previous = fuseBpfBlockAll.exchange(next, std::memory_order_relaxed);
+        if (previous != next) {
+            // 该开关直接决定 BPF 拦截范围，属可观测的行为切换，变更时留痕便于排障。
+            LOGI("%s", (std::string(AY_OBFUSCATE("fuseBpfBlockAll=")) +
+                        (next ? "true" : "false")).c_str());
+        }
+    }
+
     /**
-     * 单次调用原子应用策略的两个维度：挂载点集合与记录偏好。
-     * 消除 Java 侧分两次 JNI 调用时"F 新挂载点 + 旧偏好"的不一致窗口。
-     * 任一解析异常保留上一份有效配置。
+     * 单次 JNI 调用下发策略的三个维度：挂载点集合、记录偏好、BPF 拦截范围开关。
+     * 消除 Java 侧分次 JNI 调用时“新挂载点配旧偏好/旧开关”的不一致窗口。
+     * 注意：此处“单次下发”并非 CPU 原子事务，而是三次独立写入按固定顺序依次生效
+     *（setRecord -> setBlockAll -> setMountPoint）；任一解析异常保留上一份有效配置。
      */
-    void commitPolicy(JNIEnv *env, jclass clazz, jobjectArray value, jboolean record) {
+    void commitPolicy(JNIEnv *env, jclass clazz, jobjectArray value, jboolean record,
+                      jboolean block_all) {
         setRecordExternalAppSpecificStorage(env, clazz, record);
+        setFuseBpfBlockAll(env, clazz, block_all);
         setMountPoint(env, clazz, value);
     }
 }  // namespace bpf_hook
