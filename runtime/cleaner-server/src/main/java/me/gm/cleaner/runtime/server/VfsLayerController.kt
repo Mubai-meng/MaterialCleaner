@@ -8,6 +8,7 @@ import me.gm.cleaner.core.common.RuntimeFileUtils
 import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.model.PackageStatus
 import me.gm.cleaner.runtime.server.process.BaseProcessObserver
+import me.gm.cleaner.runtime.server.process.PackageInfoMapper
 import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
 import me.gm.cleaner.runtime.server.storage.StorageEventListenerDelegate
 import me.gm.cleaner.runtime.server.orchestrator.LayerId
@@ -85,27 +86,28 @@ class VfsLayerController {
         val startUpAwarePids = observer.getStartUpAwarePids(packageName)
         val mountFailedPids = observer.getMountFailedPids()
         val mkdir = observer.getMountedPackages().contains(packageName)
+        // 只有已配置重定向的包才走 uid 权威判定，非重定向包保持 pkgList 语义，
+        // 避免把不在重定向配置中的查询误判成没有进程。
+        val uidMappingReady = VfsRuntimePolicy.getStorageRedirectPackages()
+            .contains(packageName) && PackageInfoMapper.isMappingReady()
 
         processes
             .asSequence()
             .filter { !UserHandle_isIsolated(RuntimeFileUtils.read_uid(it.pid)) }
             .sortedBy { it.pid }
             .forEach { procInfo ->
-                procInfo.pkgList
-                    .filter { it == packageName }
-                    .forEach {
-                        val userId = procInfo.uid.toUserId()
-                        pids.add(procInfo.pid)
-                        pidFlags.add(buildPidFlag(
-                            procInfo.pid,
-                            packageName,
-                            userId,
-                            startUpAwarePids,
-                            mountFailedPids,
-                            mkdir,
-                        ))
-                        userIds.add(userId)
-                    }
+                if (!isProcessOfPackage(procInfo, packageName, uidMappingReady)) return@forEach
+                val userId = procInfo.uid.toUserId()
+                pids.add(procInfo.pid)
+                pidFlags.add(buildPidFlag(
+                    procInfo.pid,
+                    packageName,
+                    userId,
+                    startUpAwarePids,
+                    mountFailedPids,
+                    mkdir,
+                ))
+                userIds.add(userId)
             }
 
         status.pids = pids.toIntArray()
@@ -122,6 +124,8 @@ class VfsLayerController {
         val mountedPackages = observer.getMountedPackages()
         val srPackages = VfsRuntimePolicy.getStorageRedirectPackages()
         val processes = selectProcesses(flags, startUpAwarePids)
+        // 映射就绪用 uid 权威归属，未就绪保守回退 pkgList，绝不直接返回空。
+        val uidMappingReady = PackageInfoMapper.isMappingReady()
         val statuses = TreeMap<String, MutablePackageStatus>()
 
         processes
@@ -129,22 +133,20 @@ class VfsLayerController {
             .filter { !UserHandle_isIsolated(RuntimeFileUtils.read_uid(it.pid)) }
             .sortedBy { it.pid }
             .forEach { procInfo ->
-                procInfo.pkgList
-                    .filter { srPackages.contains(it) }
-                    .forEach { packageName ->
-                        val userId = procInfo.uid.toUserId()
-                        val status = statuses.getOrPut(packageName) { MutablePackageStatus() }
-                        status.pids.add(procInfo.pid)
-                        status.pidFlags.add(buildPidFlag(
-                            procInfo.pid,
-                            packageName,
-                            userId,
-                            startUpAwarePids,
-                            mountFailedPids,
-                            mountedPackages.contains(packageName),
-                        ))
-                        status.userIds.add(userId)
-                    }
+                val packageName =
+                    resolveSrPackageName(procInfo, srPackages, uidMappingReady) ?: return@forEach
+                val userId = procInfo.uid.toUserId()
+                val status = statuses.getOrPut(packageName) { MutablePackageStatus() }
+                status.pids.add(procInfo.pid)
+                status.pidFlags.add(buildPidFlag(
+                    procInfo.pid,
+                    packageName,
+                    userId,
+                    startUpAwarePids,
+                    mountFailedPids,
+                    mountedPackages.contains(packageName),
+                ))
+                status.userIds.add(userId)
             }
 
         return statuses.mapValues { (_, value) -> value.toPackageStatus() }
@@ -237,6 +239,35 @@ class VfsLayerController {
                 }
             }
         }.start()
+    }
+
+    /**
+     * 把进程归属到唯一一个重定向包，空表示它不属于任何重定向包。
+     * 不能只用 pkgList：宿主进程会把他人包名也列进来，那种进程永远不是重定向对象，
+     * 一旦并入就会被判成异常且随宿主生灭抖动。改用 uid（共享 uid 场景退化为进程名）权威映射天然剔除。
+     * 映射未就绪时保守回退旧 pkgList 语义，绝不直接返回空，避免把全部进程判成非目标。
+     */
+    private fun resolveSrPackageName(
+        procInfo: RunningAppProcessInfo,
+        srPackages: Set<String>,
+        uidMappingReady: Boolean,
+    ): String? {
+        if (!uidMappingReady) {
+            return procInfo.pkgList?.firstOrNull { srPackages.contains(it) }
+        }
+        val srPackageName = PackageInfoMapper.getSrPackageName(procInfo.uid, procInfo.processName)
+        return if (srPackageName != null && srPackages.contains(srPackageName)) srPackageName else null
+    }
+
+    private fun isProcessOfPackage(
+        procInfo: RunningAppProcessInfo,
+        packageName: String,
+        uidMappingReady: Boolean,
+    ): Boolean {
+        if (!uidMappingReady) {
+            return procInfo.pkgList?.contains(packageName) == true
+        }
+        return PackageInfoMapper.getSrPackageName(procInfo.uid, procInfo.processName) == packageName
     }
 
     private fun selectProcesses(flags: Int, startUpAwarePids: Set<Int>): List<RunningAppProcessInfo> {
