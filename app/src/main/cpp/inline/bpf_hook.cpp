@@ -61,9 +61,9 @@ namespace bpf_hook {
     static std::shared_mutex mountPointMutex;
     static std::atomic_bool recordExternalAppSpecificStorage{false};
 
-    // 决策 D1 开关：`fuse_bpf_fill_entries` 非移除语义的拦截范围。
-    //   false（默认）：按 bpf_fd >= 0 的“安装”语义拦截；
-    //   true         ：同样只拦非移除语义（移除语义恒放行，见 new_fuse_bpf_fill_entries）。
+    // 决策 D1 开关（保留兼容字段）：`fuse_bpf_fill_entries` 安装语义的记录策略门。
+    // 当前 Android 17 实现中，所有安装类调用本来就按既定策略拦截，
+    // REMOVE 永远放行，故本开关当前不改变 native 行为，仅保留配置/JNI/JSON 契约以备旧平台与扩展。
     // 移除语义（bpf_fd < 0，即 BpfFd::REMOVE）只做移除、永不安装短路，放行它可保留平台
     // “不把 bpf prog 残留在 Android/data/<pkg> inode 上”的不变量，故最高优先级绕过本开关。
     // 有意与 PR #12 原始 D1 分歧：PR 原语义 blockAll=true 时连 REMOVE 一起拦，
@@ -166,8 +166,8 @@ namespace bpf_hook {
     //         bpf_fd >= 0              → 安装 backing（内核短路，必须拦截才能让请求回到 FUSE daemon）
     //         bpf_fd < 0（REMOVE）     → 移除 inode 继承的 bpf prog（必须放行）
     //
-    // 因此这里以 fuse_bpf_fill_entries 为主拦截点，移除语义恒放行（最高优先级绕过 blockAll），
-    // 非移除语义按策略拦截；是否扩大拦截范围由开关 fuseBpfBlockAll 决定（决策 D1）。
+    // 因此这里以 fuse_bpf_fill_entries 为主拦截点，移除语义恒放行（最高优先级，不受 blockAll 影响），
+    // 安装语义按既定记录策略拦截；fuseBpfBlockAll 保留配置/JNI/JSON 契约，当前实现不改变该行为（决策 D1）。
     void (*old_fuse_bpf_fill_entries)(const std::string &path, int bpf_fd,
                                       struct fuse_entry_param *e, int &backing_fd);
 

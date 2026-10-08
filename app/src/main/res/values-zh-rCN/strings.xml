@@ -87,8 +87,8 @@
     <string name="record_shared_storage_title">记录共享存储空间中的文件操作</string>
     <string name="record_external_app_specific_storage_title">（实验性）记录外部应用专属存储空间中的文件操作</string>
     <string name="record_external_app_specific_storage_summary">使应用通过 FUSE 访问其专属存储空间，会使得性能显著下降</string>
-    <string name="fuse_bpf_block_all_title">（实验性）FUSE BPF 拦截范围</string>
-    <string name="fuse_bpf_block_all_summary">关闭（推荐）：只拦截 BPF 短路的“安装”，平台自身的“移除”恒放行，不会残留内核 BPF 程序。开启：非移除语义仍按记录策略拦截（移除恒放行），用于兼容旧平台与未来扩展。</string>
+    <string name="fuse_bpf_block_all_title">（实验性）FUSE BPF 拦截范围（保留）</string>
+    <string name="fuse_bpf_block_all_summary">保留兼容选项：安装路径恒按记录策略拦截，移除恒放行，本开关当前不改变行为，用于兼容旧平台与未来扩展。</string>
     <string name="upsert_title">使用 upsert 保存数据</string>
     <string name="upsert_summary">重复的数据只保留最新的一份</string>
     <string name="storage_redirect_prompt">存储重定向提示</string>
