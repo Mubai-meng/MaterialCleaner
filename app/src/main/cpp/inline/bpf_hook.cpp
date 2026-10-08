@@ -66,6 +66,9 @@ namespace bpf_hook {
     //   true         ：同样只拦非移除语义（移除语义恒放行，见 new_fuse_bpf_fill_entries）。
     // 移除语义（bpf_fd < 0，即 BpfFd::REMOVE）只做移除、永不安装短路，放行它可保留平台
     // “不把 bpf prog 残留在 Android/data/<pkg> inode 上”的不变量，故最高优先级绕过本开关。
+    // 有意与 PR #12 原始 D1 分歧：PR 原语义 blockAll=true 时连 REMOVE 一起拦，
+    // 会阻断系统生命周期清理造成残留；此处宣布保持稳定性契约，REMOVE 永远交由系统原实现，
+    // 开关仅控制安装类 entry 的拦截范围。若未来看到 blockAll=true 仍放行 REMOVE，属设计而非遗漏。
     // 由 Java 侧策略快照驱动，经 commitPolicy 单次 JNI 下发。
     static std::atomic_bool fuseBpfBlockAll{false};
 
