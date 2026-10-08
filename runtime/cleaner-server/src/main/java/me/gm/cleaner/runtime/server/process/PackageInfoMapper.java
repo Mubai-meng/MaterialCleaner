@@ -41,6 +41,15 @@ public class PackageInfoMapper {
     private static volatile boolean sInitialized;
 
     /**
+     * 数据可信度：初始化完成不等于数据可信。
+     * sFullOk = 全量枚举无异常且至少拿到一个包（Android 上包列表永不为空，空即失败信号）；
+     * sTargetedOk = 每个已配置包在每个用户上都拿到明确 PackageInfo（缺席包保持 NOTREADY 保守回退，
+     * 宁可降级也不伪装可信）。二者满足其一才算可信，禁单独用 map.size() 充数。
+     */
+    private static volatile boolean sFullOk;
+    private static volatile boolean sTargetedOk;
+
+    /**
      * 建表专用的启动锁：局部建表全部填完再一次性发布，最后置位 sInitialized。
      * 读取侧只看 sInitialized，因此不会观察到半初始化的字段组合。
      */
@@ -51,6 +60,8 @@ public class PackageInfoMapper {
         // 两者互斥，不会出现标志已复位但字段仍被判为已初始化的组合。
         synchronized (sBootstrapLock) {
             sInitialized = false;
+            sFullOk = false;
+            sTargetedOk = false;
             sUidToSrPackageNames = null;
             sUidToPackageNames = null;
             sSharedUserIdEnabledUidToProcessNamesToPackageName = null;
@@ -82,12 +93,17 @@ public class PackageInfoMapper {
             // 第一遍（尽力而为）：全量枚举已安装包。
             // 这一遍只服务于重定向全量包与系统应用 processName 反查，
             // 对存储重定向本身并非必需，真正必需的是第二遍。
+            // fullOk 仅在无异常且至少拿到一个包时成立：在真机上包列表永不为空，
+            // 全空即全量接口静默退化的失败信号，不能仅凭无异常就采信。
+            boolean fullOk = true;
+            int installedTotal = 0;
             try {
                 for (final var userId : SystemService.getUserIdsNoThrow()) {
                     final var installed = SystemService.getInstalledPackagesNoThrow(0, userId);
                     if (installed == null) {
                         continue;
                     }
+                    installedTotal += installed.size();
                     for (final var pi : installed) {
                         putMappings(pi, userId, srPackages, uidToSrPackageNames, uidToPackageNames,
                                 sharedUserIdEnabledUidToProcessNamesToPackageName,
@@ -97,6 +113,10 @@ public class PackageInfoMapper {
                 }
             } catch (final Throwable t) {
                 Log.w(TAG, "full package enumeration failed, relying on targeted pass", t);
+                fullOk = false;
+            }
+            if (installedTotal == 0) {
+                fullOk = false;
             }
 
             // 第二遍（权威）：只针对已配置重定向的包，逐包取包信息补齐。
@@ -106,17 +126,33 @@ public class PackageInfoMapper {
             // 不报错、不挂载、不留任何日志。
             // 逐包取包信息不经过全量枚举接口，因此不受该退化影响；
             // 且数量等于已配置包数（通常个位数），比重建全量表便宜得多。
-            for (final var userId : SystemService.getUserIdsNoThrow()) {
-                for (final var packageName : srPackages) {
-                    final var pi = SystemService.getPackageInfoNoThrow(packageName, 0, userId);
-                    putMappings(pi, userId, srPackages, uidToSrPackageNames, uidToPackageNames,
-                            sharedUserIdEnabledUidToProcessNamesToPackageName,
-                            processNameToSystemSrPackageNames, processNameToSystemPackageNames,
-                            logFormatAppPrincipalNamesToUid);
+            // targetedOk 要求每个已配置包在每个用户上都拿到非空结果：
+            // 缺席包保持 NOTREADY 保守回退，宁可降级也不伪装可信。
+            boolean targetedOk = true;
+            try {
+                for (final var userId : SystemService.getUserIdsNoThrow()) {
+                    for (final var packageName : srPackages) {
+                        final var pi = SystemService.getPackageInfoNoThrow(packageName, 0, userId);
+                        if (pi == null) {
+                            targetedOk = false;
+                        } else {
+                            putMappings(pi, userId, srPackages, uidToSrPackageNames, uidToPackageNames,
+                                    sharedUserIdEnabledUidToProcessNamesToPackageName,
+                                    processNameToSystemSrPackageNames, processNameToSystemPackageNames,
+                                    logFormatAppPrincipalNamesToUid);
+                        }
+                    }
                 }
+            } catch (final Throwable t) {
+                Log.w(TAG, "targeted package enumeration failed", t);
+                targetedOk = false;
+            }
+            if (srPackages.isEmpty()) {
+                targetedOk = false;
             }
 
-            // 发布：先写全部字段，最后置位标志，读取方可见完整映射表。
+            // 发布：先写全部字段，再写可信度，最后置位标志，读取方可见完整映射表。
+            // ready = published && trusted：空表发布后仍为 NOTREADY，调用侧继续保守回退。
             sUidToSrPackageNames = uidToSrPackageNames;
             sUidToPackageNames = uidToPackageNames;
             sSharedUserIdEnabledUidToProcessNamesToPackageName =
@@ -124,6 +160,8 @@ public class PackageInfoMapper {
             sProcessNameToSystemSrPackageNames = processNameToSystemSrPackageNames;
             sProcessNameToSystemPackageNames = processNameToSystemPackageNames;
             sLogFormatAppPrincipalNamesToUid = logFormatAppPrincipalNamesToUid;
+            sFullOk = fullOk;
+            sTargetedOk = targetedOk;
             sInitialized = true;
             Log.i(TAG, "package maps built: sr=" + srPackages.size()
                     + " srUids=" + uidToSrPackageNames.size()
@@ -208,14 +246,16 @@ public class PackageInfoMapper {
 
     /**
      * 映射表是否已就绪。调用侧在做归属判定前必须先问这一句。
+     * 语义：ready = published && trusted。published 指表对象已发布；
+     * trusted 指全量成功或每个已配置包都拿到明确结果，空表发布后仍为 NOTREADY。
      * 必要性：映射不可用时 getSrPackageName 对所有 uid 都返回空，
      * 若直接拿它当判据，会把全部进程都判成非目标，
      * 表现为所有包显示未挂载，又一次静默降级。
-     * 所以调用侧必须能区分映射说不属于与映射压根不可用。
+     * 所以调用侧必须能区分映射说不属于与映射压根不可信。
      */
     public static boolean isMappingReady() {
         ensurePackageInfoMaps();
-        return !mapsUnavailable();
+        return sInitialized && !mapsUnavailable() && (sFullOk || sTargetedOk);
     }
 
     public static String getSrPackageName(int uid, String processName) {
