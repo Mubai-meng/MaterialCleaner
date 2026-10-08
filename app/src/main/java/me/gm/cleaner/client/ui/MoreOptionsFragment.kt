@@ -347,6 +347,19 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                 super.onPreferenceChange(preference, newValue)
         }
 
+        // 决策 D1：BPF 拦截范围开关，属“记录外部应用专属目录”的子开关。
+        // 走 Notify 链（偏好层真相 → 服务端投影 → redirect_policy 快照 → Hook Cache 透传），
+        // 不在此直调 JNI。
+        val fuseBpfBlockAll = findPreference<SwitchPreferenceCompat>(
+            getString(me.gm.cleaner.R.string.fuse_bpf_block_all_key)
+        )
+        fuseBpfBlockAll?.onPreferenceChangeListener = object :
+            NotifyServerPreferenceChangeListener() {
+
+            override fun onPreferenceChange(preference: Preference, newValue: Any?): Boolean =
+                super.onPreferenceChange(preference, newValue)
+        }
+
         val upsert = findPreference<SwitchPreferenceCompat>(
             getString(me.gm.cleaner.R.string.upsert_key)
         )

@@ -106,7 +106,9 @@ object NativeHookLayerReporter {
                 "startsWithHooked" to nativeStatus.startsWithHooked.toString(),
                 "isFuseBpfEnabledHooked" to nativeStatus.isFuseBpfEnabledHooked.toString(),
                 "fuseReqUserdataHooked" to nativeStatus.fuseReqUserdataHooked.toString(),
-                "fuseBpfInstallHooked" to nativeStatus.fuseBpfInstallHooked.toString(),
+                "fuseBpfFillEntriesHooked" to nativeStatus.fillEntriesHooked.toString(),
+                "fuseBpfInstallHooked" to nativeStatus.installHooked.toString(),
+                "fuseBpfEffectiveHooked" to nativeStatus.effectiveHooked.toString(),
                 "lastMountPointsApplySuccess" to nativeStatus.lastApplySuccess.toString(),
                 "nativePolicyAppliedToExecutor" to nativeStatus.lastApplySuccess.toString(),
                 "lastMountPointsApplyGeneration" to nativeStatus.lastApplyGeneration.toString(),
@@ -211,7 +213,13 @@ object NativeHookLayerReporter {
                 startsWithHooked = symbols?.optBoolean("startsWith", false) ?: false,
                 isFuseBpfEnabledHooked = symbols?.optBoolean("isFuseBpfEnabled", false) ?: false,
                 fuseReqUserdataHooked = symbols?.optBoolean("fuseReqUserdata", false) ?: false,
-                fuseBpfInstallHooked = symbols?.optBoolean("fuseBpfInstall", false) ?: false,
+                fillEntriesHooked = symbols?.optBoolean("fillEntries", false) ?: false,
+                installHooked = symbols?.optBoolean("install", false) ?: false,
+                effectiveHooked = run {
+                    val f = symbols?.optBoolean("fillEntries", false) ?: false
+                    val i = symbols?.optBoolean("install", false) ?: false
+                    symbols?.optBoolean("effective", f || i) ?: (f || i)
+                },
                 missingSymbols = native?.optJSONArray("missingSymbols").toCsv(),
                 nativeLastError = native?.optString("lastError", "") ?: "",
                 fuseJavaGateDiscoveredCount =
@@ -274,7 +282,9 @@ object NativeHookLayerReporter {
         val startsWithHooked: Boolean = false,
         val isFuseBpfEnabledHooked: Boolean = false,
         val fuseReqUserdataHooked: Boolean = false,
-        val fuseBpfInstallHooked: Boolean = false,
+        val fillEntriesHooked: Boolean = false,
+        val installHooked: Boolean = false,
+        val effectiveHooked: Boolean = false,
         val missingSymbols: String = "",
         val nativeLastError: String = "",
         val fuseJavaGateDiscoveredCount: Int = 0,
@@ -294,7 +304,7 @@ object NativeHookLayerReporter {
                         startsWithHooked &&
                         isFuseBpfEnabledHooked &&
                         fuseReqUserdataHooked &&
-                        fuseBpfInstallHooked -> "FULL"
+                        effectiveHooked -> "FULL"
                 containsMountHooked && startsWithHooked -> "CORE"
                 containsMountHooked -> "DEGRADED"
                 else -> "UNAVAILABLE"

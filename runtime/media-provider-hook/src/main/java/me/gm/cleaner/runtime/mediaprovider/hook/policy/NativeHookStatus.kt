@@ -706,6 +706,11 @@ object NativeHookStatus {
             val root = JSONObject(json)
             val symbols = root.optJSONObject("symbols")
             val symbolMethods = root.optJSONObject("symbolMethods")
+            // 按 C2 协议解析 BPF 三字段：fillEntries 主拦截点、install 兼容点、effective 有效位。
+            val fillEntriesHooked = symbols?.optBoolean("fillEntries", false) ?: false
+            val installHooked = symbols?.optBoolean("install", false) ?: false
+            val effectiveHooked = symbols?.optBoolean("effective", fillEntriesHooked || installHooked)
+                ?: (fillEntriesHooked || installHooked)
             NativeStatusSnapshot(
                 fuseAvailable = root.optBoolean("fuseAvailable", true),
                 fuseLibraryLoaded = root.optBoolean("fuseLibraryLoaded", false),
@@ -717,12 +722,15 @@ object NativeHookStatus {
                 startsWithHooked = symbols?.optBoolean("startsWith", false) ?: false,
                 isFuseBpfEnabledHooked = symbols?.optBoolean("isFuseBpfEnabled", false) ?: false,
                 fuseReqUserdataHooked = symbols?.optBoolean("fuseReqUserdata", false) ?: false,
-                fuseBpfInstallHooked = symbols?.optBoolean("fuseBpfInstall", false) ?: false,
+                fillEntriesHooked = fillEntriesHooked,
+                installHooked = installHooked,
+                effectiveHooked = effectiveHooked,
                 containsMountMethod = symbolMethods?.optString("containsMount", "") ?: "",
                 startsWithMethod = symbolMethods?.optString("startsWith", "") ?: "",
                 isFuseBpfEnabledMethod = symbolMethods?.optString("isFuseBpfEnabled", "") ?: "",
                 fuseReqUserdataMethod = symbolMethods?.optString("fuseReqUserdata", "") ?: "",
-                fuseBpfInstallMethod = symbolMethods?.optString("fuseBpfInstall", "") ?: "",
+                fillEntriesMethod = symbolMethods?.optString("fillEntries", "") ?: "",
+                installMethod = symbolMethods?.optString("install", "") ?: "",
                 xhookRefreshCalled = root.optBoolean("xhookRefreshCalled", false),
                 lastError = root.optString("lastError", ""),
             )
@@ -747,12 +755,15 @@ object NativeHookStatus {
         val startsWithHooked: Boolean = false,
         val isFuseBpfEnabledHooked: Boolean = false,
         val fuseReqUserdataHooked: Boolean = false,
-        val fuseBpfInstallHooked: Boolean = false,
+        val fillEntriesHooked: Boolean = false,
+        val installHooked: Boolean = false,
+        val effectiveHooked: Boolean = false,
         val containsMountMethod: String = "",
         val startsWithMethod: String = "",
         val isFuseBpfEnabledMethod: String = "",
         val fuseReqUserdataMethod: String = "",
-        val fuseBpfInstallMethod: String = "",
+        val fillEntriesMethod: String = "",
+        val installMethod: String = "",
         val xhookRefreshCalled: Boolean = false,
         val lastError: String = "",
     ) {
@@ -764,7 +775,7 @@ object NativeHookStatus {
                     startsWithHooked &&
                     isFuseBpfEnabledHooked &&
                     fuseReqUserdataHooked &&
-                    fuseBpfInstallHooked
+                    effectiveHooked
 
         private val missingSymbols: List<String>
             get() = buildList {
@@ -773,7 +784,7 @@ object NativeHookStatus {
                 if (!startsWithHooked) add("startsWith")
                 if (!isFuseBpfEnabledHooked) add("isFuseBpfEnabled")
                 if (!fuseReqUserdataHooked) add("fuseReqUserdata")
-                if (!fuseBpfInstallHooked) add("fuseBpfInstall")
+                if (!effectiveHooked) add("fillEntries/install")
             }
 
         fun toJson(): JSONObject = JSONObject().apply {
@@ -791,14 +802,17 @@ object NativeHookStatus {
                 put("startsWith", startsWithHooked)
                 put("isFuseBpfEnabled", isFuseBpfEnabledHooked)
                 put("fuseReqUserdata", fuseReqUserdataHooked)
-                put("fuseBpfInstall", fuseBpfInstallHooked)
+                put("fillEntries", fillEntriesHooked)
+                put("install", installHooked)
+                put("effective", effectiveHooked)
             })
             put("symbolMethods", JSONObject().apply {
                 put("containsMount", containsMountMethod)
                 put("startsWith", startsWithMethod)
                 put("isFuseBpfEnabled", isFuseBpfEnabledMethod)
                 put("fuseReqUserdata", fuseReqUserdataMethod)
-                put("fuseBpfInstall", fuseBpfInstallMethod)
+                put("fillEntries", fillEntriesMethod)
+                put("install", installMethod)
             })
             put("missingSymbols", JSONArray(missingSymbols))
             put("lastError", lastError)

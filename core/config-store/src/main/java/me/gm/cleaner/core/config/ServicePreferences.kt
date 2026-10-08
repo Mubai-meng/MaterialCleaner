@@ -26,6 +26,7 @@ private const val AGGRESSIVELY_PROMPT_FOR_READING_MEDIA_FILES_KEY = "aggressivel
 private const val AUTO_LOGGING_KEY = "auto_logging"
 private const val RECORD_SHARED_STORAGE_KEY = "record_shared_storage"
 private const val RECORD_EXTERNAL_APP_SPECIFIC_STORAGE_KEY = "record_external_app_specific_storage"
+private const val FUSE_BPF_BLOCK_ALL_KEY = "fuse_bpf_block_all"
 private const val UPSERT_KEY = "upsert"
 
 object ServicePreferences {
@@ -178,6 +179,19 @@ object ServicePreferences {
     // @Server
     val recordExternalAppSpecificStorage: Boolean
         get() = recordSharedStorage && preferences.getBoolean(RECORD_EXTERNAL_APP_SPECIFIC_STORAGE_KEY, false)
+
+    /**
+     * FUSE BPF 拦截范围开关（决策 D1），默认关闭。
+     *
+     * 真相归偏好层：本字段是该开关在偏好侧的唯一真相，下游 Cache 只做透传，
+     * 不得在此处或 Cache 侧按 ROM 做条件改写。
+     * native 侧移除语义恒放行（见 bpf_hook.cpp），本开关经策略快照透传到
+     * commitPolicy 第三参后，由 native 侧解释非移除语义的拦截范围。
+     */
+    // @App
+    // @Server
+    val fuseBpfBlockAll: Boolean
+        get() = preferences.getBoolean(FUSE_BPF_BLOCK_ALL_KEY, false)
 
     // @App
     // @Server

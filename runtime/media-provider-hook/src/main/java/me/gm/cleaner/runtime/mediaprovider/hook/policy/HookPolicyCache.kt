@@ -69,6 +69,8 @@ object HookPolicyCache {
 
     private data class PreferencesHolder(
         val recordExternalAppSpecificStorage: Boolean = false,
+        // 真相归偏好层：本字段只做透传，不按 ROM 做条件改写。
+        val fuseBpfBlockAll: Boolean = false,
         val aggressivelyPromptForReadingMediaFiles: Boolean = false,
         val generation: Long = 0L,
         val publisherEpoch: String = "",
@@ -125,6 +127,16 @@ object HookPolicyCache {
         get() = preferences.recordExternalAppSpecificStorage
         private set(value) {
             preferences = preferences.copy(recordExternalAppSpecificStorage = value)
+        }
+
+    /**
+     * FUSE BPF 拦截范围开关：随 redirect_policy 快照透传，
+     * native 侧由挂载点全量刷新经 commitPolicy 第三参统一应用。
+     */
+    var fuseBpfBlockAll: Boolean
+        get() = preferences.fuseBpfBlockAll
+        private set(value) {
+            preferences = preferences.copy(fuseBpfBlockAll = value)
         }
 
     var aggressivelyPromptForReadingMediaFiles: Boolean
@@ -672,6 +684,8 @@ object HookPolicyCache {
         // 偏好独立 holder 发布，与 rule 域同代演进。
         preferences = PreferencesHolder(
             recordExternalAppSpecificStorage = root.optBoolean("recordExternalAppSpecificStorage", false),
+            // 只透传偏好层真相：缺席容忍为 false，不按 ROM 做条件改写。
+            fuseBpfBlockAll = root.optBoolean("fuseBpfBlockAll", false),
             aggressivelyPromptForReadingMediaFiles =
                 root.optBoolean("aggressivelyPromptForReadingMediaFiles", false),
             generation = generation,
