@@ -41,6 +41,8 @@ public interface IPackageManager extends IInterface {
     ParceledListSlice<PackageInfo> getInstalledPackages(int flags, int userId)
             throws RemoteException;
 
+    // API 37 运行时该重载返回 PackageInfoList（ParceledListSlice 子类）。
+    // 此处保持旧签名用于编译期，运行时兼容由 SystemService 反射兜底承担。
     @RequiresApi(33)
     ParceledListSlice<PackageInfo> getInstalledPackages(long flags, int userId)
             throws RemoteException;
