@@ -22,6 +22,8 @@ import me.gm.cleaner.client.CleanerClient
 import me.gm.cleaner.client.ClientErrorJournal
 import me.gm.cleaner.client.OrchestratedLayerStatus
 import me.gm.cleaner.client.OrchestratedRuntimeStatus
+import me.gm.cleaner.core.storage.redirect.databus.DataBus
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
@@ -150,6 +152,29 @@ private fun createFallbackArchive(target: File) {
             "logs/app_logcat_threadtime_recent.txt",
             listOf("logcat", "-d", "-v", "threadtime", "-b", "main,system,crash", "-t", "2000")
         )
+        // P0-2: fallback 时追加只读 DataBus（快照/信号/游标/隔离/重试计数/总账），不 repair 避免权限变更
+        if (DataBus.ensureInitialized()) {
+            addTextEntry(zip, "databus/health.json",
+                healthToJson(DataBus.checkHealth(repair = false)).toString(2))
+            val busRoot = File(DataBus.BUS_ROOT)
+            addDirectoryFiles(zip, File(busRoot, "snapshots"), "databus/snapshots", Int.MAX_VALUE)
+            addDirectoryFiles(zip, File(busRoot, "signals"), "databus/signals", Int.MAX_VALUE)
+            addDirectoryFiles(zip, File(busRoot, "cursors"), "databus/cursors", Int.MAX_VALUE)
+            addDirectoryFiles(zip, File(busRoot, "events/consumed"), "databus/events/consumed", Int.MAX_VALUE)
+            addDirectoryFiles(zip,
+                File(busRoot, "events/" + DataBusProtocol.EVENT_FILESYSTEM + ".quarantine"),
+                "databus/events/" + DataBusProtocol.EVENT_FILESYSTEM + ".quarantine", Int.MAX_VALUE)
+            addDirectoryFiles(zip,
+                File(busRoot, "events/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".quarantine"),
+                "databus/events/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".quarantine", Int.MAX_VALUE)
+            addDirectoryFiles(zip,
+                File(busRoot, "cursors/" + DataBusProtocol.EVENT_FILESYSTEM + ".attempts"),
+                "databus/cursors/" + DataBusProtocol.EVENT_FILESYSTEM + ".attempts", Int.MAX_VALUE)
+            addDirectoryFiles(zip,
+                File(busRoot, "cursors/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".attempts"),
+                "databus/cursors/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".attempts", Int.MAX_VALUE)
+            // recovery_state.json 在 cursors 根目录，顺带导出
+        }
         addTextEntry(zip, "status/app_visible_status.txt", status?.toString() ?: "server unavailable")
     }
 }
@@ -279,3 +304,105 @@ private data class CommandResult(
     val timedOut: Boolean,
     val output: String,
 )
+
+// P0-2 fallback DataBus 只读导出所需辅助函数（复用 server 侧同名逻辑，不 repair 避免权限变更）
+private fun healthToJson(health: DataBusProtocol.HealthReport): org.json.JSONObject = org.json.JSONObject().apply {
+    put("initialized", health.initialized)
+    put("healthy", health.healthy)
+    put("criticalSnapshotsReady", health.criticalSnapshotsReady)
+    put("missingDirectories", org.json.JSONArray(health.missingDirectories))
+    put("permissionIssues", org.json.JSONArray(health.permissionIssues))
+    put("eventQueueCounts", org.json.JSONObject(health.eventQueueCounts))
+    put("leaseCounts", org.json.JSONObject(health.leaseCounts))
+    put("snapshots", org.json.JSONArray().apply {
+        for (snapshot in health.snapshots) {
+            put(org.json.JSONObject().apply {
+                put("name", snapshot.name)
+                put("exists", snapshot.exists)
+                put("validJson", snapshot.validJson)
+                put("error", snapshot.error)
+            })
+        }
+    })
+    // 归档侧补齐：隔离/重试计数/总账（不改协议，不动 HealthReport 类）
+    val busRoot = java.io.File(DataBus.BUS_ROOT)
+    val q1 = java.io.File(busRoot, "events/" + DataBusProtocol.EVENT_FILESYSTEM + ".quarantine")
+    val q2 = java.io.File(busRoot, "events/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".quarantine")
+    val a1 = java.io.File(busRoot, "cursors/" + DataBusProtocol.EVENT_FILESYSTEM + ".attempts")
+    val a2 = java.io.File(busRoot, "cursors/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".attempts")
+    val recovery = java.io.File(busRoot, "cursors/media_provider_recovery.json")
+    put("quarantineCounts", org.json.JSONObject().apply {
+        put("filesystem", q1.listFiles()?.count { it.isFile() && it.name.endsWith(".json") } ?: 0)
+        put("redirectNotice", q2.listFiles()?.count { it.isFile() && it.name.endsWith(".json") } ?: 0)
+    })
+    put("attemptCounts", org.json.JSONObject().apply {
+        put("filesystem", a1.listFiles()?.count { it.isFile() } ?: 0)
+        put("redirectNotice", a2.listFiles()?.count { it.isFile() && it.name.endsWith(".json") } ?: 0)
+    })
+    put("recoveryStateExists", recovery.exists())
+}
+
+private fun addDirectoryFiles(
+    zip: java.util.zip.ZipOutputStream,
+    dir: java.io.File,
+    entryPrefix: String,
+    maxFiles: Int,
+) {
+    val files = dir.listFiles()
+        ?.filter { java.nio.file.Files.isRegularFile(it.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS) }
+        ?.sortedByDescending { it.lastModified() }
+        ?.take(maxFiles)
+        ?: emptyList()
+    addTextEntry(zip, "$entryPrefix/manifest.txt", buildString {
+        appendLine("path=${dir.path}")
+        appendLine("exists=${dir.exists()}")
+        appendLine("included=${files.size}")
+        for (file in files) {
+            appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}")
+        }
+    })
+    for (file in files) {
+        addFileTail(zip, file, "$entryPrefix/${file.name}", 512 * 1024)
+    }
+}
+
+private fun addFileTail(zip: java.util.zip.ZipOutputStream, file: java.io.File, entryName: String, maxBytes: Int) {
+    runCatching {
+        val content = buildString {
+            appendLine("path=${file.path}")
+            appendLine("size=${file.length()}")
+            appendLine("modified=${file.lastModified()}")
+            if (file.length() > maxBytes) {
+                appendLine("truncated=head omitted, tailBytes=$maxBytes")
+            }
+            appendLine()
+            append(readFileTail(file, maxBytes))
+        }
+        addTextEntry(zip, entryName, content)
+    }.onFailure {
+        addTextEntry(zip, "$entryName.error.txt", it.stackTraceToString())
+    }
+}
+
+private fun readFileTail(file: java.io.File, maxBytes: Int): String {
+    val output = java.io.ByteArrayOutputStream()
+    if (file.length() <= maxBytes) {
+        java.io.FileInputStream(file).use { input ->
+            input.copyTo(output)
+        }
+    } else {
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            raf.seek(file.length() - maxBytes)
+            val buffer = ByteArray(4096)
+            var remaining = maxBytes
+            while (remaining > 0) {
+                val read = raf.read(buffer, 0, minOf(buffer.size, remaining))
+                if (read < 0) break
+                output.write(buffer, 0, read)
+                remaining -= read
+            }
+        }
+    }
+    return output.toString(java.nio.charset.StandardCharsets.UTF_8.name())
+}
+

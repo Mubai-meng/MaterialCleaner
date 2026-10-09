@@ -391,6 +391,19 @@ object DiagnosticArchive {
             "databus/events/consumed", MAX_EVENT_FILES)
         addDirectoryFiles(zip, File(busRoot, "leases/${DataBusProtocol.LEASE_QUERY_SESSIONS}"),
             "databus/leases/${DataBusProtocol.LEASE_QUERY_SESSIONS}", MAX_EVENT_FILES)
+        // P0-1：毒丸隔离与重试计数目录（Fix 1′/P0-B 产物，world-readable，只读导出）
+        addDirectoryFiles(zip,
+            File(busRoot, "events/${DataBusProtocol.EVENT_FILESYSTEM}.quarantine"),
+            "databus/events/${DataBusProtocol.EVENT_FILESYSTEM}.quarantine", MAX_EVENT_FILES)
+        addDirectoryFiles(zip,
+            File(busRoot, "events/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.quarantine"),
+            "databus/events/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.quarantine", MAX_EVENT_FILES)
+        addDirectoryFiles(zip,
+            File(busRoot, "cursors/${DataBusProtocol.EVENT_FILESYSTEM}.attempts"),
+            "databus/cursors/${DataBusProtocol.EVENT_FILESYSTEM}.attempts", MAX_EVENT_FILES)
+        addDirectoryFiles(zip,
+            File(busRoot, "cursors/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.attempts"),
+            "databus/cursors/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.attempts", MAX_EVENT_FILES)
     }
 
     private fun healthToJson(health: DataBusProtocol.HealthReport): JSONObject = JSONObject().apply {
