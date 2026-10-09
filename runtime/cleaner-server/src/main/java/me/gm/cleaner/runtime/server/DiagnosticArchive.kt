@@ -182,7 +182,92 @@ object DiagnosticArchive {
             appendLine()
         }
 
+        if (status != null) {
+            appendLine("Key signals:")
+            appendKeySignals(status)
+            appendLine()
+        }
+
         appendLine("If the package is hard to read, start from this file, then open the referenced files above.")
+    }
+
+    /** P1 诊断质量：直读 status JSON 中的关键信号（P0-B/Fix1′/Fix2/Fix3 新增 metrics）。 */
+    private fun StringBuilder.appendKeySignals(status: JSONObject) {
+        val vfs = status.optJSONObject("vfs")
+        val mp = status.optJSONObject("mediaProviderJavaHook")
+        val fuse = status.optJSONObject("fuseNativeHook")
+        if (vfs == null || mp == null || fuse == null) return
+        // FUSE epoch 收敛 vs 过期：必须与 NativeHookLayerReporter 同一判定口径，
+        // 不得只凭 epoch 一致就宣称同步（generation 落后或上次应用失败同样未同步）。
+        val appliedEpoch = fuse.optString("appliedPublisherEpoch", "")
+        val snapshotEpoch = fuse.optString("snapshotPublisherEpoch", "")
+        val policySynced = fuse.optBoolean("nativePolicySynced", false)
+        if (appliedEpoch.isNotBlank() && snapshotEpoch.isNotBlank()) {
+            val epochConsistent = appliedEpoch == snapshotEpoch
+            val verdict = when {
+                epochConsistent && policySynced -> "synced"
+                epochConsistent -> "epoch consistent, policySynced=$policySynced"
+                else -> "SYNC PENDING (epoch mismatch)"
+            }
+            appendLine("- FUSE sync: $verdict (epoch=$appliedEpoch)")
+        }
+        // 恢复熔断
+        val wakeOnly = mp.optBoolean("wakeOnlyMode", false)
+        val rounds = mp.optInt("destructiveRounds", 0)
+        if (wakeOnly || rounds > 0) {
+            appendLine("- MediaProvider recovery: wakeOnly=$wakeOnly, destructiveRounds=$rounds/3")
+        }
+        // VFS 分母
+        val unmanaged = vfs.optInt("vfsUnmanagedPids", -1)
+        val managed = vfs.optInt("vfsManagedPids", -1)
+        if (unmanaged >= 0 && managed >= 0) {
+            appendLine("- VFS pids: managed=$managed, unmanaged=$unmanaged")
+        }
+        // srStatus 截断
+        val truncated = vfs.optBoolean("srStatusTruncated", false)
+        val total = vfs.optInt("srStatusTotal", -1)
+        if (total >= 0) {
+            appendLine("- srStatus: total=$total, truncated=$truncated")
+        }
+    }
+
+    private fun StringBuilder.appendKeySignalsZhCn(status: JSONObject) {
+        val vfs = status.optJSONObject("vfs")
+        val mp = status.optJSONObject("mediaProviderJavaHook")
+        val fuse = status.optJSONObject("fuseNativeHook")
+        if (vfs == null || mp == null || fuse == null) return
+        // FUSE epoch 收敛 vs 过期：必须与 NativeHookLayerReporter 同一判定口径，
+        // 不得只凭 epoch 一致就宣称同步（generation 落后或上次应用失败同样未同步）。
+        val appliedEpoch = fuse.optString("appliedPublisherEpoch", "")
+        val snapshotEpoch = fuse.optString("snapshotPublisherEpoch", "")
+        val policySynced = fuse.optBoolean("nativePolicySynced", false)
+        if (appliedEpoch.isNotBlank() && snapshotEpoch.isNotBlank()) {
+            val epochConsistent = appliedEpoch == snapshotEpoch
+            val verdict = when {
+                epochConsistent && policySynced -> "已同步"
+                epochConsistent -> "代次一致，策略同步=$policySynced"
+                else -> "同步待完成（代次不一致）"
+            }
+            appendLine("- FUSE 同步：$verdict（代次=$appliedEpoch）")
+        }
+        // 恢复熔断
+        val wakeOnly = mp.optBoolean("wakeOnlyMode", false)
+        val rounds = mp.optInt("destructiveRounds", 0)
+        if (wakeOnly || rounds > 0) {
+            appendLine("- MediaProvider 恢复：仅唤醒=$wakeOnly，破坏性轮次=$rounds/3")
+        }
+        // VFS 分母
+        val unmanaged = vfs.optInt("vfsUnmanagedPids", -1)
+        val managed = vfs.optInt("vfsManagedPids", -1)
+        if (unmanaged >= 0 && managed >= 0) {
+            appendLine("- VFS 进程：已管理=$managed，未接管=$unmanaged")
+        }
+        // srStatus 截断
+        val truncated = vfs.optBoolean("srStatusTruncated", false)
+        val total = vfs.optInt("srStatusTotal", -1)
+        if (total >= 0) {
+            appendLine("- srStatus：总数=$total，已截断=$truncated")
+        }
     }
 
     private fun buildSummaryZhCn(server: CleanerServer): String = buildString {
@@ -236,6 +321,12 @@ object DiagnosticArchive {
             appendLine("- sdk=${platformCaps.optInt("sdkVersionInt", 0)}, fuse=${platformCaps.optBoolean("fuseAvailable", false)}, fuseBpf=${platformCaps.optBoolean("isFuseBpfEnabled", false)}")
             appendLine("- mediaProvider=${platformCaps.optString("mediaProviderPackageName", "")}")
             appendLine("- fuseJniLoadMode=${platformCaps.optString("fuseJniLoadMode", "UNKNOWN")}, nativeHookMode=${platformCaps.optString("supportedNativeHookMode", "UNKNOWN")}")
+            appendLine()
+        }
+
+        if (status != null) {
+            appendLine("关键信号：")
+            appendKeySignalsZhCn(status)
             appendLine()
         }
 
@@ -373,13 +464,29 @@ object DiagnosticArchive {
     private fun addDataBus(zip: ZipOutputStream) {
         val initialized = DataBus.ensureInitialized()
         addText(zip, "databus/initialized.txt", initialized.toString())
+        val busRoot = File(DataBus.BUS_ROOT)
         runCatching {
-            addText(zip, "databus/health.json", healthToJson(DataBus.checkHealth(repair = true)).toString(2))
+            // P1 诊断质量：归档侧补齐隔离/计数/总账，不改 HealthReport 协议
+            val healthJson = healthToJson(DataBus.checkHealth(repair = true))
+            val q1 = File(busRoot, "events/${DataBusProtocol.EVENT_FILESYSTEM}.quarantine")
+            val q2 = File(busRoot, "events/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.quarantine")
+            val a1 = File(busRoot, "cursors/${DataBusProtocol.EVENT_FILESYSTEM}.attempts")
+            val a2 = File(busRoot, "cursors/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.attempts")
+            val recovery = File(busRoot, "cursors/media_provider_recovery.json")
+            healthJson.put("quarantineCounts", JSONObject().apply {
+                put("filesystem", q1.listFiles()?.count { it.isFile() && it.name.endsWith(".json") } ?: 0)
+                put("redirectNotice", q2.listFiles()?.count { it.isFile() && it.name.endsWith(".json") } ?: 0)
+            })
+            healthJson.put("attemptCounts", JSONObject().apply {
+                put("filesystem", a1.listFiles()?.count { it.isFile() } ?: 0)
+                put("redirectNotice", a2.listFiles()?.count { it.isFile() } ?: 0)
+            })
+            healthJson.put("recoveryStateExists", recovery.exists())
+            addText(zip, "databus/health.json", healthJson.toString(2))
         }.onFailure {
             addText(zip, "databus/health_error.txt", it.stackTraceToString())
         }
 
-        val busRoot = File(DataBus.BUS_ROOT)
         addDirectoryFiles(zip, File(busRoot, "snapshots"), "databus/snapshots", Int.MAX_VALUE)
         addDirectoryFiles(zip, File(busRoot, "signals"), "databus/signals", Int.MAX_VALUE)
         addDirectoryFiles(zip, File(busRoot, "cursors"), "databus/cursors", Int.MAX_VALUE)

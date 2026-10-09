@@ -153,6 +153,8 @@ private fun createFallbackArchive(target: File) {
             listOf("logcat", "-d", "-v", "threadtime", "-b", "main,system,crash", "-t", "2000")
         )
         // P0-2: fallback 时追加只读 DataBus（快照/信号/游标/隔离/重试计数/总账），不 repair 避免权限变更
+        // P1-9 诊断预算：与 server 侧一致，事件类目录限 20 个，防止故障时大量
+        // 毒丸/重试计数堆积把诊断导出本身变成资源压力源。
         if (DataBus.ensureInitialized()) {
             addTextEntry(zip, "databus/health.json",
                 healthToJson(DataBus.checkHealth(repair = false)).toString(2))
@@ -160,19 +162,19 @@ private fun createFallbackArchive(target: File) {
             addDirectoryFiles(zip, File(busRoot, "snapshots"), "databus/snapshots", Int.MAX_VALUE)
             addDirectoryFiles(zip, File(busRoot, "signals"), "databus/signals", Int.MAX_VALUE)
             addDirectoryFiles(zip, File(busRoot, "cursors"), "databus/cursors", Int.MAX_VALUE)
-            addDirectoryFiles(zip, File(busRoot, "events/consumed"), "databus/events/consumed", Int.MAX_VALUE)
+            addDirectoryFiles(zip, File(busRoot, "events/consumed"), "databus/events/consumed", 20)
             addDirectoryFiles(zip,
                 File(busRoot, "events/" + DataBusProtocol.EVENT_FILESYSTEM + ".quarantine"),
-                "databus/events/" + DataBusProtocol.EVENT_FILESYSTEM + ".quarantine", Int.MAX_VALUE)
+                "databus/events/" + DataBusProtocol.EVENT_FILESYSTEM + ".quarantine", 20)
             addDirectoryFiles(zip,
                 File(busRoot, "events/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".quarantine"),
-                "databus/events/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".quarantine", Int.MAX_VALUE)
+                "databus/events/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".quarantine", 20)
             addDirectoryFiles(zip,
                 File(busRoot, "cursors/" + DataBusProtocol.EVENT_FILESYSTEM + ".attempts"),
-                "databus/cursors/" + DataBusProtocol.EVENT_FILESYSTEM + ".attempts", Int.MAX_VALUE)
+                "databus/cursors/" + DataBusProtocol.EVENT_FILESYSTEM + ".attempts", 20)
             addDirectoryFiles(zip,
                 File(busRoot, "cursors/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".attempts"),
-                "databus/cursors/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".attempts", Int.MAX_VALUE)
+                "databus/cursors/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".attempts", 20)
             // recovery_state.json 在 cursors 根目录，顺带导出
         }
         addTextEntry(zip, "status/app_visible_status.txt", status?.toString() ?: "server unavailable")
