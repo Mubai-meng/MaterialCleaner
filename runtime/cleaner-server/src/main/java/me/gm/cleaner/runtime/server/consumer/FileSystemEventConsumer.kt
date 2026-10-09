@@ -5,6 +5,7 @@ import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 import me.gm.cleaner.runtime.server.recording.FileSystemObserver
 import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -32,6 +33,14 @@ object FileSystemEventConsumer {
     /** 最近一次检查到的 signal 时间戳，用于熔断无事件轮询 */
     @Volatile
     private var lastSignalTimestamp: Long = 0L
+
+    /**
+     * 跨轮次基础设施故障计数：单次 pollAndConsume 只处理队首附近事件，
+     * 系统性故障（Binder/DB/磁盘）会跨轮复现，必须跨轮累积才能触发熔断。
+     * 事件成功消费或非基础设施失败时清零。
+     */
+    @Volatile
+    private var infraStreak: Int = 0
 
     /** 从 DataBus 加载持久化游标 */
     fun loadCursor() {
@@ -64,24 +73,91 @@ object FileSystemEventConsumer {
         for (eventFile in events) {
             try {
                 val eventJson = eventFile.content
-                val event = JSONObject(eventJson)
+                val event = try {
+                    JSONObject(eventJson)
+                } catch (e: JSONException) {
+                    if (!quarantineAndAdvance(
+                            eventFile, eventJson,
+                            reason = "json-parse-failed: ${e.message}",
+                            stage = "parse",
+                        )
+                    ) {
+                        failed = true
+                    }
+                    continue
+                }
                 val timeMillis = event.optLong("timeMillis", System.currentTimeMillis())
                 val packageName = event.optString("packageName", "")
                 val path = event.optString("path", "")
                 val flags = event.optInt("flags", 0)
 
                 if (packageName.isEmpty() || path.isEmpty()) {
-                    advanceCursor(eventFile)
+                    if (!quarantineAndAdvance(
+                            eventFile, eventJson,
+                            reason = "missing-required-field",
+                            stage = "validate",
+                        )
+                    ) {
+                        failed = true
+                        break
+                    }
                     continue
                 }
 
-                observer.onEvent(timeMillis, packageName, path, flags)
+                try {
+                    observer.onEvent(timeMillis, packageName, path, flags)
+                } catch (e: Exception) {
+                    val infra = EventConsumePolicy.isInfrastructureFault(e)
+                    infraStreak = if (infra) infraStreak + 1 else 0
+                    val next = DataBus.readEventAttempt(
+                        DataBusProtocol.EVENT_FILESYSTEM, eventFile.name,
+                    ) + 1
+                    if (!DataBus.writeEventAttempt(
+                            DataBusProtocol.EVENT_FILESYSTEM, eventFile.name, next,
+                        )
+                    ) {
+                        Log.e(TAG, "Failed to persist attempt for ${eventFile.name}, keeping cursor", e)
+                        failed = true
+                        break
+                    }
+                    when (EventConsumePolicy.decideTransient(next, infraStreak)) {
+                        EventConsumePolicy.TransientDecision.QUARANTINE -> {
+                            Log.w(TAG, "Quarantining event ${eventFile.name} after $next attempts", e)
+                            if (!quarantineAndAdvance(
+                                    eventFile, eventJson,
+                                    reason = "onEvent-failed: ${e.message}",
+                                    stage = "onEvent",
+                                    attempts = next,
+                                )
+                            ) {
+                                failed = true
+                                break
+                            }
+                            continue
+                        }
+                        EventConsumePolicy.TransientDecision.RETRY -> {
+                            Log.e(TAG, "Failed to consume event ${eventFile.name} " +
+                                    "(attempt=$next), keeping cursor", e)
+                            failed = true
+                            break
+                        }
+                    }
+                }
                 consumed++
 
-                // 归档到 consumed/ 目录，保留事件记录供审计
-                // 直接文件写入（不含序列号），避免浪费事件序列号计数器
-                archiveEvent(eventJson)
-                advanceCursor(eventFile)
+                // 归档到 consumed/ 目录，保留事件记录供审计。
+                // 归档失败视为基础设施故障：不推进游标，下轮重放（原文仍在队列目录）。
+                if (!archiveEvent(eventJson)) {
+                    Log.e(TAG, "Failed to archive event ${eventFile.name}, keeping cursor")
+                    failed = true
+                    break
+                }
+                if (!advanceCursor(eventFile)) {
+                    Log.e(TAG, "Failed to persist cursor for ${eventFile.name}, keeping cursor")
+                    failed = true
+                    break
+                }
+                infraStreak = 0
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to consume event ${eventFile.name}, keeping cursor", e)
                 failed = true
@@ -144,19 +220,47 @@ object FileSystemEventConsumer {
         }
     }
 
-    private fun advanceCursor(event: DataBusProtocol.EventFile) {
+    /**
+     * 隔离毒丸并推进游标：quarantine 落盘成功后才写游标；任一步失败返回 false，
+     * 调用方不得宣称已消费。隔离文件名确定，重复隔离幂等覆盖。
+     */
+    private fun quarantineAndAdvance(
+        event: DataBusProtocol.EventFile,
+        content: String,
+        reason: String,
+        stage: String,
+        attempts: Int = DataBus.readEventAttempt(DataBusProtocol.EVENT_FILESYSTEM, event.name),
+    ): Boolean {
+        if (!DataBus.quarantineEvent(
+                DataBusProtocol.EVENT_FILESYSTEM,
+                DataBusProtocol.EventFile(event.name, content),
+                reason, stage, attempts,
+            )
+        ) {
+            Log.e(TAG, "Failed to quarantine event ${event.name}, keeping cursor")
+            return false
+        }
+        DataBus.clearEventAttempt(DataBusProtocol.EVENT_FILESYSTEM, event.name)
+        return advanceCursor(event)
+    }
+
+    private fun advanceCursor(event: DataBusProtocol.EventFile): Boolean {
+        // 先持久化、后更新内存：写失败时内存游标必须保持原位，否则本轮后续
+        // readEventFiles 会跳过未确认事件（at-least-once 保障）。
+        if (!DataBus.writeCursorToEvent(DataBusProtocol.EVENT_FILESYSTEM, event)) return false
         cursor = event.name
-        DataBus.writeCursorToEvent(DataBusProtocol.EVENT_FILESYSTEM, event)
+        return true
     }
 
     /**
      * 归档已消费事件到 consumed/ 目录。
      * 使用时间戳+随机数命名文件（不含事件序列号），避免浪费 DataBus 全局序列号计数器。
+     * @return true 归档成功；false 基础设施故障，调用方须保留游标重试。
      */
-    private fun archiveEvent(content: String) {
-        if (!DataBus.ensureInitialized()) return
+    private fun archiveEvent(content: String): Boolean {
+        if (!DataBus.ensureInitialized()) return false
         val consumedDir = File(DataBus.BUS_ROOT, "events/consumed")
-        if (!Files.isDirectory(consumedDir.toPath(), LinkOption.NOFOLLOW_LINKS)) return
+        if (!Files.isDirectory(consumedDir.toPath(), LinkOption.NOFOLLOW_LINKS)) return false
 
         val now = System.currentTimeMillis()
         val rand = ((Math.random() * 0xFFFF).toInt() and 0xFFFF)
@@ -165,7 +269,7 @@ object FileSystemEventConsumer {
             Files.createTempFile(consumedDir.toPath(), "$filename-", ".tmp").toFile()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create consumed archive temp file", e)
-            return
+            return false
         }
         val targetFile = File(consumedDir, filename)
 
@@ -178,10 +282,13 @@ object FileSystemEventConsumer {
             if (!tmpFile.renameTo(targetFile)) {
                 Log.e(TAG, "Failed to rename consumed archive: $filename")
                 tmpFile.delete()
+                return false
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to archive consumed event", e)
             tmpFile.delete()
+            return false
         }
+        return true
     }
 }

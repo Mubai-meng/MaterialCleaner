@@ -5,6 +5,7 @@ import me.gm.cleaner.core.config.ServicePreferences
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 import me.gm.cleaner.runtime.server.CleanerServer
+import org.json.JSONException
 import org.json.JSONObject
 
 /**
@@ -27,6 +28,14 @@ object RedirectNoticeConsumer {
 
     @Volatile
     private var lastSignalTimestamp: Long = 0L
+
+    /**
+     * 跨轮次基础设施故障计数：单次 pollAndConsume 只处理队首附近事件，
+     * 系统性故障（Binder/DB/磁盘）会跨轮复现，必须跨轮累积才能触发熔断。
+     * 事件成功消费或非基础设施失败时清零。
+     */
+    @Volatile
+    private var infraStreak: Int = 0
 
     fun bind(server: CleanerServer) {
         this.server = server
@@ -56,13 +65,28 @@ object RedirectNoticeConsumer {
         for (eventFile in events) {
             try {
                 val eventJson = eventFile.content
-                val event = JSONObject(eventJson)
+                val event = try {
+                    JSONObject(eventJson)
+                } catch (e: JSONException) {
+                    if (!quarantineAndAdvance(
+                            eventFile, eventJson,
+                            reason = "json-parse-failed: ${e.message}",
+                            stage = "parse",
+                        )
+                    ) {
+                        failed = true
+                    }
+                    continue
+                }
                 val timeMillis = event.optLong("timeMillis", 0L)
 
-                // TTL 检查
+                // TTL 检查：业务性跳过，推进游标
                 if (timeMillis > 0 && System.currentTimeMillis() - timeMillis > EVENT_TTL_MS) {
                     skipped++
-                    advanceCursor(eventFile)
+                    if (!advanceCursor(eventFile)) {
+                        failed = true
+                        break
+                    }
                     continue
                 }
 
@@ -74,44 +98,104 @@ object RedirectNoticeConsumer {
 
                 if (packageName.isEmpty()) {
                     skipped++
-                    advanceCursor(eventFile)
+                    if (!quarantineAndAdvance(
+                            eventFile, eventJson,
+                            reason = "missing-required-field: packageName",
+                            stage = "validate",
+                        )
+                    ) {
+                        failed = true
+                        break
+                    }
                     continue
                 }
 
-                // denylist 检查
+                // denylist 检查：业务性跳过，推进游标
                 if (ServicePreferences.denylist.contains(packageName)) {
                     skipped++
-                    advanceCursor(eventFile)
+                    if (!advanceCursor(eventFile)) {
+                        failed = true
+                        break
+                    }
                     continue
                 }
 
-                // 通过控制面方法触发 UI 广播（Java 侧，避免 Kotlin stub Intent 问题）
-                when (reason) {
-                    "MEDIA_NOT_FOUND", "MEDIA_NOT_FOUND_AGGRESSIVE" -> {
-                        val path = originalPath.ifBlank { mountedPath }
-                        if (path.isBlank()) {
-                            skipped++
-                            advanceCursor(eventFile)
-                            continue
+                try {
+                    // 通过控制面方法触发 UI 广播（Java 侧，避免 Kotlin stub Intent 问题）
+                    when (reason) {
+                        "MEDIA_NOT_FOUND", "MEDIA_NOT_FOUND_AGGRESSIVE" -> {
+                            val path = originalPath.ifBlank { mountedPath }
+                            if (path.isBlank()) {
+                                skipped++
+                                if (!advanceCursor(eventFile)) {
+                                    failed = true
+                                    break
+                                }
+                                continue
+                            }
+                            srv.noticeDispatcher.showMediaNotFoundNotice(
+                                packageName,
+                                path,
+                                reason == "MEDIA_NOT_FOUND_AGGRESSIVE",
+                            )
                         }
-                        srv.noticeDispatcher.showMediaNotFoundNotice(
-                            packageName,
-                            path,
-                            reason == "MEDIA_NOT_FOUND_AGGRESSIVE",
-                        )
+                        else -> {
+                            // 如果 mountedPath 已作为目录存在，跳过保存提示（文件已可访问）
+                            if (mountedPath.isNotEmpty() && java.io.File(mountedPath).isDirectory) {
+                                skipped++
+                                if (!advanceCursor(eventFile)) {
+                                    failed = true
+                                    break
+                                }
+                                continue
+                            }
+                            srv.noticeDispatcher.showRedirectNotice(packageName, originalPath, mountedPath, type)
+                        }
                     }
-                    else -> {
-                        // 如果 mountedPath 已作为目录存在，跳过保存提示（文件已可访问）
-                        if (mountedPath.isNotEmpty() && java.io.File(mountedPath).isDirectory) {
-                            skipped++
-                            advanceCursor(eventFile)
+                } catch (e: Exception) {
+                    val infra = EventConsumePolicy.isInfrastructureFault(e)
+                    infraStreak = if (infra) infraStreak + 1 else 0
+                    val next = DataBus.readEventAttempt(
+                        DataBusProtocol.EVENT_REDIRECT_NOTICE, eventFile.name,
+                    ) + 1
+                    if (!DataBus.writeEventAttempt(
+                            DataBusProtocol.EVENT_REDIRECT_NOTICE, eventFile.name, next,
+                        )
+                    ) {
+                        Log.e(TAG, "Failed to persist attempt for ${eventFile.name}, keeping cursor", e)
+                        failed = true
+                        break
+                    }
+                    when (EventConsumePolicy.decideTransient(next, infraStreak)) {
+                        EventConsumePolicy.TransientDecision.QUARANTINE -> {
+                            Log.w(TAG, "Quarantining notice ${eventFile.name} after $next attempts", e)
+                            if (!quarantineAndAdvance(
+                                    eventFile, eventJson,
+                                    reason = "dispatch-failed: ${e.message}",
+                                    stage = "dispatch",
+                                    attempts = next,
+                                )
+                            ) {
+                                failed = true
+                                break
+                            }
                             continue
                         }
-                        srv.noticeDispatcher.showRedirectNotice(packageName, originalPath, mountedPath, type)
+                        EventConsumePolicy.TransientDecision.RETRY -> {
+                            Log.e(TAG, "Failed to consume redirect notice ${eventFile.name} " +
+                                    "(attempt=$next), keeping cursor", e)
+                            failed = true
+                            break
+                        }
                     }
                 }
                 consumed++
-                advanceCursor(eventFile)
+                if (!advanceCursor(eventFile)) {
+                    Log.e(TAG, "Failed to persist cursor for ${eventFile.name}, keeping cursor")
+                    failed = true
+                    break
+                }
+                infraStreak = 0
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to consume redirect notice ${eventFile.name}, keeping cursor", e)
                 failed = true
@@ -128,8 +212,34 @@ object RedirectNoticeConsumer {
         return consumed
     }
 
-    private fun advanceCursor(event: DataBusProtocol.EventFile) {
+    /**
+     * 隔离毒丸并推进游标：quarantine 落盘成功后才写游标；任一步失败返回 false。
+     */
+    private fun quarantineAndAdvance(
+        event: DataBusProtocol.EventFile,
+        content: String,
+        reason: String,
+        stage: String,
+        attempts: Int = DataBus.readEventAttempt(DataBusProtocol.EVENT_REDIRECT_NOTICE, event.name),
+    ): Boolean {
+        if (!DataBus.quarantineEvent(
+                DataBusProtocol.EVENT_REDIRECT_NOTICE,
+                DataBusProtocol.EventFile(event.name, content),
+                reason, stage, attempts,
+            )
+        ) {
+            Log.e(TAG, "Failed to quarantine notice ${event.name}, keeping cursor")
+            return false
+        }
+        DataBus.clearEventAttempt(DataBusProtocol.EVENT_REDIRECT_NOTICE, event.name)
+        return advanceCursor(event)
+    }
+
+    private fun advanceCursor(event: DataBusProtocol.EventFile): Boolean {
+        // 先持久化、后更新内存：写失败时内存游标必须保持原位，否则本轮后续
+        // readEventFiles 会跳过未确认事件（at-least-once 保障）。
+        if (!DataBus.writeCursorToEvent(DataBusProtocol.EVENT_REDIRECT_NOTICE, event)) return false
         cursor = event.name
-        DataBus.writeCursorToEvent(DataBusProtocol.EVENT_REDIRECT_NOTICE, event)
+        return true
     }
 }
