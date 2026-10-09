@@ -347,6 +347,68 @@ object DataBus {
     fun writeCursorToEvent(queue: String, event: DataBusProtocol.EventFile): Boolean =
         writeCursor(queue, event.name)
 
+    // ── 恢复熔断总账（Fix 2：破坏轮次跨 server 重启延续） ──
+    //
+    // 职责：DataBus 只提供不透明内容的原子存取，不解释恢复语义；
+    // 语义（何时写/清、熔断含义）归 MediaProviderRecoveryStrategy。
+    // server 私有状态，不进 snapshots 白名单，不参与健康快照检查。
+
+    private const val RECOVERY_LEDGER_FILE = "media_provider_recovery.json"
+
+    /** 读取恢复总账 JSON，缺失/非法返回 null（调用方视为全新 episode）。 */
+    fun readRecoveryLedger(): String? {
+        val file = File("$BUS_ROOT/$DIR_CURSORS/$RECOVERY_LEDGER_FILE")
+        return try {
+            readRegularText(file, "cursors/$RECOVERY_LEDGER_FILE")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read recovery ledger", e)
+            null
+        }
+    }
+
+    /** 原子持久化恢复总账 JSON。 */
+    fun writeRecoveryLedger(content: String): Boolean {
+        if (!ensureInitialized()) return false
+        val cursorDir = File("$BUS_ROOT/$DIR_CURSORS")
+        if (!prepareDirectory(cursorDir)) return false
+        val tmpFile = try {
+            createTempFileIn(cursorDir, "$RECOVERY_LEDGER_FILE-", ".tmp")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create recovery ledger temp file", e)
+            return false
+        }
+        return try {
+            FileOutputStream(tmpFile).use { fos ->
+                fos.write(content.toByteArray(Charsets.UTF_8))
+                fos.flush()
+                fos.fd.sync()
+            }
+            val targetFile = File(cursorDir, RECOVERY_LEDGER_FILE)
+            if (!tmpFile.renameTo(targetFile)) {
+                Log.e(TAG, "Recovery ledger rename failed, deleting tmp")
+                tmpFile.delete()
+                return false
+            }
+            makeWorldAccessible(targetFile, executable = false, writable = false)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write recovery ledger", e)
+            tmpFile.delete()
+            false
+        }
+    }
+
+    /** 清除恢复总账（Hook 确认恢复后调用）。缺失视为成功。 */
+    fun clearRecoveryLedger(): Boolean {
+        val file = File("$BUS_ROOT/$DIR_CURSORS/$RECOVERY_LEDGER_FILE")
+        return try {
+            !file.exists() || file.delete()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to clear recovery ledger", e)
+            false
+        }
+    }
+
     // ── 毒丸隔离与重试计数（P0-B：Poison/Transient 分离） ──
     //
     // 职责：DataBus 只拥有物理隔离与计数持久化，不拥有“是否毒丸”的判定；
