@@ -9,13 +9,11 @@ import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 object NativeHookLayerReporter {
     private const val NATIVE_HOOK_STATUS_MAX_AGE_MS = 15_000L
 
-    /** Native 追赶新发布代次的收敛窗口：有新鲜应用动作时判收敛中，而非过期。 */
-    private const val NATIVE_SYNC_PROGRESS_MS = 60_000L
-
     // ── 指标键契约（DiagnosticArchive 等消费方必须引用此处，不得另写字面量） ──
     const val KEY_SNAPSHOT_EPOCH = "snapshotPublisherEpoch"
     const val KEY_APPLIED_EPOCH = "nativeAppliedPublisherEpoch"
     const val KEY_POLICY_SYNCED = "nativePolicySynced"
+    const val KEY_SYNC_VERDICT = "nativeSyncVerdict"
 
     fun collect(
         generation: Long,
@@ -38,27 +36,27 @@ object NativeHookLayerReporter {
         }
         val nativeStatusAvailable = nativeStatusFromDataBus != null || mediaProviderHookConnected
         val snapshotGen = MediaProviderHookGateway.configuredMountPointsSnapshotGeneration()
-        val snapshotEpoch = MediaProviderHookGateway.configuredMountPointsSnapshotEpoch()
+        val snapshotEpoch = MediaProviderHookGateway.mountPointsSnapshotEpoch()
         val nativeGen = nativeStatus.mountPointsGeneration
-        // 代次语义：appliedPublisherEpoch 只在成功应用时更新（失败路径不动它），
-        // 因此它是“Native 已确认持有”的真实证据；signal 新鲜度不作为收敛证明。
+        // 同步裁决收口到纯策略：每个结论都需要可验证证据（身份 + 终态 + sane 时间），
+        // 不再用单一时间戳冒充进展。
+        val syncVerdict = NativeSyncPolicy.evaluate(
+            NativeSyncPolicy.Input(
+                snapshotEpoch = snapshotEpoch,
+                snapshotGen = snapshotGen,
+                appliedEpoch = nativeStatus.appliedPublisherEpoch,
+                appliedGen = nativeGen,
+                lastApplySuccess = nativeStatus.lastApplySuccess,
+                attemptEpoch = nativeStatus.lastApplyAttemptEpoch,
+                attemptGen = nativeStatus.lastApplyAttemptGeneration,
+                attemptAt = nativeStatus.lastApplyAttemptAt,
+                applicationState = nativeStatus.applicationState,
+                now = now,
+            ),
+        )
         val epochMismatch = snapshotEpoch.isNotBlank() &&
                 nativeStatus.appliedPublisherEpoch != snapshotEpoch
-        // 同步判定必须同时校验身份（epoch）、进度（generation）与结果（applySuccess）。
-        // epoch 未知（空）时退化为仅 generation 检查（向后兼容旧版快照）。
-        // 单独 generation 数值不可跨 epoch 比较：旧 epoch 下 nativeGen=12 可能
-        // 大于新 epoch 重建后的 snapshotGen=7，但 Native 持有的是旧配置。
-        val epochConsistent = snapshotEpoch.isBlank() ||
-                nativeStatus.appliedPublisherEpoch == snapshotEpoch
-        val policySynced = nativeStatus.lastApplySuccess && epochConsistent &&
-                (snapshotGen <= 0L || nativeGen >= snapshotGen)
-        // 收敛中判定：需要"针对当前配置的应用尝试正在进行"的证据。
-        // 不能用 lastApplyAt（上一次应用**完成**时间）：epoch 变更后它反映的是
-        // 旧 epoch 的活动，会把尚未启动的新 epoch 同步误判为正在收敛。
-        // lastApplyAttemptAt 由每次 attempt 入口更新，能证明同步机制正在处理当前配置，
-        // 无论该次尝试最终成功或失败。无新鲜尝试则无进展证据 → STALE 有确定出口。
-        val applyInProgress = nativeStatus.lastApplyAttemptAt > 0L &&
-                now - nativeStatus.lastApplyAttemptAt < NATIVE_SYNC_PROGRESS_MS
+        val policySynced = syncVerdict == NativeSyncPolicy.Verdict.SYNCED
         val platformNativeHookMode = readPlatformSupportedNativeHookMode()
         val nativeHookModeMismatch = isHookModeMismatch(platformNativeHookMode, nativeStatus.hookMode)
         val nativeState = when {
@@ -66,12 +64,15 @@ object NativeHookLayerReporter {
             nativeStatus.inlineState == "DISABLED" -> LayerState.DISABLED
             nativeStatus.inlineState == "FUSE_WAITING" ||
                     nativeStatus.inlineState == "INLINE_LOADED" -> LayerState.RECOVERING
-            nativeStatus.coreAvailable && !policySynced ->
-                if (epochMismatch && applyInProgress) LayerState.RECOVERING else LayerState.STALE
-            nativeStatus.inlineState == "HOOK_READY_FULL" && policySynced -> LayerState.HEALTHY
-            nativeStatus.inlineState == "HOOK_READY_CORE" && policySynced -> LayerState.HEALTHY
-            nativeStatus.inlineState == "HOOK_DEGRADED" && policySynced -> LayerState.DEGRADED
-            nativeStatus.coreAvailable && policySynced -> LayerState.DEGRADED
+            // 未同步时按裁决细分：有当前身份的进展证据才报恢复中，
+            // 平台明确不支持与无证据（含旧 epoch attempt、时钟异常）一律过期。
+            syncVerdict == NativeSyncPolicy.Verdict.UNSUPPORTED -> LayerState.DEGRADED
+            syncVerdict == NativeSyncPolicy.Verdict.CONVERGING -> LayerState.RECOVERING
+            !policySynced -> LayerState.STALE
+            nativeStatus.inlineState == "HOOK_READY_FULL" -> LayerState.HEALTHY
+            nativeStatus.inlineState == "HOOK_READY_CORE" -> LayerState.HEALTHY
+            nativeStatus.inlineState == "HOOK_DEGRADED" -> LayerState.DEGRADED
+            nativeStatus.coreAvailable -> LayerState.DEGRADED
             nativeStatus.fuseLibraryLoaded -> LayerState.UNAVAILABLE
             else -> LayerState.UNAVAILABLE
         }
@@ -82,6 +83,9 @@ object NativeHookLayerReporter {
             nativeStatus.nativeLastError.isNotBlank() -> nativeStatus.nativeLastError
             nativeStatus.lastError.isNotBlank() -> nativeStatus.lastError
             !nativeStatusAvailable -> "MediaProvider Hook unavailable"
+            nativeState == LayerState.DEGRADED &&
+                    syncVerdict == NativeSyncPolicy.Verdict.UNSUPPORTED ->
+                "Native hook unsupported by platform"
             nativeState == LayerState.STALE -> "Native mount points stale"
             nativeState == LayerState.RECOVERING && epochMismatch ->
                 "Native policy sync pending (epoch change)"
@@ -110,7 +114,8 @@ object NativeHookLayerReporter {
                 "snapshotConfiguredMountPointsGeneration" to snapshotGen.toString(),
                 KEY_SNAPSHOT_EPOCH to snapshotEpoch,
                 KEY_APPLIED_EPOCH to nativeStatus.appliedPublisherEpoch,
-                KEY_POLICY_SYNCED to policySynced.toString(),                "nativePolicyApplicationState" to nativeStatus.applicationState,
+                KEY_POLICY_SYNCED to policySynced.toString(),
+                KEY_SYNC_VERDICT to syncVerdict.name,                "nativePolicyApplicationState" to nativeStatus.applicationState,
                 "nativeRedirectPolicyState" to nativeStatus.redirectPolicyState,
                 "nativeReadOnlyPolicyState" to nativeStatus.readOnlyPolicyState,
                 "nativeAppliedRedirectRevision" to nativeStatus.appliedRedirectRevision,
@@ -224,6 +229,8 @@ object NativeHookLayerReporter {
                 lastApplySuccess = policy?.optBoolean("lastApplySuccess", false) ?: false,
                 lastApplyAt = policy?.optLong("lastApplyAt", 0L) ?: 0L,
                 lastApplyAttemptAt = policy?.optLong("lastAttemptAt", 0L) ?: 0L,
+                lastApplyAttemptEpoch = policy?.optString("lastAttemptEpoch", "") ?: "",
+                lastApplyAttemptGeneration = policy?.optLong("lastAttemptGeneration", 0L) ?: 0L,
                 lastApplyGeneration = policy?.optLong("lastApplyGeneration", 0L) ?: 0L,
                 lastApplyCount = policy?.optInt("lastApplyCount", 0) ?: 0,
                 lastApplyError = policy?.optString("lastApplyError", "") ?: "",
@@ -301,6 +308,8 @@ object NativeHookLayerReporter {
         val lastApplySuccess: Boolean = false,
         val lastApplyAt: Long = 0L,
         val lastApplyAttemptAt: Long = 0L,
+        val lastApplyAttemptEpoch: String = "",
+        val lastApplyAttemptGeneration: Long = 0L,
         val lastApplyGeneration: Long = 0L,
         val lastApplyCount: Int = 0,
         val lastApplyError: String = "",

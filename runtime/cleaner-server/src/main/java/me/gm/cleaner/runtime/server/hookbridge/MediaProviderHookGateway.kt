@@ -20,7 +20,7 @@ object MediaProviderHookGateway {
     /** configured_mount_points snapshot generation 缓存（避免每 2s 健康检查读 DataBus） */
     @Volatile
     private var cachedMountPointsGeneration: Long = 0L
-    /** configured_mount_points snapshot publisherEpoch 缓存（与 generation 同批更新） */
+    /** 挂载点快照 publisherEpoch 缓存（与 generation 同批更新） */
     @Volatile
     private var cachedMountPointsEpoch: String = ""
     /** 上次读取 DataBus snapshot 时的 signal 时间戳（跳过未变更的信号） */
@@ -121,10 +121,10 @@ object MediaProviderHookGateway {
     }
 
     /**
-     * 获取 configured_mount_points snapshot publisherEpoch。
-     * 与 generation 同一批 signal 缓存，避免每 2s 健康检查重复读 DataBus。
+     * 获取挂载点快照的 publisherEpoch。
+     * 与 generation 读取共用同一批 signal 缓存，避免每 2s 健康检查重复读 DataBus。
      */
-    fun configuredMountPointsSnapshotEpoch(): String {
+    fun mountPointsSnapshotEpoch(): String {
         return readSnapshotIdentity().second
     }
 

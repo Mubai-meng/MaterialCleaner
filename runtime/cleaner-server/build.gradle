@@ -38,4 +38,6 @@ dependencies {
     ksp "androidx.room:room-compiler:$roomVersion"
     implementation "com.google.guava:guava:$rootProject.guavaVersion"
     testImplementation 'junit:junit:4.13.2'
+    // 单测需真实 org.json 实现（android.jar stub 的 JSONObject 方法会抛 Stub!）
+    testImplementation 'org.json:json:20220320'
 }

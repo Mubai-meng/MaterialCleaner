@@ -42,7 +42,7 @@ object FuseNativePolicyAdapter {
         redirectRevision: String,
         publisherEpoch: String = "",
     ) {
-        NativeHookStatus.markMountPointsApplyStarted(redirectRevision)
+        NativeHookStatus.markMountPointsApplyStarted(generation, redirectRevision, publisherEpoch)
         var unsupported = false
         try {
             if (disableInlineIfUnsupportedByPlatform()) {

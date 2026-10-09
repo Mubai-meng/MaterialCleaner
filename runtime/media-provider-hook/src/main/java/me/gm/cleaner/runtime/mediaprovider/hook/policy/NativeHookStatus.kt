@@ -114,6 +114,16 @@ object NativeHookStatus {
     @Volatile
     private var lastMountPointsAttemptAt = 0L
 
+    /**
+     * 最近一次 attempt 的目标身份（P2，与 attemptAt 配套）。
+     * 仅记录时间无法区分该次尝试服务的是旧 epoch 还是当前配置，
+     * 必须连同 generation 一起记录，消费侧才能判断"正在处理当前配置"。
+     */
+    @Volatile
+    private var lastMountPointsAttemptEpoch = ""
+    @Volatile
+    private var lastMountPointsAttemptGeneration = 0L
+
     @Volatile
     private var redirectAppliedRevision = ""
     @Volatile
@@ -360,13 +370,20 @@ object NativeHookStatus {
         publishSnapshot()
     }
 
-    fun markMountPointsApplyStarted(redirectRevision: String) {
+    fun markMountPointsApplyStarted(
+        generation: Long,
+        redirectRevision: String,
+        publisherEpoch: String,
+    ) {
         mountPointsLastAttemptRevision = redirectRevision
         mountPointsConfiguredRevision = redirectRevision
         mountPointsPublishedRevision = redirectRevision
         mountPointsObservedAt = System.currentTimeMillis()
-        // 每次 attempt 必经入口：记录开始时间作为"当前配置正在同步"的进展证据。
+        // 每次 attempt 必经入口：记录开始时间与目标身份，
+        // 作为"当前配置正在同步"的可验证证据（无身份的时间戳不可作为证据）。
         lastMountPointsAttemptAt = mountPointsObservedAt
+        lastMountPointsAttemptEpoch = publisherEpoch
+        lastMountPointsAttemptGeneration = generation
         mountPointsState = POLICY_STATE_APPLYING
         publishSnapshot()
     }
@@ -680,6 +697,8 @@ object NativeHookStatus {
                 put("lastApplyAt", lastMountPointsApplyAt)
                 put("lastApplyGeneration", lastMountPointsApplyGeneration)
                 put("lastAttemptAt", lastMountPointsAttemptAt)
+                put("lastAttemptEpoch", lastMountPointsAttemptEpoch)
+                put("lastAttemptGeneration", lastMountPointsAttemptGeneration)
                 put("lastApplyCount", lastMountPointsApplyCount)
                 put("lastApplyError", lastMountPointsApplyError)
             })

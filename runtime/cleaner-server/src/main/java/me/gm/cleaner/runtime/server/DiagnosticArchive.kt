@@ -194,31 +194,36 @@ object DiagnosticArchive {
         appendLine("If the package is hard to read, start from this file, then open the referenced files above.")
     }
 
-    /** P1 诊断质量：直读 status JSON 中的关键信号（P0-B/Fix1′/Fix2/Fix3 新增 metrics）。 */
-    private fun StringBuilder.appendKeySignals(status: JSONObject) {
+    /**
+     * P1 诊断质量：陈列 status JSON 中的关键信号。
+     *
+     * 职责边界：本函数只**陈列事实**，不做状态裁决——裁决归 Reporter
+     * （[NativeHookLayerReporter] / [MediaProviderHookLayerReporter]），
+     * 此处直接展示其结论与证据字段。自造判定词会与运行状态分叉，
+     * 正是历史上"摘要显示 synced 而实际 STALE"的成因。
+     */
+    internal fun StringBuilder.appendKeySignals(status: JSONObject) {
         val vfs = status.optJSONObject("vfs")
         val mp = status.optJSONObject("mediaProviderJavaHook")
         val fuse = status.optJSONObject("fuseNativeHook")
         if (vfs == null || mp == null || fuse == null) return
-        // FUSE epoch 收敛 vs 过期：必须与 NativeHookLayerReporter 同一判定口径，
-        // 不得只凭 epoch 一致就宣称同步（generation 落后或上次应用失败同样未同步）。
+        // FUSE：展示 Reporter 的权威裁决 + 支撑证据，不再自行推导 synced/pending
         val appliedEpoch = fuse.optString(NativeHookLayerReporter.KEY_APPLIED_EPOCH, "")
         val snapshotEpoch = fuse.optString(NativeHookLayerReporter.KEY_SNAPSHOT_EPOCH, "")
         val policySynced = fuse.optBoolean(NativeHookLayerReporter.KEY_POLICY_SYNCED, false)
+        val verdict = fuse.optString(NativeHookLayerReporter.KEY_SYNC_VERDICT, "UNKNOWN")
+        val layerState = fuse.optString("state", "UNKNOWN")
         if (appliedEpoch.isNotBlank() && snapshotEpoch.isNotBlank()) {
-            val epochConsistent = appliedEpoch == snapshotEpoch
-            val verdict = when {
-                epochConsistent && policySynced -> "synced"
-                epochConsistent -> "epoch consistent, policySynced=$policySynced"
-                else -> "SYNC PENDING (epoch mismatch)"
-            }
-            appendLine("- FUSE sync: $verdict (epoch=$appliedEpoch)")
+            val epoch = if (appliedEpoch == snapshotEpoch) "consistent" else "MISMATCH"
+            appendLine("- FUSE: state=$layerState, sync=$verdict, " +
+                    "epoch=$epoch, policySynced=$policySynced")
         }
-        // 恢复熔断
+        // 恢复熔断：展示 Reporter 结论与计数（attempts 语义）
         val wakeOnly = mp.optBoolean(MediaProviderHookLayerReporter.KEY_WAKE_ONLY_MODE, false)
         val rounds = mp.optInt(MediaProviderHookLayerReporter.KEY_DESTRUCTIVE_ROUNDS, 0)
         if (wakeOnly || rounds > 0) {
-            appendLine("- MediaProvider recovery: wakeOnly=$wakeOnly, destructiveRounds=$rounds/3")
+            appendLine("- MediaProvider recovery: state=${mp.optString("state", "UNKNOWN")}, " +
+                    "wakeOnly=$wakeOnly, destructiveAttempts=$rounds/3")
         }
         // VFS 分母
         val unmanaged = vfs.optInt(VfsProcessCensus.KEY_UNMANAGED, -1)
@@ -234,30 +239,27 @@ object DiagnosticArchive {
         }
     }
 
-    private fun StringBuilder.appendKeySignalsZhCn(status: JSONObject) {
+    /** 中文概览：同样只陈列 Reporter 结论，不自行裁决。 */
+    internal fun StringBuilder.appendKeySignalsZhCn(status: JSONObject) {
         val vfs = status.optJSONObject("vfs")
         val mp = status.optJSONObject("mediaProviderJavaHook")
         val fuse = status.optJSONObject("fuseNativeHook")
         if (vfs == null || mp == null || fuse == null) return
-        // FUSE epoch 收敛 vs 过期：必须与 NativeHookLayerReporter 同一判定口径，
-        // 不得只凭 epoch 一致就宣称同步（generation 落后或上次应用失败同样未同步）。
         val appliedEpoch = fuse.optString(NativeHookLayerReporter.KEY_APPLIED_EPOCH, "")
         val snapshotEpoch = fuse.optString(NativeHookLayerReporter.KEY_SNAPSHOT_EPOCH, "")
         val policySynced = fuse.optBoolean(NativeHookLayerReporter.KEY_POLICY_SYNCED, false)
+        val verdict = fuse.optString(NativeHookLayerReporter.KEY_SYNC_VERDICT, "UNKNOWN")
+        val layerState = fuse.optString("state", "UNKNOWN")
         if (appliedEpoch.isNotBlank() && snapshotEpoch.isNotBlank()) {
-            val epochConsistent = appliedEpoch == snapshotEpoch
-            val verdict = when {
-                epochConsistent && policySynced -> "已同步"
-                epochConsistent -> "代次一致，策略同步=$policySynced"
-                else -> "同步待完成（代次不一致）"
-            }
-            appendLine("- FUSE 同步：$verdict（代次=$appliedEpoch）")
+            val epoch = if (appliedEpoch == snapshotEpoch) "一致" else "不一致"
+            appendLine("- FUSE：状态=$layerState，同步=$verdict，代次=$epoch，策略同步=$policySynced")
         }
-        // 恢复熔断
+        // 恢复熔断（attempts 语义）
         val wakeOnly = mp.optBoolean(MediaProviderHookLayerReporter.KEY_WAKE_ONLY_MODE, false)
         val rounds = mp.optInt(MediaProviderHookLayerReporter.KEY_DESTRUCTIVE_ROUNDS, 0)
         if (wakeOnly || rounds > 0) {
-            appendLine("- MediaProvider 恢复：仅唤醒=$wakeOnly，破坏性轮次=$rounds/3")
+            appendLine("- MediaProvider 恢复：状态=${mp.optString("state", "UNKNOWN")}，" +
+                    "仅唤醒=$wakeOnly，破坏性尝试=$rounds/3")
         }
         // VFS 分母
         val unmanaged = vfs.optInt(VfsProcessCensus.KEY_UNMANAGED, -1)
@@ -560,13 +562,14 @@ object DiagnosticArchive {
 
     private fun addAutoLogs(zip: ZipOutputStream) {
         val dir = File(AUTO_LOG_DIR)
-        val files = dir.listFiles()
+        val all = dir.listFiles()
             ?.filter { isRegularFileNoFollow(it) && it.name.endsWith(".log") }
             ?.sortedByDescending { it.lastModified() }
-            ?.take(MAX_AUTO_LOG_FILES)
             ?: emptyList()
+        val files = all.take(MAX_AUTO_LOG_FILES)
         addText(zip, "logs/auto_logging_manifest.txt", buildString {
             appendLine("dir=$AUTO_LOG_DIR")
+            appendLine("total=${all.size}")
             appendLine("included=${files.size}")
             for (file in files) {
                 appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}")
@@ -599,14 +602,16 @@ object DiagnosticArchive {
         entryPrefix: String,
         maxFiles: Int,
     ) {
-        val files = dir.listFiles()
+        val all = dir.listFiles()
             ?.filter { isRegularFileNoFollow(it) }
             ?.sortedWith(compareByDescending<File> { it.lastModified() }.thenBy { it.name })
-            ?.take(maxFiles)
             ?: emptyList()
+        val files = all.take(maxFiles)
         addText(zip, "$entryPrefix/manifest.txt", buildString {
             appendLine("path=${dir.path}")
             appendLine("exists=${dir.exists()}")
+            // 可审计：记录目录总数，排障者可判断证据是否完整
+            appendLine("total=${all.size}")
             appendLine("included=${files.size}")
             for (file in files) {
                 appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}")
