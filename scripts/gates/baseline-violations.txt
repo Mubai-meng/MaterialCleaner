@@ -1,5 +1,4 @@
 app/src/main/java/me/gm/cleaner/client/ui/storageredirect/MountWizard.kt	1320
-core/storage-redirect-databus/src/main/java/me/gm/cleaner/core/storage/redirect/databus/DataBus.kt	836
 word:app/src/main/java/me/gm/cleaner/client/BasePromptActivity.kt|denylist	9
 word:app/src/main/java/me/gm/cleaner/client/NotificationService.kt|denylist	8
 word:app/src/main/java/me/gm/cleaner/client/ui/AppListViewModelBase.kt|denylist	1

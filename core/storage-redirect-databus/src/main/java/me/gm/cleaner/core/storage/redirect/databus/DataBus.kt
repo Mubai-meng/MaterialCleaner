@@ -72,9 +72,12 @@ object DataBus {
 
     private const val DIR_SNAPSHOTS = "snapshots"
     private const val DIR_SIGNALS = "signals"
-    private const val DIR_EVENTS = "events"
+    // 以下原语与目录常量对模块内可见：DataBusEventQuarantine /
+    // DataBusRecoveryLedger 复用同一套原子写实现，避免跨文件复制。
+    internal const val DIR_EVENTS = "events"
+    internal const val DIR_CURSORS = "cursors"
     private const val DIR_LEASES = "leases"
-    private const val DIR_CURSORS = "cursors"
+
     private const val DIR_COUNTERS = "counters"
     private const val DIR_CONSUMED = "consumed"
     private const val DIR_TMP = "tmp"
@@ -348,72 +351,19 @@ object DataBus {
         writeCursor(queue, event.name)
 
     // ── 恢复熔断总账（Fix 2：破坏轮次跨 server 重启延续） ──
-    //
-    // 职责：DataBus 只提供不透明内容的原子存取，不解释恢复语义；
-    // 语义（何时写/清、熔断含义）归 MediaProviderRecoveryStrategy。
-    // server 私有状态，不进 snapshots 白名单，不参与健康快照检查。
-
-    private const val RECOVERY_LEDGER_FILE = "media_provider_recovery.json"
+    // 实现见 [DataBusRecoveryLedger]；此处仅保留跨模块公开 API 面。
 
     /** 读取恢复总账 JSON，缺失/非法返回 null（调用方视为全新 episode）。 */
-    fun readRecoveryLedger(): String? {
-        val file = File("$BUS_ROOT/$DIR_CURSORS/$RECOVERY_LEDGER_FILE")
-        return try {
-            readRegularText(file, "cursors/$RECOVERY_LEDGER_FILE")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read recovery ledger", e)
-            null
-        }
-    }
+    fun readRecoveryLedger(): String? = DataBusRecoveryLedger.read()
 
     /** 原子持久化恢复总账 JSON。 */
-    fun writeRecoveryLedger(content: String): Boolean {
-        if (!ensureInitialized()) return false
-        val cursorDir = File("$BUS_ROOT/$DIR_CURSORS")
-        if (!prepareDirectory(cursorDir)) return false
-        val tmpFile = try {
-            createTempFileIn(cursorDir, "$RECOVERY_LEDGER_FILE-", ".tmp")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create recovery ledger temp file", e)
-            return false
-        }
-        return try {
-            FileOutputStream(tmpFile).use { fos ->
-                fos.write(content.toByteArray(Charsets.UTF_8))
-                fos.flush()
-                fos.fd.sync()
-            }
-            val targetFile = File(cursorDir, RECOVERY_LEDGER_FILE)
-            if (!tmpFile.renameTo(targetFile)) {
-                Log.e(TAG, "Recovery ledger rename failed, deleting tmp")
-                tmpFile.delete()
-                return false
-            }
-            makeWorldAccessible(targetFile, executable = false, writable = false)
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to write recovery ledger", e)
-            tmpFile.delete()
-            false
-        }
-    }
+    fun writeRecoveryLedger(content: String): Boolean = DataBusRecoveryLedger.write(content)
 
     /** 清除恢复总账（Hook 确认恢复后调用）。缺失视为成功。 */
-    fun clearRecoveryLedger(): Boolean {
-        val file = File("$BUS_ROOT/$DIR_CURSORS/$RECOVERY_LEDGER_FILE")
-        return try {
-            !file.exists() || file.delete()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to clear recovery ledger", e)
-            false
-        }
-    }
+    fun clearRecoveryLedger(): Boolean = DataBusRecoveryLedger.clear()
 
     // ── 毒丸隔离与重试计数（P0-B：Poison/Transient 分离） ──
-    //
-    // 职责：DataBus 只拥有物理隔离与计数持久化，不拥有“是否毒丸”的判定；
-    // 判定归消费侧 EventConsumePolicy。隔离成功才允许推进游标；隔离失败
-    // 不得删除原文、不得推进。隔离文件名由事件名确定，重复隔离幂等覆盖。
+    // 实现见 [DataBusEventQuarantine]；此处仅保留跨模块公开 API 面。
 
     /**
      * 隔离毒丸事件：原文保留在队列目录，仅推进游标跳过。
@@ -425,110 +375,19 @@ object DataBus {
         reason: String,
         stage: String,
         attempts: Int,
-    ): Boolean {
-        if (!isValidEventQueue(queue)) return false
-        if (!ensureInitialized()) return false
-        val quarantineDir = File("$BUS_ROOT/$DIR_EVENTS/$queue.quarantine")
-        if (!prepareDirectory(quarantineDir)) return false
-        val envelope = try {
-            JSONObject()
-                .put("queue", queue)
-                .put("originalName", event.name)
-                .put("reason", reason.take(500))
-                .put("stage", stage.take(120))
-                .put("attempts", attempts)
-                .put("quarantinedAt", System.currentTimeMillis())
-                .put("content", event.content)
-                .toString()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to build quarantine envelope: $queue/${event.name}", e)
-            return false
-        }
-        val filename = "${sanitizeFileName(event.name)}.quarantine.json"
-        val tmpFile = try {
-            createTempFileIn(quarantineDir, "$filename-", ".tmp")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create quarantine temp file: $queue/${event.name}", e)
-            return false
-        }
-        return try {
-            FileOutputStream(tmpFile).use { fos ->
-                fos.write(envelope.toByteArray(Charsets.UTF_8))
-                fos.flush()
-                fos.fd.sync()
-            }
-            val targetFile = File(quarantineDir, filename)
-            if (!tmpFile.renameTo(targetFile)) {
-                Log.e(TAG, "Quarantine rename failed: $queue/$filename")
-                tmpFile.delete()
-                return false
-            }
-            makeWorldAccessible(targetFile, executable = false, writable = false)
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to quarantine event: $queue/${event.name}", e)
-            tmpFile.delete()
-            false
-        }
-    }
+    ): Boolean = DataBusEventQuarantine.quarantine(queue, event, reason, stage, attempts)
 
     /** 读取指定事件的处理重试计数，缺失/非法视为 0。 */
-    fun readEventAttempt(queue: String, eventName: String): Int {
-        if (!isValidEventQueue(queue)) return 0
-        val file = File("$BUS_ROOT/$DIR_CURSORS/$queue.attempts/${sanitizeFileName(eventName)}")
-        return try {
-            readRegularText(file, "attempts/$queue/$eventName")
-                ?.trim()?.toIntOrNull()?.coerceAtLeast(0) ?: 0
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read attempt: $queue/$eventName", e)
-            0
-        }
-    }
+    fun readEventAttempt(queue: String, eventName: String): Int =
+        DataBusEventQuarantine.readAttempt(queue, eventName)
 
     /** 持久化指定事件的处理重试计数。 */
-    fun writeEventAttempt(queue: String, eventName: String, count: Int): Boolean {
-        if (!isValidEventQueue(queue)) return false
-        if (!ensureInitialized()) return false
-        val attemptDir = File("$BUS_ROOT/$DIR_CURSORS/$queue.attempts")
-        if (!prepareDirectory(attemptDir)) return false
-        val tmpFile = try {
-            createTempFileIn(attemptDir, "${sanitizeFileName(eventName)}-", ".tmp")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create attempt temp file: $queue/$eventName", e)
-            return false
-        }
-        return try {
-            FileOutputStream(tmpFile).use { fos ->
-                fos.write(count.toString().toByteArray(Charsets.UTF_8))
-                fos.flush()
-                fos.fd.sync()
-            }
-            val targetFile = File(attemptDir, sanitizeFileName(eventName))
-            if (!tmpFile.renameTo(targetFile)) {
-                Log.e(TAG, "Attempt rename failed: $queue/$eventName")
-                tmpFile.delete()
-                return false
-            }
-            makeWorldAccessible(targetFile, executable = false, writable = false)
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to write attempt: $queue/$eventName", e)
-            tmpFile.delete()
-            false
-        }
-    }
+    fun writeEventAttempt(queue: String, eventName: String, count: Int): Boolean =
+        DataBusEventQuarantine.writeAttempt(queue, eventName, count)
 
     /** 清除指定事件的重试计数（消费成功或已隔离后调用）。缺失视为成功。 */
-    fun clearEventAttempt(queue: String, eventName: String): Boolean {
-        if (!isValidEventQueue(queue)) return false
-        val file = File("$BUS_ROOT/$DIR_CURSORS/$queue.attempts/${sanitizeFileName(eventName)}")
-        return try {
-            !file.exists() || file.delete()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to clear attempt: $queue/$eventName", e)
-            false
-        }
-    }
+    fun clearEventAttempt(queue: String, eventName: String): Boolean =
+        DataBusEventQuarantine.clearAttempt(queue, eventName)
 
     // ── Lease（短期会话） ──
 
@@ -576,7 +435,7 @@ object DataBus {
         }
     }
 
-    private fun prepareDirectory(dir: File): Boolean = try {
+    internal fun prepareDirectory(dir: File): Boolean = try {
         val path = dir.toPath()
         if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) &&
             (Files.isSymbolicLink(path) || !Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
@@ -591,7 +450,7 @@ object DataBus {
         false
     }
 
-    private fun createTempFileIn(dir: File, prefix: String, suffix: String): File {
+    internal fun createTempFileIn(dir: File, prefix: String, suffix: String): File {
         val safePrefix = prefix
             .replace(Regex("[^A-Za-z0-9._-]"), "_")
             .take(120)
@@ -602,7 +461,7 @@ object DataBus {
     private fun isRegularFileNoFollow(file: File): Boolean =
         Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS)
 
-    private fun readRegularText(file: File, label: String): String? {
+    internal fun readRegularText(file: File, label: String): String? {
         if (!isRegularFileNoFollow(file)) {
             if (Files.exists(file.toPath(), LinkOption.NOFOLLOW_LINKS)) {
                 Log.w(TAG, "Rejected non-regular DataBus file: $label")
@@ -770,7 +629,7 @@ object DataBus {
         }
     }
 
-    private fun sanitizeFileName(value: String): String =
+    internal fun sanitizeFileName(value: String): String =
         value.replace(Regex("[^A-Za-z0-9._-]"), "_").take(180).ifBlank { "lease" }
 
     private fun isValidSnapshotName(name: String): Boolean =
@@ -779,7 +638,7 @@ object DataBus {
     private fun isValidSignalName(name: String): Boolean =
         isValidName("signal", name, DataBusProtocol.validSignalNames)
 
-    private fun isValidEventQueue(queue: String): Boolean =
+    internal fun isValidEventQueue(queue: String): Boolean =
         isValidName("event queue", queue, DataBusProtocol.validEventQueues)
 
     private fun isValidLeaseCategory(category: String): Boolean =
@@ -897,7 +756,7 @@ object DataBus {
             ?: 0
     }
 
-    private fun makeWorldAccessible(file: File, executable: Boolean, writable: Boolean = true) {
+    internal fun makeWorldAccessible(file: File, executable: Boolean, writable: Boolean = true) {
         file.setReadable(true, false)
         if (writable) {
             file.setWritable(true, false)
