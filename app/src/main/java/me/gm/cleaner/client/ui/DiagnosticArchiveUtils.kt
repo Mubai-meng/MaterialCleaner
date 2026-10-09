@@ -30,8 +30,25 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-/** App 进程侧错误事件流水在诊断包中的条目名。 */
+/**
+ * App 进程侧错误事件流水在诊断包中的条目名。
+ */
 private const val CLIENT_JOURNAL_ENTRY = "client/errors/journal.jsonl"
+
+/**
+ * 诊断包有两条产出路径，资源约束不同（不要互相引用对方的口径）：
+ *
+ * 1. **服务端完整包**（[me.gm.cleaner.runtime.server.DiagnosticArchive]）：
+ *    逐目录文件数上限（事件类 20、快照/信号/游标不限）、单文件 512 KiB、
+ *    单条命令输出 4 MiB、自愈日志 8 个、归档保留 5 份；
+ *    **没有覆盖全部条目的统一总量预算**。
+ * 2. **App fallback 包**（本文件，服务端不可用时产出）：
+ *    统一 [ArchiveBudget] 内容总量预算（压缩前条目内容），
+ *    命令输出采集期另限 1 MiB；预算覆盖除最终归档清单外的全部条目。
+ *
+ * 因此不应声称“所有诊断包都严格限制在同一内容预算内”。
+ * 后续若需统一，应在服务端路径引入同构预算，而非缩小本文件口径。
+ */
 
 fun Fragment.exportDiagnosticsArchiveAndShare(context: Context) {
     AlertDialog.Builder(context)
@@ -290,17 +307,18 @@ private fun runCommand(command: List<String>): CommandResult {
         process = ProcessBuilder(command)
             .redirectErrorStream(true)
             .start()
-        val finished = process.waitFor(10, TimeUnit.SECONDS)
-        // 采集期即限长：预算检查发生在写入 ZIP 时，无法约束读取阶段的峰值内存。
-        val output = readCapped(process.inputStream, MAX_COMMAND_OUTPUT_BYTES)
-        if (!finished) {
-            process.destroyForcibly()
-        }
+        // 采集线程必须先于等待启动：否则 waitFor 超时后读取会阻塞到 EOF，
+        // 而销毁又在读取之后，形成“超时却不返回”的死等路径。
+        val output = readCappedAsync(process.inputStream, MAX_COMMAND_OUTPUT_BYTES)
+        val finished = process.waitFor(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        // 无论是否超时都先终止进程并回收，确保读取线程能拿到 EOF。
+        process.destroyForcibly()
+        val bounded = output.joinBounded(COMMAND_DRAIN_GRACE_MS)
         CommandResult(
-            exitCode = if (finished) process.exitValue() else -1,
+            exitCode = if (finished && bounded.completed) process.exitValue() else -1,
             timedOut = !finished,
-            truncated = output.second,
-            output = output.first,
+            truncated = bounded.truncated || !bounded.completed,
+            output = bounded.text,
         )
     } catch (e: Exception) {
         CommandResult(-1, timedOut = false, truncated = false, output = e.stackTraceToString())
@@ -309,29 +327,60 @@ private fun runCommand(command: List<String>): CommandResult {
     }
 }
 
+/** 子进程等待上限：超时即强杀，不无限等待。 */
+private const val COMMAND_TIMEOUT_SECONDS = 10L
+
+/** 强杀后留给采集线程拿到 EOF 的宽限期。 */
+private const val COMMAND_DRAIN_GRACE_MS = 1_000L
+
 /** 命令输出采集上限：超限截断并标记，避免诊断导出在故障时成为内存压力源。 */
 private const val MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 
-private fun readCapped(
+/**
+ * 并发排空输出流：采集在独立线程进行，主线程只做有界等待，
+ * 保证采集耗时受控，不因目标进程不退出而无限阻塞。
+ */
+private fun readCappedAsync(
     input: java.io.InputStream,
     maxBytes: Int,
-): Pair<String, Boolean> {
-    val out = java.io.ByteArrayOutputStream()
-    val buffer = ByteArray(8 * 1024)
-    var truncated = false
-    while (true) {
-        val read = input.read(buffer)
-        if (read < 0) break
-        if (out.size() + read <= maxBytes) {
-            out.write(buffer, 0, read)
-        } else {
-            val allowed = maxBytes - out.size()
-            if (allowed > 0) out.write(buffer, 0, allowed)
-            truncated = true
-            break
+): java.util.concurrent.Future<CappedOutput> {
+    return java.util.concurrent.CompletableFuture.supplyAsync {
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(8 * 1024)
+        var truncated = false
+        try {
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (out.size() + read <= maxBytes) {
+                    out.write(buffer, 0, read)
+                } else {
+                    val allowed = maxBytes - out.size()
+                    if (allowed > 0) out.write(buffer, 0, allowed)
+                    truncated = true
+                    break
+                }
+            }
+        } catch (_: Exception) {
+            // 进程被强杀时流读取抛异常属预期：已读到的内容仍然有效。
         }
+        CappedOutput(out.toString(Charsets.UTF_8.name()), truncated, completed = true)
     }
-    return out.toString(Charsets.UTF_8.name()) to truncated
+}
+
+private data class CappedOutput(
+    val text: String,
+    val truncated: Boolean,
+    val completed: Boolean,
+)
+
+/** 有界等待采集线程：超时未完成则标记未完成，由调用方按截断处理。 */
+private fun java.util.concurrent.Future<CappedOutput>.joinBounded(
+    timeoutMs: Long,
+): CappedOutput = try {
+    get(timeoutMs, TimeUnit.MILLISECONDS)
+} catch (e: Exception) {
+    CappedOutput("", truncated = true, completed = false)
 }
 
 private fun redact(content: String): String {
