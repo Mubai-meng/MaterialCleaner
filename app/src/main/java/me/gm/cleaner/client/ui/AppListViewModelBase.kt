@@ -23,7 +23,6 @@ import me.gm.cleaner.core.config.getUninstalledSrPackages
 import me.gm.cleaner.core.config.readOnlyPackages
 import me.gm.cleaner.core.config.srPackages
 import me.gm.cleaner.util.PermissionUtils
-import me.gm.cleaner.util.collatorComparator
 
 abstract class AppListViewModelBase(application: Application) :
     BaseServiceSettingsViewModel(application) {
@@ -70,27 +69,13 @@ abstract class AppListViewModelBase(application: Application) :
                         (it.packageInfo.sharedUserId ?: "").contains(queryText, true)
             }
         }
-        sequence = when (ServicePreferences.sortBy) {
-            ServicePreferences.SORT_BY_NAME ->
-                sequence.sortedWith(collatorComparator { it.label })
-
-            ServicePreferences.SORT_BY_UPDATE_TIME ->
-                sequence.sortedByDescending { it.packageInfo.lastUpdateTime }
-
-            else -> throw IllegalArgumentException()
-        }
-        if (ServicePreferences.ruleCount) {
-            sequence = sequence.sortedByDescending {
-                val c1 = if (it.mountRulesCount > 0) 2 else 0
-                val c2 = if (it.readOnlyCount > 0) 1 else 0
-                c1 + c2
-            }
-        }
-        if (ServicePreferences.mountState) {
-            sequence = sequence.sortedByDescending {
-                it.mountState
-            }
-        }
+        sequence = sequence.sortedWith(
+            buildAppListComparator(
+                ServicePreferences.sortBy,
+                ServicePreferences.ruleCount,
+                ServicePreferences.mountState
+            )
+        )
         AppListState.Done(sequence.toList())
     }
 
