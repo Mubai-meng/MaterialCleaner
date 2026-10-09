@@ -105,6 +105,15 @@ object NativeHookStatus {
     @Volatile
     private var mountPointsObservedAt = 0L
 
+    /**
+     * 最近一次 mountPoints 应用**尝试开始**时间（P2-1）。
+     * 与 lastMountPointsApplyAt（尝试完成时间）分离：epoch 变更后，
+     * "上一次成功应用" 反映的是旧 epoch 的活动，不能当作新 epoch 的进展证据；
+     * 而"尝试开始时间"能证明同步机制正在处理当前配置，无论成败。
+     */
+    @Volatile
+    private var lastMountPointsAttemptAt = 0L
+
     @Volatile
     private var redirectAppliedRevision = ""
     @Volatile
@@ -356,6 +365,8 @@ object NativeHookStatus {
         mountPointsConfiguredRevision = redirectRevision
         mountPointsPublishedRevision = redirectRevision
         mountPointsObservedAt = System.currentTimeMillis()
+        // 每次 attempt 必经入口：记录开始时间作为"当前配置正在同步"的进展证据。
+        lastMountPointsAttemptAt = mountPointsObservedAt
         mountPointsState = POLICY_STATE_APPLYING
         publishSnapshot()
     }
@@ -668,6 +679,7 @@ object NativeHookStatus {
                 put("lastAttemptRedirectRevision", mountPointsLastAttemptRevision)
                 put("lastApplyAt", lastMountPointsApplyAt)
                 put("lastApplyGeneration", lastMountPointsApplyGeneration)
+                put("lastAttemptAt", lastMountPointsAttemptAt)
                 put("lastApplyCount", lastMountPointsApplyCount)
                 put("lastApplyError", lastMountPointsApplyError)
             })

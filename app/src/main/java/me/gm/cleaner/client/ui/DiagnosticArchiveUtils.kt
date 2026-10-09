@@ -155,13 +155,15 @@ private fun createFallbackArchive(target: File) {
         // P0-2: fallback 时追加只读 DataBus（快照/信号/游标/隔离/重试计数/总账），不 repair 避免权限变更
         // P1-9 诊断预算：与 server 侧一致，事件类目录限 20 个，防止故障时大量
         // 毒丸/重试计数堆积把诊断导出本身变成资源压力源。
+        // P2-3 统一预算：snapshots/signals/cursors 正常内容约 10~17 个，
+        // 上限仅防病态堆积，不影响常规导出。
         if (DataBus.ensureInitialized()) {
             addTextEntry(zip, "databus/health.json",
                 healthToJson(DataBus.checkHealth(repair = false)).toString(2))
             val busRoot = File(DataBus.BUS_ROOT)
-            addDirectoryFiles(zip, File(busRoot, "snapshots"), "databus/snapshots", Int.MAX_VALUE)
-            addDirectoryFiles(zip, File(busRoot, "signals"), "databus/signals", Int.MAX_VALUE)
-            addDirectoryFiles(zip, File(busRoot, "cursors"), "databus/cursors", Int.MAX_VALUE)
+            addDirectoryFiles(zip, File(busRoot, "snapshots"), "databus/snapshots", 100)
+            addDirectoryFiles(zip, File(busRoot, "signals"), "databus/signals", 100)
+            addDirectoryFiles(zip, File(busRoot, "cursors"), "databus/cursors", 100)
             addDirectoryFiles(zip, File(busRoot, "events/consumed"), "databus/events/consumed", 20)
             addDirectoryFiles(zip,
                 File(busRoot, "events/" + DataBusProtocol.EVENT_FILESYSTEM + ".quarantine"),

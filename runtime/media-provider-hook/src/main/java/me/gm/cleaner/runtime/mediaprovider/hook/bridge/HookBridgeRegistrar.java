@@ -118,7 +118,18 @@ public final class HookBridgeRegistrar {
             // 安装期间若已有活体（并发尝试先装好），丢弃本次结果，避免监听堆积。
             // 引用比对即可：同一周期内只有本监视器会写入该字段。
             if (sWatchedRegistryBinder != null && sWatchedRegistryBinder != watched) {
-                return true;
+                // 竞争分支必须复核存活：他线程装的 Binder 可能在我们进入本锁前已死亡
+                // （死亡回调尚未执行或时序交错），此时若直接返回 true，
+                // 将没有有效监视器却又报告成功。已死则清理后继续安装本次结果。
+                if (sWatchedRegistryBinder.pingBinder()) {
+                    return true;
+                }
+                try {
+                    sWatchedRegistryBinder.unlinkToDeath(sRegistryDeathRecipient, 0);
+                } catch (RuntimeException ignored) {
+                }
+                sWatchedRegistryBinder = null;
+                sRegistryDeathRecipient = null;
             }
             if (sWatchedRegistryBinder != null) {
                 try {

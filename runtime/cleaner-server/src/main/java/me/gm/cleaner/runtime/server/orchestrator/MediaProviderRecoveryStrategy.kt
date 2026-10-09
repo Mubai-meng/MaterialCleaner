@@ -197,6 +197,9 @@ class MediaProviderRecoveryStrategy(
             }
             return false
         }
+        // 真正执行破坏前重新扫描实例身份：probe 的 wake+等待期间进程集合可能已变，
+        // 决策时观测到的 currentPids 不等于实际被杀实例，不能直接当事实记录。
+        val executedPids = scanMediaProcessInstances().ifEmpty { currentPids }
         // 确认进入破坏路径后才重置需要重建的 Native 状态。
         MediaProviderHookGateway.resetNativeStateForReconnect()
         val stoppedPackages = forceStopMediaProviderPackages()
@@ -209,9 +212,11 @@ class MediaProviderRecoveryStrategy(
         lastMediaProviderRecoveryAt = now
         lastRound = MediaProviderRecoveryPolicy.RoundRecord(
             timeMs = now,
-            targetPids = currentPids.keys.toSet(),
-            targetStarts = currentPids.toMap(),
+            targetPids = executedPids.keys.toSet(),
+            targetStarts = executedPids.toMap(),
         )
+        // destructiveRounds 语义固定为“破坏性尝试次数”：forceStop 返回空列表
+        // （未找到已安装的 MediaProvider 包）同样计入，因为已发起破坏性动作。
         destructiveRounds++
         persistLedger()
         scheduleMediaProviderWake()
