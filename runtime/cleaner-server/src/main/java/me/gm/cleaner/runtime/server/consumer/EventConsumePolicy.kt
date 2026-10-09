@@ -50,7 +50,7 @@ object EventConsumePolicy {
         while (cur != null && depth < 5) {
             val type = cur.javaClass.name.lowercase()
             if (type.contains("deadobject") ||
-                type.contains("remoteeexception") ||
+                type.contains("remoteexception") ||
                 type.contains("transactionfailed") ||
                 type.contains("sqlexception") ||
                 type.contains("sqlite") ||

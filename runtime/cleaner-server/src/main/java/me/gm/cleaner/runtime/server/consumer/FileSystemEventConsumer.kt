@@ -76,6 +76,8 @@ object FileSystemEventConsumer {
                 val event = try {
                     JSONObject(eventJson)
                 } catch (e: JSONException) {
+                    // 隔离或游标提交失败时必须中止本轮：游标仍在事件前，
+                    // 若继续消费后续事件会把游标推过这个未确认的坏事件。
                     if (!quarantineAndAdvance(
                             eventFile, eventJson,
                             reason = "json-parse-failed: ${e.message}",
@@ -83,6 +85,7 @@ object FileSystemEventConsumer {
                         )
                     ) {
                         failed = true
+                        break
                     }
                     continue
                 }

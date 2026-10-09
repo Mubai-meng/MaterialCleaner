@@ -6,7 +6,10 @@ import android.system.Os
 import android.util.Log
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
+import me.gm.cleaner.runtime.server.orchestrator.MediaProviderHookLayerReporter
+import me.gm.cleaner.runtime.server.orchestrator.NativeHookLayerReporter
 import me.gm.cleaner.runtime.server.orchestrator.ServerErrorJournal
+import me.gm.cleaner.runtime.server.vfs.VfsProcessCensus
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -199,9 +202,9 @@ object DiagnosticArchive {
         if (vfs == null || mp == null || fuse == null) return
         // FUSE epoch 收敛 vs 过期：必须与 NativeHookLayerReporter 同一判定口径，
         // 不得只凭 epoch 一致就宣称同步（generation 落后或上次应用失败同样未同步）。
-        val appliedEpoch = fuse.optString("appliedPublisherEpoch", "")
-        val snapshotEpoch = fuse.optString("snapshotPublisherEpoch", "")
-        val policySynced = fuse.optBoolean("nativePolicySynced", false)
+        val appliedEpoch = fuse.optString(NativeHookLayerReporter.KEY_APPLIED_EPOCH, "")
+        val snapshotEpoch = fuse.optString(NativeHookLayerReporter.KEY_SNAPSHOT_EPOCH, "")
+        val policySynced = fuse.optBoolean(NativeHookLayerReporter.KEY_POLICY_SYNCED, false)
         if (appliedEpoch.isNotBlank() && snapshotEpoch.isNotBlank()) {
             val epochConsistent = appliedEpoch == snapshotEpoch
             val verdict = when {
@@ -212,20 +215,20 @@ object DiagnosticArchive {
             appendLine("- FUSE sync: $verdict (epoch=$appliedEpoch)")
         }
         // 恢复熔断
-        val wakeOnly = mp.optBoolean("wakeOnlyMode", false)
-        val rounds = mp.optInt("destructiveRounds", 0)
+        val wakeOnly = mp.optBoolean(MediaProviderHookLayerReporter.KEY_WAKE_ONLY_MODE, false)
+        val rounds = mp.optInt(MediaProviderHookLayerReporter.KEY_DESTRUCTIVE_ROUNDS, 0)
         if (wakeOnly || rounds > 0) {
             appendLine("- MediaProvider recovery: wakeOnly=$wakeOnly, destructiveRounds=$rounds/3")
         }
         // VFS 分母
-        val unmanaged = vfs.optInt("vfsUnmanagedPids", -1)
-        val managed = vfs.optInt("vfsManagedPids", -1)
+        val unmanaged = vfs.optInt(VfsProcessCensus.KEY_UNMANAGED, -1)
+        val managed = vfs.optInt(VfsProcessCensus.KEY_MANAGED, -1)
         if (unmanaged >= 0 && managed >= 0) {
             appendLine("- VFS pids: managed=$managed, unmanaged=$unmanaged")
         }
         // srStatus 截断
-        val truncated = vfs.optBoolean("srStatusTruncated", false)
-        val total = vfs.optInt("srStatusTotal", -1)
+        val truncated = vfs.optBoolean(VfsProcessCensus.KEY_SR_TRUNCATED, false)
+        val total = vfs.optInt(VfsProcessCensus.KEY_SR_TOTAL, -1)
         if (total >= 0) {
             appendLine("- srStatus: total=$total, truncated=$truncated")
         }
@@ -238,9 +241,9 @@ object DiagnosticArchive {
         if (vfs == null || mp == null || fuse == null) return
         // FUSE epoch 收敛 vs 过期：必须与 NativeHookLayerReporter 同一判定口径，
         // 不得只凭 epoch 一致就宣称同步（generation 落后或上次应用失败同样未同步）。
-        val appliedEpoch = fuse.optString("appliedPublisherEpoch", "")
-        val snapshotEpoch = fuse.optString("snapshotPublisherEpoch", "")
-        val policySynced = fuse.optBoolean("nativePolicySynced", false)
+        val appliedEpoch = fuse.optString(NativeHookLayerReporter.KEY_APPLIED_EPOCH, "")
+        val snapshotEpoch = fuse.optString(NativeHookLayerReporter.KEY_SNAPSHOT_EPOCH, "")
+        val policySynced = fuse.optBoolean(NativeHookLayerReporter.KEY_POLICY_SYNCED, false)
         if (appliedEpoch.isNotBlank() && snapshotEpoch.isNotBlank()) {
             val epochConsistent = appliedEpoch == snapshotEpoch
             val verdict = when {
@@ -251,20 +254,20 @@ object DiagnosticArchive {
             appendLine("- FUSE 同步：$verdict（代次=$appliedEpoch）")
         }
         // 恢复熔断
-        val wakeOnly = mp.optBoolean("wakeOnlyMode", false)
-        val rounds = mp.optInt("destructiveRounds", 0)
+        val wakeOnly = mp.optBoolean(MediaProviderHookLayerReporter.KEY_WAKE_ONLY_MODE, false)
+        val rounds = mp.optInt(MediaProviderHookLayerReporter.KEY_DESTRUCTIVE_ROUNDS, 0)
         if (wakeOnly || rounds > 0) {
             appendLine("- MediaProvider 恢复：仅唤醒=$wakeOnly，破坏性轮次=$rounds/3")
         }
         // VFS 分母
-        val unmanaged = vfs.optInt("vfsUnmanagedPids", -1)
-        val managed = vfs.optInt("vfsManagedPids", -1)
+        val unmanaged = vfs.optInt(VfsProcessCensus.KEY_UNMANAGED, -1)
+        val managed = vfs.optInt(VfsProcessCensus.KEY_MANAGED, -1)
         if (unmanaged >= 0 && managed >= 0) {
             appendLine("- VFS 进程：已管理=$managed，未接管=$unmanaged")
         }
         // srStatus 截断
-        val truncated = vfs.optBoolean("srStatusTruncated", false)
-        val total = vfs.optInt("srStatusTotal", -1)
+        val truncated = vfs.optBoolean(VfsProcessCensus.KEY_SR_TRUNCATED, false)
+        val total = vfs.optInt(VfsProcessCensus.KEY_SR_TOTAL, -1)
         if (total >= 0) {
             appendLine("- srStatus：总数=$total，已截断=$truncated")
         }

@@ -67,8 +67,24 @@ class EventConsumePolicyTest {
         ))
     }
 
+    @Test
+    fun `RemoteException按类型名识别`() {
+        // 旧实现把类型串拼成 remoteeexception，真实 android.os.RemoteException
+        // （小写 remoteexception）永不命中类型分支，只能靠消息碰巧含关键词。
+        // stub jar 构造器抛 Stub!，故用真实类名断言 + 存根类走完整判定路径。
+        assertTrue(
+            android.os.RemoteException::class.java.name.lowercase().contains("remoteexception")
+        )
+        assertTrue(EventConsumePolicy.isInfrastructureFault(
+            RuntimeException("opaque without any keyword", RemoteExceptionStub())
+        ))
+    }
+
     /** 模拟 android.os.DeadObjectException 的类名（纯 JVM 不可直接引用 Android 类型） */
     private class DeadObjectExceptionStub : RuntimeException("opaque")
+
+    /** 类名含 remoteexception，用于固定类型名匹配不变量 */
+    private class RemoteExceptionStub : RuntimeException("opaque")
 
     @Test
     fun `业务异常非基础设施故障`() {

@@ -12,6 +12,11 @@ object NativeHookLayerReporter {
     /** Native 追赶新发布代次的收敛窗口：有新鲜应用动作时判收敛中，而非过期。 */
     private const val NATIVE_SYNC_PROGRESS_MS = 60_000L
 
+    // ── 指标键契约（DiagnosticArchive 等消费方必须引用此处，不得另写字面量） ──
+    const val KEY_SNAPSHOT_EPOCH = "snapshotPublisherEpoch"
+    const val KEY_APPLIED_EPOCH = "nativeAppliedPublisherEpoch"
+    const val KEY_POLICY_SYNCED = "nativePolicySynced"
+
     fun collect(
         generation: Long,
         now: Long,
@@ -47,12 +52,13 @@ object NativeHookLayerReporter {
                 nativeStatus.appliedPublisherEpoch == snapshotEpoch
         val policySynced = nativeStatus.lastApplySuccess && epochConsistent &&
                 (snapshotGen <= 0L || nativeGen >= snapshotGen)
-        // 收敛中判定：仅在“最近一次应用成功且新鲜”时成立。
-        // 从未应用（lastApplyAt<=0）或上次失败不得视为正在推进，
-        // 否则会无限 RECOVERING；无证据时宁可 STALE 也要有确定出口。
-        val applyInProgress = nativeStatus.lastApplyAt > 0L &&
-                nativeStatus.lastApplySuccess &&
-                now - nativeStatus.lastApplyAt < NATIVE_SYNC_PROGRESS_MS
+        // 收敛中判定：需要"针对当前配置的应用尝试正在进行"的证据。
+        // 不能用 lastApplyAt（上一次应用**完成**时间）：epoch 变更后它反映的是
+        // 旧 epoch 的活动，会把尚未启动的新 epoch 同步误判为正在收敛。
+        // lastApplyAttemptAt 由每次 attempt 入口更新，能证明同步机制正在处理当前配置，
+        // 无论该次尝试最终成功或失败。无新鲜尝试则无进展证据 → STALE 有确定出口。
+        val applyInProgress = nativeStatus.lastApplyAttemptAt > 0L &&
+                now - nativeStatus.lastApplyAttemptAt < NATIVE_SYNC_PROGRESS_MS
         val platformNativeHookMode = readPlatformSupportedNativeHookMode()
         val nativeHookModeMismatch = isHookModeMismatch(platformNativeHookMode, nativeStatus.hookMode)
         val nativeState = when {
@@ -102,10 +108,9 @@ object NativeHookLayerReporter {
                 "nativeMissingSymbols" to nativeStatus.missingSymbols,
                 "configuredMountPointsGeneration" to nativeGen.toString(),
                 "snapshotConfiguredMountPointsGeneration" to snapshotGen.toString(),
-                "snapshotPublisherEpoch" to snapshotEpoch,
-                "nativeAppliedPublisherEpoch" to nativeStatus.appliedPublisherEpoch,
-                "nativePolicySynced" to policySynced.toString(),
-                "nativePolicyApplicationState" to nativeStatus.applicationState,
+                KEY_SNAPSHOT_EPOCH to snapshotEpoch,
+                KEY_APPLIED_EPOCH to nativeStatus.appliedPublisherEpoch,
+                KEY_POLICY_SYNCED to policySynced.toString(),                "nativePolicyApplicationState" to nativeStatus.applicationState,
                 "nativeRedirectPolicyState" to nativeStatus.redirectPolicyState,
                 "nativeReadOnlyPolicyState" to nativeStatus.readOnlyPolicyState,
                 "nativeAppliedRedirectRevision" to nativeStatus.appliedRedirectRevision,
@@ -218,6 +223,7 @@ object NativeHookLayerReporter {
                 appliedPublisherEpoch = policy?.optString("appliedPublisherEpoch", "") ?: "",
                 lastApplySuccess = policy?.optBoolean("lastApplySuccess", false) ?: false,
                 lastApplyAt = policy?.optLong("lastApplyAt", 0L) ?: 0L,
+                lastApplyAttemptAt = policy?.optLong("lastAttemptAt", 0L) ?: 0L,
                 lastApplyGeneration = policy?.optLong("lastApplyGeneration", 0L) ?: 0L,
                 lastApplyCount = policy?.optInt("lastApplyCount", 0) ?: 0,
                 lastApplyError = policy?.optString("lastApplyError", "") ?: "",
@@ -294,6 +300,7 @@ object NativeHookLayerReporter {
         val appliedPublisherEpoch: String = "",
         val lastApplySuccess: Boolean = false,
         val lastApplyAt: Long = 0L,
+        val lastApplyAttemptAt: Long = 0L,
         val lastApplyGeneration: Long = 0L,
         val lastApplyCount: Int = 0,
         val lastApplyError: String = "",

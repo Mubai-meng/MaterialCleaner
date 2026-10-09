@@ -34,10 +34,19 @@ data class VfsProcessCensus(
     val detailTotal: Int,
     val truncated: Boolean,
 ) {
+    // ── 指标键契约（DiagnosticArchive 等消费方必须引用此处，不得另写字面量） ──
+    companion object {
+        const val KEY_OBSERVED = "vfsObservedPids"
+        const val KEY_MANAGED = "vfsManagedPids"
+        const val KEY_UNMANAGED = "vfsUnmanagedPids"
+        const val KEY_SR_TOTAL = "srStatusTotal"
+        const val KEY_SR_TRUNCATED = "srStatusTruncated"
+    }
+
     fun toMetrics(): Map<String, String> = mapOf(
-        "vfsObservedPids" to observedPids.toString(),
-        "vfsManagedPids" to managedPids.toString(),
-        "vfsUnmanagedPids" to unmanagedPids.toString(),
+        KEY_OBSERVED to observedPids.toString(),
+        KEY_MANAGED to managedPids.toString(),
+        KEY_UNMANAGED to unmanagedPids.toString(),
         "vfsMountedPids" to mountedPids.toString(),
         "vfsPartialPids" to partialPids.toString(),
         "vfsNotMountedPids" to notMountedPids.toString(),
@@ -47,8 +56,8 @@ data class VfsProcessCensus(
         "vfsCensusAt" to sampledAt.toString(),
         "srStatus" to detail,
         "srStatusShown" to detailShown.toString(),
-        "srStatusTotal" to detailTotal.toString(),
-        "srStatusTruncated" to truncated.toString(),
+        KEY_SR_TOTAL to detailTotal.toString(),
+        KEY_SR_TRUNCATED to truncated.toString(),
     )
 }
 
@@ -60,8 +69,7 @@ data class CensusEntry(
 )
 
 object VfsProcessCensusBuilder {
-    /** 异常优先 rank，越小越优先保留。 */
-    private fun abnormalRank(flag: Int): Int = when {
+    /** 异常优先 rank，越小越优先保留。 */    private fun abnormalRank(flag: Int): Int = when {
         flag and PackageStatus.PID_FLAG_UNKNOWN != 0 -> 0
         flag and PackageStatus.PID_FLAG_PARTIALLY_MOUNTED != 0 -> 1
         flag and PackageStatus.PID_FLAG_MOUNT_FAILED != 0 -> 2
