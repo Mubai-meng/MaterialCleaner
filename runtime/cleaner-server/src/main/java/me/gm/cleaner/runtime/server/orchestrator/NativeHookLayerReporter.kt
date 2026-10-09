@@ -59,23 +59,14 @@ object NativeHookLayerReporter {
         val policySynced = syncVerdict == NativeSyncPolicy.Verdict.SYNCED
         val platformNativeHookMode = readPlatformSupportedNativeHookMode()
         val nativeHookModeMismatch = isHookModeMismatch(platformNativeHookMode, nativeStatus.hookMode)
-        val nativeState = when {
-            !nativeStatusAvailable -> LayerState.UNAVAILABLE
-            nativeStatus.inlineState == "DISABLED" -> LayerState.DISABLED
-            nativeStatus.inlineState == "FUSE_WAITING" ||
-                    nativeStatus.inlineState == "INLINE_LOADED" -> LayerState.RECOVERING
-            // 未同步时按裁决细分：有当前身份的进展证据才报恢复中，
-            // 平台明确不支持与无证据（含旧 epoch attempt、时钟异常）一律过期。
-            syncVerdict == NativeSyncPolicy.Verdict.UNSUPPORTED -> LayerState.DEGRADED
-            syncVerdict == NativeSyncPolicy.Verdict.CONVERGING -> LayerState.RECOVERING
-            !policySynced -> LayerState.STALE
-            nativeStatus.inlineState == "HOOK_READY_FULL" -> LayerState.HEALTHY
-            nativeStatus.inlineState == "HOOK_READY_CORE" -> LayerState.HEALTHY
-            nativeStatus.inlineState == "HOOK_DEGRADED" -> LayerState.DEGRADED
-            nativeStatus.coreAvailable -> LayerState.DEGRADED
-            nativeStatus.fuseLibraryLoaded -> LayerState.UNAVAILABLE
-            else -> LayerState.UNAVAILABLE
-        }
+        val nativeState = NativeHookStateMapper.map(
+            available = nativeStatusAvailable,
+            coreAvailable = nativeStatus.coreAvailable,
+            inlineState = nativeStatus.inlineState,
+            syncVerdict = syncVerdict,
+            policySynced = policySynced,
+            fuseLibraryLoaded = nativeStatus.fuseLibraryLoaded,
+        )
         val nativeError = when {
             nativeState == LayerState.HEALTHY -> null
             nativeStatus.lastApplyError.isNotBlank() -> nativeStatus.lastApplyError
