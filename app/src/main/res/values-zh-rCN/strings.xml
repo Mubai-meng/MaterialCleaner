@@ -248,6 +248,7 @@
     <string name="storage_redirect_status_not_mounted_unknown">无法检查挂载状态</string>
     <string name="storage_redirect_status_not_mounted_mount_failed">挂载失败</string>
     <string name="storage_redirect_status_not_mounted_remount">重新挂载</string>
+    <string name="storage_redirect_status_not_mounted_unmanaged">不在挂载管理范围内</string>
     <string name="storage_redirect_status_summary_troubleshoot_mount_exception">您可以参考 GitHub wiki 上的说明来排查这些挂载异常问题</string>
     <string name="storage_redirect_confirm_media">您不应对此应用使用存储重定向。如果您一定要尝试，请确认已做好救砖准备。对于媒体存储的管理，您可以考虑使用我们开发的 Xposed 模块，它是开源免费的。</string>
     <string name="storage_redirect_warn_system">此应用是系统应用，错误的挂载规则会造成严重问题</string>

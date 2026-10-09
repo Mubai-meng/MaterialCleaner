@@ -9,6 +9,10 @@ import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.model.PackageStatus
 import me.gm.cleaner.runtime.server.process.BaseProcessObserver
 import me.gm.cleaner.runtime.server.process.PackageInfoMapper
+import me.gm.cleaner.runtime.server.vfs.CensusEntry
+import me.gm.cleaner.runtime.server.vfs.PidMountClassifier
+import me.gm.cleaner.runtime.server.vfs.VfsProcessCensus
+import me.gm.cleaner.runtime.server.vfs.VfsProcessCensusBuilder
 import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
 import me.gm.cleaner.runtime.server.storage.StorageEventListenerDelegate
 import me.gm.cleaner.runtime.server.orchestrator.LayerId
@@ -24,6 +28,17 @@ import java.util.TreeMap
  * 让 VFS 层细节集中在单一边界内。
  */
 class VfsLayerController {
+
+    private companion object {
+        /** 普查节流：collectReport 每 2s 心跳复用缓存，避免诊断成为负载源。 */
+        private const val CENSUS_THROTTLE_MS = 30_000L
+    }
+
+    @Volatile
+    private var lastCensusAt: Long = 0L
+
+    @Volatile
+    private var cachedCensus: VfsProcessCensus? = null
 
     fun isFuseBpfEnabled(): Boolean {
         val observer = ObserverManager.getObserver(BaseProcessObserver::class.java)
@@ -117,8 +132,38 @@ class VfsLayerController {
     }
 
     fun getSrPackagesStatus(flags: Int): Map<String, PackageStatus> {
+        return enumerateSrProcesses(flags).statuses.mapValues { (_, value) -> value.toPackageStatus() }
+    }
+
+    /**
+     * P1-C 普查（节流 30s）：与 [collectReport] 复用同一次采样，产出分母与
+     * 有界 srStatus 明细。诊断投影，不驱动接管行为；失败只降诊断能力。
+     */
+    fun collectCensus(now: Long): VfsProcessCensus {
+        cachedCensus?.let {
+            if (now >= lastCensusAt && now - lastCensusAt < CENSUS_THROTTLE_MS) return it
+        }
+        val enumeration = enumerateSrProcesses(PackageStatus.GET_FROM_ALL_PROCESS)
+        val census = VfsProcessCensusBuilder.build(
+            sampledAt = now,
+            entries = enumeration.entries,
+            unattributedPids = enumeration.unattributedPids,
+        )
+        lastCensusAt = now
+        cachedCensus = census
+        return census
+    }
+
+    private data class SrEnumeration(
+        val statuses: TreeMap<String, MutablePackageStatus>,
+        val entries: List<CensusEntry>,
+        val unattributedPids: Int,
+    )
+
+    private fun enumerateSrProcesses(flags: Int): SrEnumeration {
+        val empty = SrEnumeration(TreeMap(), emptyList(), 0)
         val observer = ObserverManager.getObserver(BaseProcessObserver::class.java)
-            ?: return emptyMap()
+            ?: return empty
         val startUpAwarePids = observer.getAllStartUpAwarePids()
         val mountFailedPids = observer.getMountFailedPids()
         val mountedPackages = observer.getMountedPackages()
@@ -127,6 +172,8 @@ class VfsLayerController {
         // 映射就绪用 uid 权威归属，未就绪保守回退 pkgList，绝不直接返回空。
         val uidMappingReady = PackageInfoMapper.isMappingReady()
         val statuses = TreeMap<String, MutablePackageStatus>()
+        val entries = mutableListOf<CensusEntry>()
+        var unattributed = 0
 
         processes
             .asSequence()
@@ -134,22 +181,28 @@ class VfsLayerController {
             .sortedBy { it.pid }
             .forEach { procInfo ->
                 val packageName =
-                    resolveSrPackageName(procInfo, srPackages, uidMappingReady) ?: return@forEach
+                    resolveSrPackageName(procInfo, srPackages, uidMappingReady)
+                if (packageName == null) {
+                    unattributed++
+                    return@forEach
+                }
                 val userId = procInfo.uid.toUserId()
-                val status = statuses.getOrPut(packageName) { MutablePackageStatus() }
-                status.pids.add(procInfo.pid)
-                status.pidFlags.add(buildPidFlag(
+                val flag = buildPidFlag(
                     procInfo.pid,
                     packageName,
                     userId,
                     startUpAwarePids,
                     mountFailedPids,
                     mountedPackages.contains(packageName),
-                ))
+                )
+                val status = statuses.getOrPut(packageName) { MutablePackageStatus() }
+                status.pids.add(procInfo.pid)
+                status.pidFlags.add(flag)
                 status.userIds.add(userId)
+                entries.add(CensusEntry(packageName, procInfo.pid, procInfo.uid, flag))
             }
 
-        return statuses.mapValues { (_, value) -> value.toPackageStatus() }
+        return SrEnumeration(statuses, entries, unattributed)
     }
 
     fun collectReport(generation: Long, now: Long): LayerReport {
@@ -163,6 +216,8 @@ class VfsLayerController {
             val mountGateRefusals = observer.getGateRefusalCount()
             val lastFailure = observer.getLastMountFailure()
             val lastMountErrorCode = observer.getLastMountErrorCode()
+            // 同一次普查采样复用：分母与 srStatus 明细同源，诊断失败不改行为。
+            val census = runCatching { collectCensus(now) }.getOrNull()
             val state = if (mountFailedPids > 0) {
                 LayerState.DEGRADED
             } else {
@@ -208,7 +263,7 @@ class VfsLayerController {
                             (lastFailure?.forceStopAttempted ?: false).toString(),
                     "lastMountForceStopSucceeded" to
                             (lastFailure?.forceStopSucceeded ?: false).toString(),
-                ),
+                ) + (census?.toMetrics() ?: emptyMap()),
             )
         } else {
             LayerReport(
@@ -288,19 +343,14 @@ class VfsLayerController {
         mkdir: Boolean,
     ): Int {
         val targets = VfsRuntimePolicy.getMountTargets(packageName, userId)
-        val mountedIndices = RuntimeFileUtils.check_mounts(pid, targets.toTypedArray())
-        var pidFlag = 0
-        if (mountedIndices == null) {
-            pidFlag = pidFlag or PackageStatus.PID_FLAG_UNKNOWN
-        } else if (mountedIndices.any { it < 0 }) {
-            if (mountedIndices.contains(-1)) {
-                pidFlag = pidFlag or PackageStatus.PID_FLAG_DELETED
-            }
-            if (mountedIndices.contains(-2)) {
-                pidFlag = pidFlag or PackageStatus.PID_FLAG_OVERRIDE
-            }
-        } else if (targets.size == mountedIndices.size) {
-            pidFlag = pidFlag or PackageStatus.PID_FLAG_MOUNTED
+        var pidFlag = if (targets.isEmpty()) {
+            // 该 (package,user) 无挂载目标：已观测但不在管理范围，不进 managed 分母。
+            PackageStatus.PID_FLAG_UNMANAGED
+        } else {
+            PidMountClassifier.classify(
+                targets.size,
+                RuntimeFileUtils.check_mounts(pid, targets.toTypedArray()),
+            )
         }
         if (startUpAwarePids.contains(pid)) {
             pidFlag = pidFlag or PackageStatus.PID_FLAG_STARTUP_AWARE
@@ -310,6 +360,30 @@ class VfsLayerController {
         }
         if (!mkdir) {
             pidFlag = pidFlag or PackageStatus.PID_FLAG_MKDIR_FAILED
+        }
+        return normalizePidFlag(pidFlag, pid)
+    }
+
+    /**
+     * 终态维度互斥校验（P1-A）：非法组合运行时退化为 UNKNOWN + 诊断日志
+     * （测试中强断言）。判定规则归 [PidMountClassifier]。
+     */
+    private fun normalizePidFlag(pidFlag: Int, pid: Int): Int {
+        if (!PidMountClassifier.isLegalCombination(pidFlag)) {
+            android.util.Log.w(
+                "VfsLayerController",
+                "Illegal pidFlag combination $pidFlag for pid=$pid, degrading to UNKNOWN",
+            )
+            val stateBits = pidFlag and (
+                PackageStatus.PID_FLAG_MOUNTED or
+                    PackageStatus.PID_FLAG_PARTIALLY_MOUNTED or
+                    PackageStatus.PID_FLAG_NOT_MOUNTED or
+                    PackageStatus.PID_FLAG_UNMANAGED or
+                    PackageStatus.PID_FLAG_UNKNOWN or
+                    PackageStatus.PID_FLAG_DELETED or
+                    PackageStatus.PID_FLAG_OVERRIDE
+                )
+            return (pidFlag and stateBits.inv()) or PackageStatus.PID_FLAG_UNKNOWN
         }
         return pidFlag
     }

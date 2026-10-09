@@ -97,16 +97,35 @@ class AppListLoader(
         packageStatus ?: return AppListModel.STATE_UNMOUNTED
         val mountedPids = mutableListOf<Int>()
         val unknownPids = mutableListOf<Int>()
+        var managedCount = 0
         packageStatus.pidFlags.forEachIndexed { index, pidFlag ->
+            // UNMANAGED 不进分母；其余终态互斥，MOUNT_FAILED 等为正交证据不影响分类。
+            if (pidFlag and PackageStatus.PID_FLAG_UNMANAGED != 0) return@forEachIndexed
+            managedCount++
             if (pidFlag and PackageStatus.PID_FLAG_MOUNTED != 0) {
                 mountedPids += packageStatus.pids[index]
-            }
-            if (pidFlag and PackageStatus.PID_FLAG_UNKNOWN != 0) {
+            } else if (pidFlag and PackageStatus.PID_FLAG_UNKNOWN != 0) {
+                unknownPids += packageStatus.pids[index]
+            } else if (pidFlag and (
+                    PackageStatus.PID_FLAG_PARTIALLY_MOUNTED or
+                        PackageStatus.PID_FLAG_NOT_MOUNTED or
+                        PackageStatus.PID_FLAG_DELETED or
+                        PackageStatus.PID_FLAG_OVERRIDE
+                    ) == 0
+            ) {
+                // 无终态位（含旧版本 0 盲区）：证据不足，按 UNKNOWN 处理，不判未挂载。
                 unknownPids += packageStatus.pids[index]
             }
         }
-        return if (packageStatus.pids.isNotEmpty()
-            && packageStatus.pids.size == mountedPids.size) {
+        if (managedCount == 0) {
+            // 空列表保持旧语义 UNMOUNTED；存在进程但全部 UNMANAGED 则无法验证，判 UNKNOWN。
+            return if (packageStatus.pids.isNotEmpty()) {
+                AppListModel.STATE_UNKNOWN
+            } else {
+                AppListModel.STATE_UNMOUNTED
+            }
+        }
+        return if (managedCount == mountedPids.size) {
             AppListModel.STATE_MOUNTED
         } else if (unknownPids.isNotEmpty()) {
             AppListModel.STATE_UNKNOWN
