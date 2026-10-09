@@ -200,8 +200,8 @@ static bool is_storage_path(const char *path) {
     if (path == nullptr) {
         return false;
     }
-    const char *storage = "/storage/"_iobfs.c_str();
-    if (strncmp(path, storage, strlen(storage)) != 0) {
+    const std::string storage = "/storage/"_iobfs.c_str();
+    if (strncmp(path, storage.c_str(), storage.size()) != 0) {
         return false;
     }
     for (const char *p = path; *p != '\0'; ++p) {
