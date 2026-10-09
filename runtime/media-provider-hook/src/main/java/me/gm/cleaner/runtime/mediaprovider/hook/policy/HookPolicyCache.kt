@@ -490,7 +490,7 @@ object HookPolicyCache {
                 Log.i(TAG, "loadConfiguredMountPoints: empty points, clearing native mountPoint, generation=$generation")
                 // 空数组必须显式推送到 native，用于清除残留 mountPoint。
                 val revision = root.optString("redirectRevision", "")
-                FuseNativePolicyAdapter.applyConfiguredMountPoints(emptyArray(), generation, revision)
+                FuseNativePolicyAdapter.applyConfiguredMountPoints(emptyArray(), generation, revision, publisherEpoch)
                 mountPoints = MountPointsHolder(
                     generation = generation,
                     publisherEpoch = publisherEpoch,
@@ -502,7 +502,7 @@ object HookPolicyCache {
 
             val points = Array(pointsArr.length()) { pointsArr.getString(it) }
             val revision = root.optString("redirectRevision", "")
-            FuseNativePolicyAdapter.applyConfiguredMountPoints(points, generation, revision)
+            FuseNativePolicyAdapter.applyConfiguredMountPoints(points, generation, revision, publisherEpoch)
             mountPoints = MountPointsHolder(
                 generation = generation,
                 publisherEpoch = publisherEpoch,

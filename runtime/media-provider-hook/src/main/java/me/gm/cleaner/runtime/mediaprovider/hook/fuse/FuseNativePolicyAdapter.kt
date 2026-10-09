@@ -40,6 +40,7 @@ object FuseNativePolicyAdapter {
         points: Array<String>,
         generation: Long,
         redirectRevision: String,
+        publisherEpoch: String = "",
     ) {
         NativeHookStatus.markMountPointsApplyStarted(redirectRevision)
         var unsupported = false
@@ -73,6 +74,7 @@ object FuseNativePolicyAdapter {
                 generation,
                 points.size,
                 redirectRevision,
+                publisherEpoch,
             )
             Log.i(TAG, "applyConfiguredMountPoints: count=${points.size}, generation=$generation")
         } catch (t: Throwable) {

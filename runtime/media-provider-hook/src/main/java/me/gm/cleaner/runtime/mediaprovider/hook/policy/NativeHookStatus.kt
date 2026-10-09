@@ -83,6 +83,8 @@ object NativeHookStatus {
     @Volatile
     private var mountPointsGeneration = 0L
     @Volatile
+    private var mountPointsAppliedEpoch = ""
+    @Volatile
     private var lastMountPointsApplyAt = 0L
     @Volatile
     private var lastMountPointsApplyGeneration = 0L
@@ -325,9 +327,13 @@ object NativeHookStatus {
         generation: Long,
         count: Int,
         redirectRevision: String,
+        publisherEpoch: String,
     ) {
         lastMountPointsApplySuccess = true
         mountPointsGeneration = generation
+        // 已应用代次确认：仅成功路径更新；失败/不支持路径绝不碰它，
+        // 否则会把尚未成功应用的配置误判为正常。
+        mountPointsAppliedEpoch = publisherEpoch
         lastMountPointsApplyAt = System.currentTimeMillis()
         lastMountPointsApplyGeneration = generation
         lastMountPointsApplyCount = count
@@ -648,6 +654,7 @@ object NativeHookStatus {
             put("native", nativeStatus.toJson())
             put("policy", JSONObject().apply {
                 put("mountPointsGeneration", mountPointsGeneration)
+                put("appliedPublisherEpoch", mountPointsAppliedEpoch)
                 put("lastApplySuccess", lastMountPointsApplySuccess)
                 put("appliedToExecutor", lastMountPointsApplySuccess)
                 put("applicationState", mountPointsState)

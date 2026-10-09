@@ -20,6 +20,9 @@ object MediaProviderHookGateway {
     /** configured_mount_points snapshot generation 缓存（避免每 2s 健康检查读 DataBus） */
     @Volatile
     private var cachedMountPointsGeneration: Long = 0L
+    /** configured_mount_points snapshot publisherEpoch 缓存（与 generation 同批更新） */
+    @Volatile
+    private var cachedMountPointsEpoch: String = ""
     /** 上次读取 DataBus snapshot 时的 signal 时间戳（跳过未变更的信号） */
     @Volatile
     private var lastMountSignalTimestamp: Long = 0L
@@ -114,18 +117,34 @@ object MediaProviderHookGateway {
      * 此方法每 2s 被健康检查调用一次，缓存将 DataBus 读从每轮减少到仅在发布时。
      */
     fun configuredMountPointsSnapshotGeneration(): Long {
+        return readSnapshotIdentity().first
+    }
+
+    /**
+     * 获取 configured_mount_points snapshot publisherEpoch。
+     * 与 generation 同一批 signal 缓存，避免每 2s 健康检查重复读 DataBus。
+     */
+    fun configuredMountPointsSnapshotEpoch(): String {
+        return readSnapshotIdentity().second
+    }
+
+    private fun readSnapshotIdentity(): Pair<Long, String> {
         val signalTime = DataBus.getSignalTimestamp(DataBusProtocol.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
         if (signalTime <= lastMountSignalTimestamp && lastMountSignalTimestamp > 0) {
-            return cachedMountPointsGeneration
+            return cachedMountPointsGeneration to cachedMountPointsEpoch
         }
         // 信号变更，重新读取 DataBus
-        val gen = DataBus.readSnapshot(DataBusProtocol.SNAPSHOT_CONFIGURED_MOUNT_POINTS)
+        val (gen, epoch) = DataBus.readSnapshot(DataBusProtocol.SNAPSHOT_CONFIGURED_MOUNT_POINTS)
             ?.let { json ->
-                runCatching { JSONObject(json).optLong("generation", 0L) }.getOrDefault(0L)
-            } ?: 0L
+                runCatching {
+                    val root = JSONObject(json)
+                    root.optLong("generation", 0L) to root.optString("publisherEpoch", "")
+                }.getOrDefault(0L to "")
+            } ?: (0L to "")
         cachedMountPointsGeneration = gen
+        cachedMountPointsEpoch = epoch
         lastMountSignalTimestamp = signalTime
-        return gen
+        return gen to epoch
     }
 
     /**
