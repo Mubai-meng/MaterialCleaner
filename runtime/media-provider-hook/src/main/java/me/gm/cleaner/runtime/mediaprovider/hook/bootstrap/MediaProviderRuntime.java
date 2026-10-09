@@ -106,15 +106,26 @@ public final class MediaProviderRuntime {
                     attempts[0]++;
                     Log.i("MC_REDIRECT", "[XposedInit] Re-registering hooks callback...");
                 }
-                if (registerHooksCallback()) {
+                // 注册表监视与回调注册是两个独立事实：注册成功但监视失败时，
+                // 注册表再次死亡将无触发器，因此不能仅凭注册成功就 markIdle。
+                final boolean watched = HookBridgeRegistrar.watchRegistryBinder(sContext);
+                final boolean registered = registerHooksCallback();
+                if (registered && watched) {
                     Log.i("MC_REDIRECT", "[XposedInit] Re-registration call completed");
                     attempts[0] = 0;
                     retryGate.markIdle();
                     return;
                 }
-                Log.e("MC_REDIRECT", "[XposedInit] Re-registration failed (attempt " + attempts[0] + ")");
-                NativeHookStatus.INSTANCE.markBridgeFailed(
-                        "re-register attempt " + attempts[0] + " failed");
+                if (registered) {
+                    Log.w("MC_REDIRECT", "[XposedInit] Register OK but registry watch failed, " +
+                            "retrying watch (attempt " + attempts[0] + ")");
+                    NativeHookStatus.INSTANCE.markBridgeFailed(
+                            "registry watch failed after register, attempt " + attempts[0]);
+                } else {
+                    Log.e("MC_REDIRECT", "[XposedInit] Re-registration failed (attempt " + attempts[0] + ")");
+                    NativeHookStatus.INSTANCE.markBridgeFailed(
+                            "re-register attempt " + attempts[0] + " failed");
+                }
                 if (isCooldownProbe || BridgeRegistrationRetryPolicy.isBurstExhausted(attempts[0])) {
                     cooldownProbe[0] = true;
                     NativeHookStatus.INSTANCE.markBridgeRetryScheduled(attempts[0]);
