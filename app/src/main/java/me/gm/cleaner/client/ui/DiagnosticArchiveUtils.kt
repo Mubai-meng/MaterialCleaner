@@ -136,50 +136,75 @@ private fun appendClientJournalEntry(zipFile: File) {
 }
 
 private fun createFallbackArchive(target: File) {
+    // 预算覆盖全部条目：小而关键的说明/清单/状态先写，保证预算耗尽时仍可用。
+    val budget = ArchiveBudget(FALLBACK_MAX_TOTAL_BYTES)
     ZipOutputStream(FileOutputStream(target)).use { zip ->
         val status = runCatching { CleanerClient.getOrchestratedStatus() }
             .getOrNull()
-        addTextEntry(zip, "privacy.txt", fallbackPrivacyNotice())
-        addTextEntry(zip, "manifest.txt", buildFallbackManifest())
-        addTextEntry(zip, "summary_zh-CN.txt", buildFallbackSummaryZhCn(status))
+        addTextEntry(zip, "privacy.txt", fallbackPrivacyNotice(), budget)
+        addTextEntry(zip, "manifest.txt", buildFallbackManifest(), budget)
+        addTextEntry(zip, "summary_zh-CN.txt", buildFallbackSummaryZhCn(status), budget)
         addTextEntry(
             zip,
             "client/errors/journal.jsonl",
-            ClientErrorJournal.exportJsonL()
+            ClientErrorJournal.exportJsonL(),
+            budget,
         )
         addCommandEntry(
             zip,
             "logs/app_logcat_threadtime_recent.txt",
-            listOf("logcat", "-d", "-v", "threadtime", "-b", "main,system,crash", "-t", "2000")
+            listOf("logcat", "-d", "-v", "threadtime", "-b", "main,system,crash", "-t", "2000"),
+            budget,
         )
         // P0-2: fallback 时追加只读 DataBus（快照/信号/游标/隔离/重试计数/总账），不 repair 避免权限变更
         // P1-9 诊断预算：与 server 侧一致，事件类目录限 20 个，防止故障时大量
         // 毒丸/重试计数堆积把诊断导出本身变成资源压力源。
-        // P2-3 统一预算：snapshots/signals/cursors 正常内容约 10~17 个，
-        // 上限仅防病态堆积，不影响常规导出。
+        // P2 统一预算：snapshots/signals/cursors 正常内容约 10~17 个，
+        // 上限仅防病态堆积；全部条目共用同一预算，末尾输出最终归档清单。
         if (DataBus.ensureInitialized()) {
-            addTextEntry(zip, "databus/health.json",
-                healthToJson(DataBus.checkHealth(repair = false)).toString(2))
+            addTextEntry(
+                zip,
+                "databus/health.json",
+                healthToJson(DataBus.checkHealth(repair = false)).toString(2),
+                budget,
+            )
             val busRoot = File(DataBus.BUS_ROOT)
-            addDirectoryFiles(zip, File(busRoot, "snapshots"), "databus/snapshots", 100)
-            addDirectoryFiles(zip, File(busRoot, "signals"), "databus/signals", 100)
-            addDirectoryFiles(zip, File(busRoot, "cursors"), "databus/cursors", 100)
-            addDirectoryFiles(zip, File(busRoot, "events/consumed"), "databus/events/consumed", 20)
+            addDirectoryFiles(zip, File(busRoot, "snapshots"), "databus/snapshots", 100, budget)
+            addDirectoryFiles(zip, File(busRoot, "signals"), "databus/signals", 100, budget)
+            addDirectoryFiles(zip, File(busRoot, "cursors"), "databus/cursors", 100, budget)
+            addDirectoryFiles(zip, File(busRoot, "events/consumed"), "databus/events/consumed", 20, budget)
             addDirectoryFiles(zip,
                 File(busRoot, "events/" + DataBusProtocol.EVENT_FILESYSTEM + ".quarantine"),
-                "databus/events/" + DataBusProtocol.EVENT_FILESYSTEM + ".quarantine", 20)
+                "databus/events/" + DataBusProtocol.EVENT_FILESYSTEM + ".quarantine", 20, budget)
             addDirectoryFiles(zip,
                 File(busRoot, "events/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".quarantine"),
-                "databus/events/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".quarantine", 20)
+                "databus/events/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".quarantine", 20, budget)
             addDirectoryFiles(zip,
                 File(busRoot, "cursors/" + DataBusProtocol.EVENT_FILESYSTEM + ".attempts"),
-                "databus/cursors/" + DataBusProtocol.EVENT_FILESYSTEM + ".attempts", 20)
+                "databus/cursors/" + DataBusProtocol.EVENT_FILESYSTEM + ".attempts", 20, budget)
             addDirectoryFiles(zip,
                 File(busRoot, "cursors/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".attempts"),
-                "databus/cursors/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".attempts", 20)
+                "databus/cursors/" + DataBusProtocol.EVENT_REDIRECT_NOTICE + ".attempts", 20, budget)
             // recovery_state.json 在 cursors 根目录，顺带导出
         }
-        addTextEntry(zip, "status/app_visible_status.txt", status?.toString() ?: "server unavailable")
+        addTextEntry(
+            zip,
+            "status/app_visible_status.txt",
+            status?.toString() ?: "server unavailable",
+            budget,
+        )
+        // 最终归档清单：累计值与跳过/失败计数，供排障者判断证据完整性。
+        // 本清单不计入预算——最终统计信息必须保留；预算口径为数据条目内容
+        // （压缩前 UTF-8 字节），不是字面意义上所有 ZIP 条目、也不是最终文件体积。
+        addTextEntry(zip, "archive_manifest.txt", buildString {
+            appendLine("contentBudgetBytes=${budget.maxBytes()}")
+            appendLine("contentUsedBytes=${budget.usedBytes()}")
+            appendLine("skippedByBudget=${budget.skippedByBudget.get()}")
+            appendLine("readFailed=${budget.readFailed.get()}")
+            appendLine("commandOutputCapBytes=$MAX_COMMAND_OUTPUT_BYTES")
+            appendLine("note=budget covers entry content (pre-compression), " +
+                    "excluding this final manifest; per-file results live in each directory manifest")
+        })
     }
 }
 
@@ -242,15 +267,21 @@ private fun buildFallbackManifest(): String = buildString {
     appendLine("fingerprint=${Build.FINGERPRINT}")
 }
 
-private fun addCommandEntry(zip: ZipOutputStream, entryName: String, command: List<String>) {
+private fun addCommandEntry(
+    zip: ZipOutputStream,
+    entryName: String,
+    command: List<String>,
+    budget: ArchiveBudget? = null,
+) {
     val result = runCommand(command)
     addTextEntry(zip, entryName, buildString {
         appendLine("$ ${command.joinToString(" ")}")
         appendLine("exitCode=${result.exitCode}")
         appendLine("timedOut=${result.timedOut}")
+        appendLine("truncated=${result.truncated}")
         appendLine()
         append(result.output)
-    })
+    }, budget)
 }
 
 private fun runCommand(command: List<String>): CommandResult {
@@ -260,26 +291,47 @@ private fun runCommand(command: List<String>): CommandResult {
             .redirectErrorStream(true)
             .start()
         val finished = process.waitFor(10, TimeUnit.SECONDS)
-        val output = process.inputStream.bufferedReader().readText()
+        // 采集期即限长：预算检查发生在写入 ZIP 时，无法约束读取阶段的峰值内存。
+        val output = readCapped(process.inputStream, MAX_COMMAND_OUTPUT_BYTES)
         if (!finished) {
             process.destroyForcibly()
         }
         CommandResult(
             exitCode = if (finished) process.exitValue() else -1,
             timedOut = !finished,
-            output = output,
+            truncated = output.second,
+            output = output.first,
         )
     } catch (e: Exception) {
-        CommandResult(-1, timedOut = false, output = e.stackTraceToString())
+        CommandResult(-1, timedOut = false, truncated = false, output = e.stackTraceToString())
     } finally {
         process?.destroy()
     }
 }
 
-private fun addTextEntry(zip: ZipOutputStream, entryName: String, content: String) {
-    zip.putNextEntry(ZipEntry(entryName))
-    zip.write(redact(content).toByteArray(Charsets.UTF_8))
-    zip.closeEntry()
+/** 命令输出采集上限：超限截断并标记，避免诊断导出在故障时成为内存压力源。 */
+private const val MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
+
+private fun readCapped(
+    input: java.io.InputStream,
+    maxBytes: Int,
+): Pair<String, Boolean> {
+    val out = java.io.ByteArrayOutputStream()
+    val buffer = ByteArray(8 * 1024)
+    var truncated = false
+    while (true) {
+        val read = input.read(buffer)
+        if (read < 0) break
+        if (out.size() + read <= maxBytes) {
+            out.write(buffer, 0, read)
+        } else {
+            val allowed = maxBytes - out.size()
+            if (allowed > 0) out.write(buffer, 0, allowed)
+            truncated = true
+            break
+        }
+    }
+    return out.toString(Charsets.UTF_8.name()) to truncated
 }
 
 private fun redact(content: String): String {
@@ -306,6 +358,7 @@ private fun cleanupOldDiagnosticArchives(context: Context) {
 private data class CommandResult(
     val exitCode: Int,
     val timedOut: Boolean,
+    val truncated: Boolean = false,
     val output: String,
 )
 
@@ -346,33 +399,132 @@ private fun healthToJson(health: DataBusProtocol.HealthReport): org.json.JSONObj
     put("recoveryStateExists", recovery.exists())
 }
 
+/** 归档条目写入结果：三种失败/跳过语义必须分开，诊断包不得静默遗漏证据。 */
+private enum class ArchiveWriteResult {
+    INCLUDED,
+    SKIPPED_BY_BUDGET,
+    READ_FAILED,
+}
+
+/**
+ * 诊断导出资源预算：诊断工具不得在系统故障时成为资源压力源。
+ *
+ * 统计范围是写入 ZIP 的**全部**条目内容字节（压缩前），
+ * 不是最终 ZIP 体积；上限的目的在于限制内存与写入量级。
+ */
+private class ArchiveBudget(private val maxTotalBytes: Long) {
+    private val used = java.util.concurrent.atomic.AtomicLong(0L)
+    val skippedByBudget = java.util.concurrent.atomic.AtomicInteger(0)
+    val readFailed = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 为 content 预留字节；超限返回 false 并由本对象累计跳过数。 */
+    fun tryReserve(content: String): Boolean {
+        val bytes = content.toByteArray(Charsets.UTF_8).size.toLong()
+        while (true) {
+            val current = used.get()
+            if (current + bytes > maxTotalBytes) {
+                skippedByBudget.incrementAndGet()
+                return false
+            }
+            if (used.compareAndSet(current, current + bytes)) return true
+        }
+    }
+
+    fun recordReadFailure() {
+        readFailed.incrementAndGet()
+    }
+
+    fun usedBytes(): Long = used.get()
+
+    fun maxBytes(): Long = maxTotalBytes
+}
+
+/** fallback 归档内容总量预算（压缩前字节），超出部分跳过并记录。 */
+private const val FALLBACK_MAX_TOTAL_BYTES = 8L * 1024 * 1024
+
+/** 写文本条目并按预算记账；返回写入结果供调用方统计。 */
+private fun addTextEntry(
+    zip: java.util.zip.ZipOutputStream,
+    entryName: String,
+    rawContent: String,
+    budget: ArchiveBudget? = null,
+): ArchiveWriteResult {
+    val content = redact(rawContent)
+    if (budget != null && !budget.tryReserve(content)) {
+        return ArchiveWriteResult.SKIPPED_BY_BUDGET
+    }
+    zip.putNextEntry(java.util.zip.ZipEntry(entryName))
+    zip.write(content.toByteArray(Charsets.UTF_8))
+    zip.closeEntry()
+    return ArchiveWriteResult.INCLUDED
+}
+
+/** 候选文件的最终处理结果：四种遗漏/纳入原因必须可逐条核对。 */
+private enum class CandidateResult {
+    INCLUDED,
+    SKIPPED_BY_BUDGET,
+    SKIPPED_BY_FILE_LIMIT,
+    READ_FAILED,
+}
+
+/**
+ * 追加目录文件并记账。manifest 在处理完文件后生成，
+ * 逐文件记录最终结果，使“证据为何缺失”可核对。
+ */
 private fun addDirectoryFiles(
     zip: java.util.zip.ZipOutputStream,
     dir: java.io.File,
     entryPrefix: String,
     maxFiles: Int,
+    budget: ArchiveBudget? = null,
 ) {
-    val files = dir.listFiles()
+    val all = dir.listFiles()
         ?.filter { java.nio.file.Files.isRegularFile(it.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS) }
         ?.sortedByDescending { it.lastModified() }
-        ?.take(maxFiles)
         ?: emptyList()
+    val candidates = all.take(maxFiles)
+    val results = LinkedHashMap<String, CandidateResult>()
+    for (file in candidates) {
+        results[file.name] = when (
+            addFileTail(zip, file, "$entryPrefix/${file.name}", 512 * 1024, budget)
+        ) {
+            ArchiveWriteResult.INCLUDED -> CandidateResult.INCLUDED
+            ArchiveWriteResult.SKIPPED_BY_BUDGET -> CandidateResult.SKIPPED_BY_BUDGET
+            ArchiveWriteResult.READ_FAILED -> CandidateResult.READ_FAILED
+        }
+    }
+    // 因目录文件数上限未进入候选集的文件：独立账目，不与预算跳过混淆。
+    for (file in all.drop(maxFiles)) {
+        results[file.name] = CandidateResult.SKIPPED_BY_FILE_LIMIT
+    }
+    val counts = results.values.groupingBy { it }.eachCount()
     addTextEntry(zip, "$entryPrefix/manifest.txt", buildString {
         appendLine("path=${dir.path}")
         appendLine("exists=${dir.exists()}")
-        appendLine("included=${files.size}")
-        for (file in files) {
-            appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}")
+        appendLine("total=${all.size}")
+        appendLine("candidates=${candidates.size}")
+        appendLine("included=${counts[CandidateResult.INCLUDED] ?: 0}")
+        appendLine("skippedByBudget=${counts[CandidateResult.SKIPPED_BY_BUDGET] ?: 0}")
+        appendLine("skippedByFileLimit=${counts[CandidateResult.SKIPPED_BY_FILE_LIMIT] ?: 0}")
+        appendLine("readFailed=${counts[CandidateResult.READ_FAILED] ?: 0}")
+        if (budget != null) appendLine("budgetUsedBytes=${budget.usedBytes()}")
+        appendLine("results:")
+        for ((name, result) in results) {
+            appendLine("  $name\t$result")
         }
-    })
-    for (file in files) {
-        addFileTail(zip, file, "$entryPrefix/${file.name}", 512 * 1024)
-    }
+    }, budget)
 }
 
-private fun addFileTail(zip: java.util.zip.ZipOutputStream, file: java.io.File, entryName: String, maxBytes: Int) {
-    runCatching {
-        val content = buildString {
+/** 读文件尾部并写入；读失败与预算跳过分别记账，不再静默遗漏。 */
+private fun addFileTail(
+    zip: java.util.zip.ZipOutputStream,
+    file: java.io.File,
+    entryName: String,
+    maxBytes: Int,
+    budget: ArchiveBudget? = null,
+): ArchiveWriteResult {
+    val content = runCatching {
+        buildString {
             appendLine("path=${file.path}")
             appendLine("size=${file.length()}")
             appendLine("modified=${file.lastModified()}")
@@ -382,10 +534,11 @@ private fun addFileTail(zip: java.util.zip.ZipOutputStream, file: java.io.File, 
             appendLine()
             append(readFileTail(file, maxBytes))
         }
-        addTextEntry(zip, entryName, content)
-    }.onFailure {
-        addTextEntry(zip, "$entryName.error.txt", it.stackTraceToString())
+    }.getOrElse {
+        budget?.recordReadFailure()
+        return ArchiveWriteResult.READ_FAILED
     }
+    return addTextEntry(zip, entryName, content, budget)
 }
 
 private fun readFileTail(file: java.io.File, maxBytes: Int): String {
