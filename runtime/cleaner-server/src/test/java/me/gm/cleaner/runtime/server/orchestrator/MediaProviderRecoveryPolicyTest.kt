@@ -1,6 +1,8 @@
 package me.gm.cleaner.runtime.server.orchestrator
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MediaProviderRecoveryPolicyTest {
@@ -10,11 +12,15 @@ class MediaProviderRecoveryPolicyTest {
         thresholdReached: Boolean = true,
         lastRound: MediaProviderRecoveryPolicy.RoundRecord? = null,
         destructiveRounds: Int = 0,
-        currentMediaPids: Map<Int, Long> = mapOf(100 to 50L),
+        mediaScan: MediaProcessScan =
+            MediaProcessScan.Success(mapOf(100 to 50L)),
     ) = MediaProviderRecoveryPolicy.State(
         hookConnected, episodeStartMs, thresholdReached,
-        lastRound, destructiveRounds, currentMediaPids,
+        lastRound, destructiveRounds, mediaScan,
     )
+
+    private fun round(pids: Set<Int>, starts: Map<Int, Long>, timeMs: Long = 1_000L) =
+        MediaProviderRecoveryPolicy.RoundRecord(timeMs, pids, starts)
 
     @Test
     fun `已连接无需动作`() {
@@ -60,7 +66,11 @@ class MediaProviderRecoveryPolicyTest {
         assertEquals(
             MediaProviderRecoveryPolicy.Decision.PROBE_ONLY,
             MediaProviderRecoveryPolicy.decide(
-                now, state(lastRound = round, currentMediaPids = mapOf(100 to 50L)),
+                now,
+                state(
+                    lastRound = round,
+                    mediaScan = MediaProcessScan.Success(mapOf(100 to 50L)),
+                ),
             ),
         )
     }
@@ -88,9 +98,10 @@ class MediaProviderRecoveryPolicyTest {
         assertEquals(
             MediaProviderRecoveryPolicy.Decision.MAY_FORCE_STOP,
             MediaProviderRecoveryPolicy.decide(
-                now, state(
+                now,
+                state(
                     lastRound = round, destructiveRounds = 1,
-                    currentMediaPids = mapOf(100 to 99L),
+                    mediaScan = MediaProcessScan.Success(mapOf(100 to 99L)),
                 ),
             ),
         )
@@ -101,8 +112,38 @@ class MediaProviderRecoveryPolicyTest {
         val now = 500_000L
         assertEquals(
             MediaProviderRecoveryPolicy.Decision.PROBE_ONLY,
-            MediaProviderRecoveryPolicy.decide(now, state(currentMediaPids = emptyMap())),
+            MediaProviderRecoveryPolicy.decide(
+                now, state(mediaScan = MediaProcessScan.Unavailable),
+            ),
         )
+    }
+
+    @Test
+    fun `确认无活进程走只探`() {
+        // Success(empty) 是“确认没有”，不是“无法确认”：probe-only 自带 wake，
+        // 正是死进程的正确恢复路径，不应也无需进入破坏性准入。
+        val now = 500_000L
+        assertEquals(
+            MediaProviderRecoveryPolicy.Decision.PROBE_ONLY,
+            MediaProviderRecoveryPolicy.decide(
+                now, state(mediaScan = MediaProcessScan.Success(emptyMap())),
+            ),
+        )
+    }
+
+    @Test
+    fun `扫描失败与确认无进程语义不同`() {
+        // 两者都走 PROBE_ONLY，但必须是不同输入类型抵达同一结论，
+        // 而不是在中途被退化成同一个空 Map。
+        val now = 500_000L
+        val unavailable = MediaProviderRecoveryPolicy.decide(
+            now, state(mediaScan = MediaProcessScan.Unavailable),
+        )
+        val empty = MediaProviderRecoveryPolicy.decide(
+            now, state(mediaScan = MediaProcessScan.Success(emptyMap())),
+        )
+        assertEquals(MediaProviderRecoveryPolicy.Decision.PROBE_ONLY, unavailable)
+        assertEquals(MediaProviderRecoveryPolicy.Decision.PROBE_ONLY, empty)
     }
 
     @Test
@@ -114,6 +155,48 @@ class MediaProviderRecoveryPolicyTest {
             MediaProviderRecoveryPolicy.decide(
                 now, state(episodeStartMs = now - 1L, destructiveRounds = 3),
             ),
+        )
+    }
+
+    // ── mayTargetInstances：执行前同实例复检 ──
+
+    @Test
+    fun `无上轮记录时允许`() {
+        assertTrue(
+            MediaProviderRecoveryPolicy.mayTargetInstances(null, mapOf(100 to 50L)),
+        )
+    }
+
+    @Test
+    fun `上轮目标为空时允许`() {
+        val r = round(emptySet(), emptyMap())
+        assertTrue(
+            MediaProviderRecoveryPolicy.mayTargetInstances(r, mapOf(100 to 50L)),
+        )
+    }
+
+    @Test
+    fun `执行前仍为上轮实例则禁止`() {
+        // 决策时扫描过期：wake/等待期间实例未变，执行前复检必须拦住。
+        val r = round(setOf(100), mapOf(100 to 50L))
+        assertFalse(
+            MediaProviderRecoveryPolicy.mayTargetInstances(r, mapOf(100 to 50L)),
+        )
+    }
+
+    @Test
+    fun `执行前实例已更替则允许`() {
+        val r = round(setOf(100), mapOf(100 to 50L))
+        assertTrue(
+            MediaProviderRecoveryPolicy.mayTargetInstances(r, mapOf(200 to 70L)),
+        )
+    }
+
+    @Test
+    fun `执行前确认无进程不构成同实例冲突`() {
+        val r = round(setOf(100), mapOf(100 to 50L))
+        assertTrue(
+            MediaProviderRecoveryPolicy.mayTargetInstances(r, emptyMap()),
         )
     }
 }

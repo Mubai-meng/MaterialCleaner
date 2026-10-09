@@ -118,10 +118,12 @@ class MediaProviderRecoveryStrategy(
             return true
         }
         try {
-            val currentPids = scanMediaProcessInstances()
+            // 扫描语义贯穿策略层：Unavailable 与 Success(empty) 是两种语义，
+            // 不得在中间层退化成普通 Map 让策略重新混淆。
+            val currentScan = scanMediaProcessInstances()
             val thresholdReached =
                 consecutiveMediaProviderHookMissing >= MEDIA_PROVIDER_HOOK_MISSING_THRESHOLD
-            when (MediaProviderRecoveryPolicy.decide(
+            val decision = MediaProviderRecoveryPolicy.decide(
                 now,
                 MediaProviderRecoveryPolicy.State(
                     hookConnected = false,
@@ -129,9 +131,10 @@ class MediaProviderRecoveryStrategy(
                     thresholdReached = thresholdReached,
                     lastRound = lastRound,
                     destructiveRounds = destructiveRounds,
-                    currentMediaPids = currentPids,
+                    mediaScan = currentScan,
                 ),
-            )) {
+            )
+            when (decision) {
                 MediaProviderRecoveryPolicy.Decision.CONNECTED -> return false
                 MediaProviderRecoveryPolicy.Decision.PROBE_ONLY -> {
                     probeOnlyRound()
@@ -142,7 +145,7 @@ class MediaProviderRecoveryStrategy(
                     return true
                 }
                 MediaProviderRecoveryPolicy.Decision.MAY_FORCE_STOP -> {
-                    return forceStopRound(now, currentPids)
+                    return forceStopRound(now, currentScan)
                 }
             }
         } finally {
@@ -181,7 +184,7 @@ class MediaProviderRecoveryStrategy(
      * 有限 force-stop 轮：probe 失败后执行，记录进程实例身份并落盘总账。
      * 同进程实例硬约束最多 1 次（由 policy 保证，此处只记录）。
      */
-    private fun forceStopRound(now: Long, currentPids: Map<Int, Long>): Boolean {
+    private fun forceStopRound(now: Long, decisionScan: MediaProcessScan): Boolean {
         // 下线前再 probe 一次：状态可能在决策后已变化。
         // 注意：resetNativeStateForReconnect 必须在本 probe 失败后才执行——
         // 提前重置会让“probe 成功跳过强杀”也付出 Native 重建代价，
@@ -198,8 +201,27 @@ class MediaProviderRecoveryStrategy(
             return false
         }
         // 真正执行破坏前重新扫描实例身份：probe 的 wake+等待期间进程集合可能已变，
-        // 决策时观测到的 currentPids 不等于实际被杀实例，不能直接当事实记录。
-        val executedPids = scanMediaProcessInstances().ifEmpty { currentPids }
+        // 决策时观测结果不等于执行时对象，不能直接当事实记录。
+        // 无法确认身份时必须中止本轮破坏操作——“不能确认身份则禁止盲杀”是硬约束，
+        // 回退陈旧快照继续杀会使该约束失效（第一次扫描成功只证明当时观察过）。
+        val preStopObserved = PreStopScanPolicy.resolve(scanMediaProcessInstances())
+        if (preStopObserved == null) {
+            Log.w(TAG, "Pre-stop scan unavailable, aborting destructive round " +
+                    "to keep the blind-kill guard (will keep probing)")
+            return true
+        }
+        // 执行前复检同实例守卫：决策时扫描可能已过期（进程在 wake/等待期间更替），
+        // 只有执行前实例才是真正的杀灭对象，必须用它而非决策快照做最终准入。
+        if (!MediaProviderRecoveryPolicy.mayTargetInstances(lastRound, preStopObserved)) {
+            Log.w(TAG, "Pre-stop instances overlap last round's targets, " +
+                    "aborting destructive round to keep the per-instance limit")
+            return true
+        }
+        // 语义固定为“破坏操作前观测到的目标实例”。平台不返回实际终止清单，
+        // 且 forceStopPackage 是包级操作、与扫描瞬间的 PID 集合存在固有竞态窗口，
+        // 因此这是准入证据而非身份保证；该窗口在下列情形不可避免：
+        // - Success(empty)：确认无活进程，操作为包级清理+wake（幂等，用于拉起死进程）；
+        // - Success(nonEmpty)：观测到活实例，但扫描到执行之间仍可能出现新实例。
         // 确认进入破坏路径后才重置需要重建的 Native 状态。
         MediaProviderHookGateway.resetNativeStateForReconnect()
         val stoppedPackages = forceStopMediaProviderPackages()
@@ -212,21 +234,27 @@ class MediaProviderRecoveryStrategy(
         lastMediaProviderRecoveryAt = now
         lastRound = MediaProviderRecoveryPolicy.RoundRecord(
             timeMs = now,
-            targetPids = executedPids.keys.toSet(),
-            targetStarts = executedPids.toMap(),
+            targetPids = preStopObserved.keys.toSet(),
+            targetStarts = preStopObserved.toMap(),
         )
         // destructiveRounds 语义固定为“破坏性尝试次数”：forceStop 返回空列表
         // （未找到已安装的 MediaProvider 包）同样计入，因为已发起破坏性动作。
+        // 诊断侧必须按尝试次数解读，不得当作成功强杀次数。
         destructiveRounds++
         persistLedger()
         scheduleMediaProviderWake()
         return true
     }
 
-    /** 观测当前媒体进程实例（PID→starttime）；不可读的 PID 剔除（宁可不杀）。 */
-    private fun scanMediaProcessInstances(): Map<Int, Long> {
+    /**
+     * 观测当前媒体进程实例（PID→starttime）；不可读的 PID 剔除（宁可不杀）。
+     *
+     * 返回可区分"成功扫描"与"无法确认"：AMS 查询失败时早先返回 emptyMap，
+     * 与"确实没有进程"混淆，导致调用方拿陈旧快照冒充操作目标。
+     */
+    private fun scanMediaProcessInstances(): MediaProcessScan {
         return try {
-            SystemService.getRunningAppProcessesNoThrow()
+            val instances = SystemService.getRunningAppProcessesNoThrow()
                 .asSequence()
                 .filter { proc ->
                     proc.pkgList?.any { MEDIA_PROVIDER_PACKAGE_CANDIDATES.contains(it) } == true
@@ -237,9 +265,10 @@ class MediaProviderRecoveryStrategy(
                     proc.pid to start
                 }
                 .toMap()
+            MediaProcessScan.Success(instances)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to scan media process instances", e)
-            emptyMap()
+            MediaProcessScan.Unavailable
         }
     }
 

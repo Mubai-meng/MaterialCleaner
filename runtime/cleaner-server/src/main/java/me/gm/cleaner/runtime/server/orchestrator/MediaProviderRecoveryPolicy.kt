@@ -14,7 +14,7 @@ package me.gm.cleaner.runtime.server.orchestrator
  * - 破坏轮：同进程实例（PID+starttime）硬约束最多 1 次；轮后 75s 内禁下一轮；
  *   总量 3 轮熔断后只允许 WAKE_ONLY。
  */
-object MediaProviderRecoveryPolicy {
+internal object MediaProviderRecoveryPolicy {
     /** Stage 1 非破坏性观察窗：覆盖媒体侧累计退避 + 调度余量。 */
     const val STAGE1_WINDOW_MS = 75_000L
 
@@ -52,8 +52,11 @@ object MediaProviderRecoveryPolicy {
         val thresholdReached: Boolean,
         val lastRound: RoundRecord?,
         val destructiveRounds: Int,
-        /** 当前观测到的媒体进程 PID→starttime；空表示无法观测。 */
-        val currentMediaPids: Map<Int, Long>,
+        /**
+         * 决策时的扫描结果。携带类型而非退化的 Map：
+         * Unavailable 与 Success(empty) 是两种不同语义，不得混为一谈。
+         */
+        val mediaScan: MediaProcessScan,
     )
 
     fun decide(now: Long, state: State): Decision {
@@ -67,18 +70,40 @@ object MediaProviderRecoveryPolicy {
         if (lastRound != null && now - lastRound.timeMs < POST_ROUND_WINDOW_MS) {
             return Decision.PROBE_ONLY
         }
-        if (state.currentMediaPids.isEmpty()) {
-            // 无法观测进程实例身份：禁止盲杀，只探。
+        val currentMediaPids = when (state.mediaScan) {
+            // 无法确认进程身份：禁止盲杀，只探。
+            is MediaProcessScan.Unavailable -> return Decision.PROBE_ONLY
+            // 确认没有活进程：probe-only 自带 wake，正是死进程的正确恢复路径，
+            // 无需也未达到破坏性准入。
+            is MediaProcessScan.Success ->
+                if (state.mediaScan.instances.isEmpty()) {
+                    return Decision.PROBE_ONLY
+                } else {
+                    state.mediaScan.instances
+                }
+        }
+        if (!mayTargetInstances(lastRound, currentMediaPids)) {
+            // 同一进程实例已承受过一次破坏性恢复：硬约束禁杀。
             return Decision.PROBE_ONLY
         }
-        if (lastRound != null && lastRound.targetPids.isNotEmpty()) {
-            val overlap = state.currentMediaPids.any { (pid, start) ->
-                pid in lastRound.targetPids && lastRound.targetStarts[pid] == start
-            }
-            // 同一进程实例已承受过一次破坏性恢复：硬约束禁杀。
-            // PID 被复用（starttime 不同）则视为新实例，不在此限。
-            if (overlap) return Decision.PROBE_ONLY
-        }
         return Decision.MAY_FORCE_STOP
+    }
+
+    /**
+     * 同实例守卫：观测集合中任一实例与上轮记录同身份则禁止再次破坏。
+     * PID 被复用（starttime 不同）视为新实例，不在此限。
+     *
+     * 同时对执行前扫描复检：决策时扫描可能在 wake 与等待期间过期，
+     * 只有执行前实例才是真正的杀灭对象。
+     */
+    fun mayTargetInstances(
+        lastRound: RoundRecord?,
+        observed: Map<Int, Long>,
+    ): Boolean {
+        if (lastRound == null || lastRound.targetPids.isEmpty()) return true
+        val overlap = observed.any { (pid, start) ->
+            pid in lastRound.targetPids && lastRound.targetStarts[pid] == start
+        }
+        return !overlap
     }
 }
