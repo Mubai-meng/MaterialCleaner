@@ -291,14 +291,21 @@ object DataBus {
 
     /**
      * 获取事件队列中最后一个事件的文件名（用作游标）。
+     *
+     * 返回契约：
+     * - 非法队列 / 目录不存在 / 空队列 → ""（保持既有语义）；
+     * - `listFiles() == null`（目录枚举失败）→ null（哨兵，**不得**当空队列）。
+     * 调用方必须把 null 按失败处理，不得继续把游标当作可信水位。
      */
-    fun getLastEventFilename(queue: String): String {
+    fun getLastEventFilename(queue: String): String? {
         if (!isValidEventQueue(queue)) return ""
         val eventDir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
         if (!eventDir.exists()) return ""
-        return eventDir.listFiles()
-            ?.filter { isRegularFileNoFollow(it) && it.name.endsWith(".json") }
-            ?.maxByOrNull { it.name }
+        // 枚举失败返回 null 哨兵：调用方按失败处理，不得当空队列。
+        val entries = eventDir.listFiles() ?: return null
+        return entries
+            .filter { isRegularFileNoFollow(it) && it.name.endsWith(".json") }
+            .maxByOrNull { it.name }
             ?.name ?: ""
     }
 

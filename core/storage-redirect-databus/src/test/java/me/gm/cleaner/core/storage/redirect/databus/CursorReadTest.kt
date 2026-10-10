@@ -66,6 +66,50 @@ class CursorReadTest {
     }
 
     @Test
+    fun `越顶比较与消费清理同口径_字典序`() {
+        // 越顶检查依赖"游标 > 队首 ⇒ 游标在队列顶端之后"的字典序假设；
+        // 事件文件名 seq 段为定宽 20 位十进制，字典序与数值序一致。
+        val max = "00000000000000000010-1791549618189-12963-a72c.json"
+        val beyond = "00000000000000000011-1791549618190-12963-b83d.json"
+        assertTrue(DataBus.isCredibleCursorContent(max))
+        assertTrue(DataBus.isCredibleCursorContent(beyond))
+        assertTrue(beyond > max)
+        // 定宽保证进位仍有序：...09 < ...10（变宽序号在此处会分叉）。
+        assertTrue("00000000000000000009-1791549618189-12963-a72c.json" < max)
+    }
+
+    @Test
+    fun `空队首时任何游标都大于空串_故越顶检查必须有非空守卫`() {
+        // Kotlin 中任何非空字符串都 > ""；若生产检查缺少 max.isNotEmpty()
+        // 守卫，空队列上的任何可信游标都会被误判越顶。
+        // 本用例锁定该前提，只做纯字符串断言，不触碰文件系统。
+        assertTrue("00000000000000000010-1791549618189-12963-a72c.json" > "")
+    }
+
+    @Test
+    fun `越顶游标下存量队首都满足删除游标门禁_故越顶必须判不可信`() {
+        // 安全 rationale：shouldPruneEvent 的游标门禁是 `name <= cursor`；
+        // 一旦游标越顶，存量文件全部满足门禁（仅剩时间门禁），
+        // 若把越顶游标当可信水位，清理会误删仍可能被消费的事件。
+        // 因此 readCursorDetailed 必须先判越顶为 UNREADABLE（删 0）。
+        // 本用例经生产函数直调验证，不触碰 Log/文件系统。
+        val now = 10_000_000L
+        val retention = 30 * 60 * 1000L
+        val max = "00000000000000000010-1791549618189-12963-a72c.json"
+        val beyond = "00000000000000000011-1791549618190-12963-b83d.json"
+        assertTrue(beyond > max)
+        assertTrue(
+            DataBus.shouldPruneEvent(
+                name = max,
+                cursor = beyond,
+                lastModified = now - 31 * 60 * 1000L,
+                now = now,
+                retentionMs = retention,
+            ),
+        )
+    }
+
+    @Test
     fun `旧单值API语义不变`() {
         // readCursor 保持既有签名：ABSENT 与 UNREADABLE 都返回 ""。
         // 这正是需要三态 API 的原因——调用方不能再靠 "" 区分状态。

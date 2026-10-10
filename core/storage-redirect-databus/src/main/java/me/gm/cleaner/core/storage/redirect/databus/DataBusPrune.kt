@@ -75,6 +75,20 @@ internal object DataBusPrune {
                 Log.w(TAG, "Cursor unreadable (blank or illegal format): $queue")
                 return DataBusProtocol.CursorRead.UNREADABLE to ""
             }
+            // 越顶异常检测：格式可信的游标仍可能指向队列队首之后
+            // （如游标损坏成更大的合法文件名、队列被外部清空重建）。
+            // 此时游标依据不可确认，按 UNREADABLE 处理（删 0 并暴露状态）。
+            // 注意：这只是"越顶"异常检测，不是真实性证明——范围内伪造游标
+            // 仍会被接受（已接受边界），完整性由消费推进协议保证。
+            val max = DataBus.getLastEventFilename(queue)
+            if (max == null) {
+                Log.w(TAG, "Cursor credibility unknown (queue listing failed): $queue")
+                return DataBusProtocol.CursorRead.UNREADABLE to ""
+            }
+            if (max.isNotEmpty() && content > max) {
+                Log.w(TAG, "Cursor beyond queue top, treating as unreadable: $queue")
+                return DataBusProtocol.CursorRead.UNREADABLE to ""
+            }
             DataBusProtocol.CursorRead.OK to content
         } catch (e: Exception) {
             Log.e(TAG, "Failed to read cursor: $queue", e)
