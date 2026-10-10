@@ -4,6 +4,10 @@ import android.app.Application
 import android.content.Context
 import android.os.Build
 import com.topjohnwu.superuser.Shell
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import me.gm.cleaner.client.ClientErrorJournal
 import me.gm.cleaner.client.ServerStateMachine
 import me.gm.cleaner.client.ServiceBootStateStore
@@ -38,5 +42,11 @@ class App : Application() {
                 .setFlags(Shell.FLAG_MOUNT_MASTER)
                 .setTimeout(10)
         )
+
+        CoroutineScope(
+            Dispatchers.IO + SupervisorJob()
+        ).launch {
+            me.gm.cleaner.net.UpdateChecker.checkAndNotify(this@App)
+        }
     }
 }

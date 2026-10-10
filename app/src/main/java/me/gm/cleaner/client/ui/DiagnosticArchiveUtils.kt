@@ -104,6 +104,16 @@ private fun copyFromServerArchive(pfd: ParcelFileDescriptor, target: File) {
  *
  * Java 标准库不支持向现有 zip 追加条目，采用全量重写：
  * 读出原包全部条目后连同新条目一起重新压缩。
+ *
+ * ⚠️ 本条目此前是**唯一绕过脱敏**的：server 路径下它由这里 raw 写入
+ * （不经 `addTextEntry` → `redact`），而 fallback 路径下的同名条目**是脱敏的**
+ * ⇒ 两条产出路径不一致，而 `manifest.txt` 却标着 `redacted=true`。
+ * 现在统一走 [redact]。当前 journal 内容只有 code/atElapsed/subject/detail 无标识符，
+ * 但一旦将来 detail 里带上路径或指纹，这个不一致就会变成真实泄露。
+ *
+ * 对**已脱敏**的 server 归档再跑一次 [redact] 是幂等的：
+ * `<hex-id:xxxxxxxx>` 只有 8 位 hex（不匹配 ≥24 位规则），
+ * `/data/app/<id:xxxxxxxx>` 只有一个路径段（不匹配两段规则）。
  */
 private fun appendClientJournalEntry(zipFile: File) {
     val content = ClientErrorJournal.exportJsonL()
@@ -125,7 +135,7 @@ private fun appendClientJournalEntry(zipFile: File) {
                 zout.closeEntry()
             }
             zout.putNextEntry(java.util.zip.ZipEntry(CLIENT_JOURNAL_ENTRY))
-            zout.write(content.toByteArray(Charsets.UTF_8))
+            zout.write(redact(content).toByteArray(Charsets.UTF_8))
             zout.closeEntry()
         }
     }.onFailure {
@@ -253,17 +263,53 @@ private fun addTextEntry(zip: ZipOutputStream, entryName: String, content: Strin
     zip.closeEntry()
 }
 
+/**
+ * 保 identity 的脱敏。
+ *
+ * ⚠️ 这是 [me.gm.cleaner.runtime.server.DiagnosticArchive.redact] 的**复制品**（app 模块
+ * 只以 `runtimeOnly` 依赖 cleaner-server，编译期看不到那个 object，所以暂时无法合并）。
+ * **两处必须同步改**：盐、模式、语义任一不同，两条产出路径（server 归档 / app fallback 归档）
+ * 的别名就会对不上，跨归档比对随之失效。
+ *
+ * 旧实现把所有 ≥24 位 hex 一律换成同一个 `<hex-id>`，于是
+ * `redirect{Configured,Published,Applied}Revision` 三值全等，
+ * 归档无法再回答「applied 是否 == configured」。现在改为别名：
+ * 同值同别名、异值异别名，且盐是常量 ⇒ 跨文件、跨归档都可比。
+ */
+private const val ALIAS_SALT = "MaterialCleaner.DiagnosticArchive.v1"
+
+/** 别名取 hex 用；不用 `Character.forDigit`（`java.lang.Character` 被 `kotlin.Char` 映射挡掉）。 */
+private const val HEX_DIGITS = "0123456789abcdef"
+
+private val APP_DIR_REGEX = Regex("/data/app/(?:[^/\\s!]+/){2}[^/\\s!]*")
+private val EXPAND_VOLUME_REGEX = Regex("/mnt/expand/[0-9A-Fa-f-]+")
+private val HEX_ID_REGEX = Regex("(?i)\\b[0-9a-f]{24,}\\b")
+
 private fun redact(content: String): String {
     var redacted = content
     val fingerprint = Build.FINGERPRINT
-    if (fingerprint.isNotBlank()) {
+    if (!fingerprint.isNullOrBlank()) {
         redacted = redacted.replace(fingerprint, "<build-fingerprint>")
     }
     redacted = redacted
-        .replace(Regex("/data/app/[^\\s\\n\\r]+"), "/data/app/<redacted>")
-        .replace(Regex("/mnt/expand/[0-9A-Fa-f-]+"), "/mnt/expand/<volume>")
-        .replace(Regex("(?i)\\b[0-9a-f]{24,}\\b"), "<hex-id>")
+        // ⚠️ 模式**包含**前缀路径，替换串必须把前缀写回去（否则会吃掉整个 "/data/app/"）。
+        .replace(APP_DIR_REGEX) { match -> "/data/app/<id:" + redactAlias(match.value) + ">" }
+        .replace(EXPAND_VOLUME_REGEX) { match -> "/mnt/expand/<id:" + redactAlias(match.value) + ">" }
+        .replace(HEX_ID_REGEX) { match -> "<hex-id:" + redactAlias(match.value) + ">" }
     return redacted
+}
+
+/** 见 [redact]：SHA-256(固定盐 + token) 的前 4 字节 hex。 */
+private fun redactAlias(token: String): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+        .digest((ALIAS_SALT + token).toByteArray(Charsets.UTF_8))
+    val sb = StringBuilder(8)
+    for (i in 0 until 4) {
+        val b = digest[i].toInt() and 0xFF
+        sb.append(HEX_DIGITS[b ushr 4])
+        sb.append(HEX_DIGITS[b and 0xF])
+    }
+    return sb.toString()
 }
 
 private fun cleanupOldDiagnosticArchives(context: Context) {

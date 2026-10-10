@@ -12,6 +12,8 @@ import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
+import me.gm.cleaner.runtime.mediaprovider.hook.bootstrap.MediaProviderRuntime;
+import me.gm.cleaner.runtime.mediaprovider.hook.media.MediaProviderHooksService;
 
 /**
  * MediaProvider 进程侧的 Xposed 入口。

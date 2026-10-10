@@ -1,5 +1,6 @@
 package me.gm.cleaner.runtime.server.orchestrator
 
+import android.os.SystemClock
 import android.util.Log
 import me.gm.cleaner.runtime.server.CleanerServer
 import me.gm.cleaner.runtime.server.SnapshotPublisher
@@ -15,12 +16,29 @@ class HookRecoveryCoordinator(
 ) {
     private companion object {
         private const val TAG = "HookRecoveryCoordinator"
+
+        /**
+         * 同一失配状态下的重试间隔（健康检查每 2s 跑一轮）。
+         *
+         * native 挂载点推送若**永久**失败，会出现 nativeGen 恒 0 而 snapshotGen > 0 的
+         * 稳定失配。原实现的去重条件是 `nativeGen == lastNativeHookCheckGeneration
+         * && nativeGen > 0` —— 其中的 `> 0` 恰好把 0 排除，条件永不成立 ⇒ 每 2s 记一条
+         * W 并重跑一次 refreshPolicyFromDataBus()，无上界。
+         * 改为：状态跃迁立即重试，同一状态按本间隔退避重试。
+         */
+        private const val NATIVE_MISMATCH_RETRY_INTERVAL_MS = 30_000L
     }
 
     private var hooksRetryCount = 0
     private var hooksReconnectScheduled = false
     private val hooksRetryDelays = longArrayOf(1_000L, 2_000L, 5_000L, 10_000L, 30_000L)
     private var lastNativeHookCheckGeneration: Long = 0L
+
+    /** 上次触发刷新时观察到的 snapshot 侧代数；-1 表示尚未触发过。 */
+    private var lastMismatchSnapshotGeneration: Long = -1L
+
+    /** 上次触发刷新的单调时钟时刻；0 表示从未触发。 */
+    private var lastNativeRefreshAtMs: Long = 0L
 
     data class RecoverySnapshot(
         val hooksRetryCount: Int = 0,
@@ -112,14 +130,25 @@ class HookRecoveryCoordinator(
 
         if (nativeGen >= snapshotGen && snapshotGen > 0) {
             lastNativeHookCheckGeneration = nativeGen
+            lastMismatchSnapshotGeneration = snapshotGen
             return
         }
-        if (nativeGen == lastNativeHookCheckGeneration && nativeGen > 0) {
+
+        // 去重口径是「(nativeGen, snapshotGen) 组合 + 最小间隔」，不能只看 nativeGen：
+        // nativeGen 恒为 0 时 `nativeGen > 0` 永不成立，永久失配会退化成每 2s 一刷。
+        val now = SystemClock.elapsedRealtime()
+        val stateChanged = nativeGen != lastNativeHookCheckGeneration ||
+                snapshotGen != lastMismatchSnapshotGeneration
+        if (!stateChanged && now - lastNativeRefreshAtMs < NATIVE_MISMATCH_RETRY_INTERVAL_MS) {
             return
         }
         lastNativeHookCheckGeneration = nativeGen
+        lastMismatchSnapshotGeneration = snapshotGen
+        lastNativeRefreshAtMs = now
 
-        Log.w(TAG, "nativeHookHealthCheck: nativeGen=$nativeGen < snapshotGen=$snapshotGen, triggering refresh")
+        Log.w(TAG, "nativeHookHealthCheck: nativeGen=$nativeGen < snapshotGen=$snapshotGen, " +
+                "triggering refresh" +
+                if (stateChanged) "" else " (same mismatch state, retry after backoff)")
         MediaProviderHookGateway.refreshPolicyFromDataBus()
     }
 }

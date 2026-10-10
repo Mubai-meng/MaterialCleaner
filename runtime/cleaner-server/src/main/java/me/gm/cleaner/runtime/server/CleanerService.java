@@ -42,23 +42,24 @@ import me.gm.cleaner.core.common.nio.RootWorkerService;
 import me.gm.cleaner.server.ICleanerService;
 import me.gm.cleaner.server.IFileChangeObserver;
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway;
-import me.gm.cleaner.runtime.server.observer.ActivityManagerLogsObserver;
-import me.gm.cleaner.runtime.server.observer.FileSystemObserver;
-import me.gm.cleaner.runtime.server.observer.ObserverManager;
-import me.gm.cleaner.runtime.server.observer.StorageEventListenerDelegate;
-import me.gm.cleaner.runtime.server.observer.StorageMountObserver;
+import me.gm.cleaner.runtime.server.process.ActivityManagerLogsObserver;
+import me.gm.cleaner.runtime.server.process.ObserverStallPolicy;
+import me.gm.cleaner.runtime.server.recording.FileSystemObserver;
+import me.gm.cleaner.runtime.server.lifecycle.ObserverManager;
+import me.gm.cleaner.runtime.server.storage.StorageEventListenerDelegate;
+import me.gm.cleaner.runtime.server.storage.StorageMountObserver;
 
 public class CleanerService extends ICleanerService.Stub {
     private static final String TAG = "CleanerService";
     private final CleanerServer mServer;
     private final int mManagerAid;
     private final RemoteCallbackList<IFileChangeObserver> mFileChangeObservers = new RemoteCallbackList<>();
-    private final StorageRedirectConfigController mStorageRedirectConfigController;
+    private final StoragePolicyChangeCoordinator mStoragePolicyChangeCoordinator;
 
     public CleanerService(final CleanerServer service, final int uid) {
         mServer = service;
         mManagerAid = uid;
-        mStorageRedirectConfigController = new StorageRedirectConfigController(service);
+        mStoragePolicyChangeCoordinator = new StoragePolicyChangeCoordinator(service);
     }
 
     private void enforceManager(final Object func) {
@@ -68,6 +69,26 @@ public class CleanerService extends ICleanerService.Stub {
             return;
         }
         throw new SecurityException(String.valueOf(func));
+    }
+
+    /**
+     * logd 旁路探针：疑似假活时确认 logd 本身是否响应。
+     * logd wedged 时杀 server 无用（新 tail 照样读不到行），此时必须放行。
+     */
+    private static boolean probeLogdResponsive() {
+        try {
+            final var process = Runtime.getRuntime().exec(new String[]{"logcat", "-d", "-t", "1"});
+            final boolean exited = process.waitFor(
+                    ObserverStallPolicy.LOGD_PROBE_TIMEOUT_MS,
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!exited) {
+                process.destroy();
+                return false;
+            }
+            return process.exitValue() == 0;
+        } catch (final Throwable t) {
+            return false;
+        }
     }
 
     @Override
@@ -89,6 +110,19 @@ public class CleanerService extends ICleanerService.Stub {
             if (observer instanceof final ActivityManagerLogsObserver activityManagerObserver) {
                 if (activityManagerObserver.isLogcatShutdown()) {
                     return 2;
+                }
+                if (ObserverStallPolicy.INSTANCE.isStalled(
+                        android.os.SystemClock.elapsedRealtime(),
+                        activityManagerObserver.getStartAtMs(),
+                        activityManagerObserver.getLastReadAtMs())) {
+                    // 疑似假活：先确认 logd 本身响应，排除 logd wedged 导致的误杀
+                    //（logd 死了杀 server 也没用，新 tail 照样读不到行）。
+                    if (probeLogdResponsive()) {
+                        return 2;
+                    }
+                    android.util.Log.w("CleanerService",
+                            "observer stall suspected but logd wedged, skip kill");
+                    return 0;
                 }
                 if (!activityManagerObserver.hasAmStart()) {
                     return 3;
@@ -219,19 +253,19 @@ public class CleanerService extends ICleanerService.Stub {
     @Override
     public void notifyPreferencesChanged() {
         enforceManager(BuildConfig.DEBUG ? "notifyPreferencesChanged" : 12);
-        mStorageRedirectConfigController.onPreferencesChanged();
+        mStoragePolicyChangeCoordinator.onPreferencesChanged();
     }
 
     @Override
     public void notifySrChanged() {
         enforceManager(BuildConfig.DEBUG ? "notifySrChanged" : 13);
-        mStorageRedirectConfigController.onStorageRedirectChanged();
+        mStoragePolicyChangeCoordinator.onStorageRedirectChanged();
     }
 
     @Override
     public void notifyReadOnlyChanged() {
         enforceManager(BuildConfig.DEBUG ? "notifyReadOnlyChanged" : 14);
-        mStorageRedirectConfigController.onReadOnlyChanged();
+        mStoragePolicyChangeCoordinator.onReadOnlyChanged();
     }
 
     @Override

@@ -20,7 +20,9 @@ import me.gm.cleaner.R
 import me.gm.cleaner.client.CleanerClient
 import me.gm.cleaner.client.getSharedProcessPackages
 import me.gm.cleaner.client.getSharedUserIdPackages
-import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
+import me.gm.cleaner.core.config.removeReadOnlyRules
+import me.gm.cleaner.core.config.removeRedirectRules
 import me.gm.cleaner.databinding.ApplistItemBinding
 import me.gm.cleaner.util.buildStyledTitle
 
@@ -115,7 +117,16 @@ class AppListAdapter(
                 fragment.lifecycleScope.launch(Dispatchers.IO) {
                     val sharedProcessPackages = getSharedProcessPackages(model.packageInfo)
                         .map { it.packageName }
-                    ServicePreferences.removeStorageRedirect(sharedProcessPackages)
+                    val store = ConfiguredPolicyStoreProvider.instance
+                    val result = store
+                        .updateRedirect(store.snapshots.value.redirect.revision) { it.removeRedirectRules(sharedProcessPackages) }
+                    if (!result.success) {
+                        Log.e("MC/Policy", "remove redirect failed: ${result.error}")
+                        return@launch
+                    }
+                    if (!result.changed) {
+                        return@launch
+                    }
                     CleanerClient.service?.notifySrChanged()
                     if (model.mountState != AppListModel.STATE_UNMOUNTED) {
                         CleanerClient.service?.remount(sharedProcessPackages.toTypedArray())
@@ -129,7 +140,16 @@ class AppListAdapter(
                 fragment.lifecycleScope.launch(Dispatchers.IO) {
                     val sharedUserIdPackages = getSharedUserIdPackages(model.packageInfo)
                         .map { it.packageName }
-                    ServicePreferences.removeReadOnly(sharedUserIdPackages)
+                    val store = ConfiguredPolicyStoreProvider.instance
+                    val result = store
+                        .updateReadOnly(store.snapshots.value.readOnly.revision) { it.removeReadOnlyRules(sharedUserIdPackages) }
+                    if (!result.success) {
+                        Log.e("MC/Policy", "remove read-only failed: ${result.error}")
+                        return@launch
+                    }
+                    if (!result.changed) {
+                        return@launch
+                    }
                     CleanerClient.service?.notifyReadOnlyChanged()
                 }
                 true

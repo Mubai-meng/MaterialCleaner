@@ -6,6 +6,7 @@ import me.gm.cleaner.runtime.server.CleanerServer
 import me.gm.cleaner.server.ICleanerHooksService
 import org.json.JSONObject
 import java.util.function.Consumer
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
 /**
  * Server-side gateway to the MediaProvider Java Hook runtime.
@@ -131,12 +132,12 @@ object MediaProviderHookGateway {
      * 此方法每 2s 被健康检查调用一次，缓存将 DataBus 读从每轮减少到仅在发布时。
      */
     fun configuredMountPointsSnapshotGeneration(): Long {
-        val signalTime = DataBus.getSignalTimestamp(DataBus.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
+        val signalTime = DataBus.getSignalTimestamp(DataBusProtocol.SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED)
         if (signalTime <= lastMountSignalTimestamp && lastMountSignalTimestamp > 0) {
             return cachedMountPointsGeneration
         }
         // 信号变更，重新读取 DataBus
-        val gen = DataBus.readSnapshot(DataBus.SNAPSHOT_CONFIGURED_MOUNT_POINTS)
+        val gen = DataBus.readSnapshot(DataBusProtocol.SNAPSHOT_CONFIGURED_MOUNT_POINTS)
             ?.let { json ->
                 runCatching { JSONObject(json).optLong("generation", 0L) }.getOrDefault(0L)
             } ?: 0L

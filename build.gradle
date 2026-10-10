@@ -86,7 +86,7 @@ ext {
     xposedRuntimeAnchorClasses = [
         ':core:ipc-contract'            : 'me/gm/cleaner/model/OrchestratedStatus',
         ':core:common'                  : 'me/gm/cleaner/core/common/err/ErrorCodes',
-        ':core:storage-redirect-domain' : 'me/gm/cleaner/core/storage/redirect/domain/MountRules',
+        ':core:storage-redirect-domain' : 'me/gm/cleaner/core/storage/redirect/domain/OrderedRedirectInterpreter',
         ':core:storage-redirect-databus': 'me/gm/cleaner/core/storage/redirect/databus/DataBus',
         ':platform:hidden-api'          : 'api/SystemService',
     ]

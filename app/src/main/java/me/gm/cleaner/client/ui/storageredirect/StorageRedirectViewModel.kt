@@ -32,12 +32,11 @@ import me.gm.cleaner.core.config.PolicyStoreResult
 import me.gm.cleaner.core.config.replaceReadOnlyRules
 import me.gm.cleaner.core.config.replaceRedirectRules
 import me.gm.cleaner.core.storage.redirect.domain.ReadOnlyRule
-import me.gm.cleaner.core.storage.redirect.domain.MountRules
 import me.gm.cleaner.model.PackageStatus
 import me.gm.cleaner.net.NetworkConnectionState
 import me.gm.cleaner.net.OnlineAppCategory
 import me.gm.cleaner.util.PermissionUtils
-import me.gm.cleaner.util.FileUtils.toUserId
+import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.widget.recyclerview.DiffArrayList
 
 class StorageRedirectViewModel(private val application: Application, state: SavedStateHandle) :
@@ -363,8 +362,6 @@ class StorageRedirectViewModel(private val application: Application, state: Save
                 value.plus(null to null)
             )
         }
-    val rules: MountRules
-        get() = MountRules(mountRules)
     lateinit var wizard: MountWizard
         private set
 

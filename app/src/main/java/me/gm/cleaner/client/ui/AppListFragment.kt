@@ -35,6 +35,7 @@ import me.gm.cleaner.client.StopSource
 import me.gm.cleaner.client.XposedConnectionState
 import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.config.srPackages
 import me.gm.cleaner.util.fitsSystemWindowInsets
 
 /**
@@ -59,7 +60,6 @@ class AppListFragment : BaseServiceSettingsFragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 ConfiguredPolicyStoreProvider.instance.snapshots.collect {
-                    viewModel.updateAppsRuleCount()
                     val (serverState, xposedConnected) = currentServerInputs()
                     statusController.refresh(lifecycleScope, serverState, xposedConnected)
                     statusController.render(serverState, xposedConnected)
@@ -77,6 +77,19 @@ class AppListFragment : BaseServiceSettingsFragment() {
             statusController = StatusCardController(
                 strings = StatusStrings { id, args -> requireContext().getString(id, *args) },
                 guard = { isAdded },
+                appVersionCode = { me.gm.cleaner.BuildConfig.VERSION_CODE.toLong() },
+                installedVersionCode = {
+                    runCatching {
+                        val pm = requireContext().packageManager
+                        val name = requireContext().packageName
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                            pm.getPackageInfo(name, 0).longVersionCode
+                        } else {
+                            @Suppress("DEPRECATION")
+                            pm.getPackageInfo(name, 0).versionCode.toLong()
+                        }
+                    }.getOrDefault(0L)
+                },
             )
             statusController.isExpanded = savedInstanceState?.getBoolean(
                 SAVED_STATUS_DETAILS_EXPANDED,
@@ -124,7 +137,7 @@ class AppListFragment : BaseServiceSettingsFragment() {
 
         // Pull-to-refresh: only refresh app list, not server/status
         listContainer.setOnRefreshListener {
-            viewModel.updateAppsRuleCount()
+            viewModel.loadApps()
         }
 
         // Initial status update
@@ -209,15 +222,11 @@ class AppListFragment : BaseServiceSettingsFragment() {
 
         // Observe preferences changes → refresh rule count, mount list, and status display
         ServicePreferences.preferencesChangeLiveData.observe(viewLifecycleOwner) {
-            viewModel.updateAppsRuleCount()
             currentServerInputs().let { (serverState, xposedConnected) ->
                 statusController.refresh(lifecycleScope, serverState, xposedConnected)
                 statusController.render(serverState, xposedConnected)
             }
         }
-
-        // Load initial mounted apps（添加重试等待服务器就绪）
-        loadMountedApps(adapter)
 
         super.onCreateView(inflater, container, savedInstanceState)
         return view
@@ -265,7 +274,7 @@ class AppListFragment : BaseServiceSettingsFragment() {
     }
 
     // ---------------------------------------------------------------
-    // TODO(Phase-2): startServer / stopServer / loadMountedApps 执行面迁入 ViewModel，
+    // TODO(Phase-2): startServer / stopServer 执行面迁入 ViewModel，
     // Fragment 只保留 collect + 转发。本次 Phase-1 为控制范围，保持原实现不动。
 
     private fun startServer() {
@@ -274,7 +283,7 @@ class AppListFragment : BaseServiceSettingsFragment() {
                 val success = ServerStateMachine.start(StartSource.MANUAL, requireContext())
                 if (success) {
                     viewModel.loadApps()
-                    val packages = ServicePreferences.srPackages
+                    val packages = ConfiguredPolicyStoreProvider.instance.srPackages
                     val msg = if (packages.isNotEmpty()) {
                         requireContext().getString(R.string.toast_service_started_n_mounted, packages.size)
                     } else {
@@ -304,40 +313,6 @@ class AppListFragment : BaseServiceSettingsFragment() {
                 Toast.makeText(requireContext(), R.string.toast_stopped, Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) Log.e("CleanerTest", "stopServer: exception", e)
-            }
-        }
-    }
-
-    private fun loadMountedApps(adapter: AppListAdapter) {
-        lifecycleScope.launch {
-            // 如果本会话已手动停止或服务未处于启动/运行态，不等待，直接返回空列表
-            if (ServerStateMachine.isSessionManuallyStopped ||
-                ServerStateMachine.state.value == ServerState.STOPPED ||
-                ServerStateMachine.state.value == ServerState.FAILED
-            ) {
-                adapter.submitList(emptyList())
-                return@launch
-            }
-
-            // 等待服务器就绪（最长重试 20 次 = ~10 秒）
-            if (!CleanerClient.waitForBinder()) {
-                adapter.submitList(emptyList())
-                return@launch
-            }
-            val loaded = withContext(Dispatchers.Default) {
-                try {
-                    AppListLoader().load()
-                } catch (e: Exception) {
-                    if (BuildConfig.DEBUG) Log.e("CleanerTest", "AppListFragment.loadMountedApps: failed", e)
-                    null
-                }
-            }
-            // Only update if load succeeded; don't overwrite existing data on failure
-            if (loaded != null) {
-                // 必须与上方 appsFlow 走**同一个** ViewModel 口径（过滤 + 排序）。
-                // 旧实现这里直接 submitList(loaded.filter{...})，完全没有排序，
-                // 与已排序的那条路径并发提交，列表顺序就在两者之间来回跳。
-                adapter.submitList(viewModel.mountedApps(loaded))
             }
         }
     }

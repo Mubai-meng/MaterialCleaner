@@ -17,7 +17,7 @@ import me.gm.cleaner.client.CleanerServerLauncher
 import me.gm.cleaner.client.LaunchReason
 import me.gm.cleaner.client.ServiceBootStateStore
 import me.gm.cleaner.dao.RootPreferences
-import me.gm.cleaner.util.FileUtils.toUserId
+import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 
 class BootCompleteReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -42,6 +42,11 @@ class BootCompleteReceiver : BroadcastReceiver() {
         }
         ServiceBootStateStore.ensureInitialized(context)
         val target = ServiceBootStateStore.initializeForBoot(isStartOnBoot)
+
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            me.gm.cleaner.net.UpdateChecker.checkAndNotify(context)
+        }
+
         if (!isStartOnBoot || target != BootTargetState.RUNNING ||
             ServiceBootStateStore.source != BootTargetSource.BOOT
         ) {

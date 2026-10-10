@@ -368,33 +368,57 @@ object SystemService {
         }
     }
 
+    /**
+     * 带缓存的 `getInstalledPackages`（含 single-flight 合并）。
+     *
+     * 语义与旧实现完全一致（失败 → 空列表），只把**短时间内的重复调用**合并为一次
+     * 大 parcel IPC。缓存与失效策略见 [PackageListCache]。
+     */
     @JvmStatic
-    fun getInstalledPackagesNoThrow(flags: Int, userId: Int): List<PackageInfo> {
-        return try {
-            getInstalledPackages(flags, userId)?.list ?: emptyList()
-        } catch (tr: Throwable) {
-            LOGGER.w(tr, "getInstalledPackages failed: flags=%d, user=%d", flags, userId)
-            emptyList()
+    fun getInstalledPackagesNoThrow(flags: Int, userId: Int): List<PackageInfo> =
+        PackageListCache.getOrLoad("packages:$flags:$userId") {
+            try {
+                getInstalledPackages(flags, userId)?.list ?: emptyList()
+            } catch (tr: Throwable) {
+                LOGGER.w(tr, "getInstalledPackages failed: flags=%d, user=%d", flags, userId)
+                emptyList()
+            }
         }
-    }
 
+    /**
+     * 带缓存的「全部用户去重包列表」。
+     *
+     * 内部逐 user 的调用走 [getInstalledPackagesNoThrow]，因此同样受益于缓存；
+     * 这里再对「跨用户去重结果」缓存一层，避免启动期多个调用点各自重复做
+     * `getUserIds` + 全量枚举 + 去重。
+     */
     @JvmStatic
-    fun getInstalledPackagesFromAllUsersNoThrow(flags: Int): List<PackageInfo> {
-        return try {
-            val res = mutableListOf<PackageInfo>()
-            val packageNames = mutableSetOf<String>()
-            for (userId in getUserIdsNoThrow()) {
-                for (pi in getInstalledPackagesNoThrow(flags, userId)) {
-                    if (packageNames.add(pi.packageName)) {
-                        res += pi
+    fun getInstalledPackagesFromAllUsersNoThrow(flags: Int): List<PackageInfo> =
+        PackageListCache.getOrLoad("packagesAllUsers:$flags") {
+            try {
+                val res = mutableListOf<PackageInfo>()
+                val packageNames = mutableSetOf<String>()
+                for (userId in getUserIdsNoThrow()) {
+                    for (pi in getInstalledPackagesNoThrow(flags, userId)) {
+                        if (packageNames.add(pi.packageName)) {
+                            res += pi
+                        }
                     }
                 }
+                res
+            } catch (tr: Throwable) {
+                LOGGER.w(tr, "getInstalledPackagesFromAllUsers failed: flags=%d", flags)
+                emptyList()
             }
-            return res
-        } catch (tr: Throwable) {
-            LOGGER.w(tr, "getInstalledPackagesFromAllUsers failed: flags=%d", flags)
-            emptyList()
         }
+
+    /**
+     * 立即失效包列表缓存。包安装/卸载/替换后由 `PackageReceiver` 调用，
+     * 避免 TTL 窗口内读到过期列表。
+     */
+    @JvmStatic
+    fun invalidateInstalledPackagesCache() {
+        PackageListCache.invalidate()
     }
 
     @JvmStatic

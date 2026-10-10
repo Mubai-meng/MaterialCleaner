@@ -32,7 +32,7 @@
     <string name="diagnostics_archive_privacy_message">诊断包可能包含设备信息、进程和挂载状态、logcat 输出、DataBus 快照、重定向规则和文件路径。系统会进行基础脱敏，但请只分享给可信任的人。</string>
     <string name="diagnostics_archive_privacy_confirm">导出</string>
     <string name="new_mount">新建挂载</string>
-    <string name="mounted_apps_title">已挂载应用</string>
+    <string name="mounted_apps_title">已配置应用</string>
     <string name="menu_add_to_hide_list">加入隐藏列表</string>
     <string name="delete">删除</string>
     <string name="delete_all_mount_rules">删除所有挂载规则</string>
@@ -42,10 +42,15 @@
     <string name="undo">撤销</string>
 
     <!-- 设置 -->
-    <string name="enable_features_header">启用特性</string>
+    <string name="service_and_notification_header">服务与通知</string>
     <string name="start_on_boot_title">开机启动 Cleaner 服务</string>
     <string name="start_on_boot_summary">启用前请确保服务能在您的设备上正常工作</string>
     <string name="post_notification_title">接收更新通知</string>
+    <string name="check_update_title">检查更新</string>
+    <string name="check_update_summary">从 GitHub 获取最新版本</string>
+    <string name="new_version_available">发现新版本 %s</string>
+    <string name="click_to_view_release">点击查看更新说明</string>
+    <string name="update_available_channel_name">更新可用</string>
     <string name="language_header">语言</string>
     <string name="language_title">语言</string>
     <string name="theme_header">主题</string>
@@ -82,8 +87,8 @@
     <string name="record_shared_storage_title">记录共享存储空间中的文件操作</string>
     <string name="record_external_app_specific_storage_title">（实验性）记录外部应用专属存储空间中的文件操作</string>
     <string name="record_external_app_specific_storage_summary">使应用通过 FUSE 访问其专属存储空间，会使得性能显著下降</string>
-    <string name="fuse_bpf_block_all_title">（实验性）完整拦截 FUSE BPF 调用（含“移除”）</string>
-    <string name="fuse_bpf_block_all_summary">关闭（推荐）：只拦截 BPF 短路的“安装”，放行平台自身的“移除”操作——干预面最小，且不会残留内核 BPF 程序。开启：连“移除”一起拦截，完整复刻旧版 fuse_bpf_install 的行为——但可能让 Android/data 下的包名目录残留内核 BPF 程序，使其子树穿透 FUSE 而绕过重定向。\n本开关仅在开启「（实验性）记录外部应用专属存储空间中的文件操作」时生效。</string>
+    <string name="fuse_bpf_block_all_title">（实验性）FUSE BPF 拦截范围（保留）</string>
+    <string name="fuse_bpf_block_all_summary">保留兼容选项：安装路径恒按记录策略拦截，移除恒放行，本开关当前不改变行为，用于兼容旧平台与未来扩展。</string>
     <string name="upsert_title">使用 upsert 保存数据</string>
     <string name="upsert_summary">重复的数据只保留最新的一份</string>
     <string name="storage_redirect_prompt">存储重定向提示</string>
@@ -149,6 +154,7 @@
     <string name="service_status_retry_with_max">第 %1$d/%2$d 次尝试</string>
     <string name="service_status_retry">第 %d 次尝试</string>
     <string name="service_status_problem_detail">问题：%1$s - %2$s</string>
+    <string name="service_status_stale_reboot">版本不一致（%1$s），请重启手机</string>
     <string name="runtime_layer_vfs">VFS 主重定向</string>
     <string name="runtime_layer_media_provider_hook">媒体库路径修正</string>
     <string name="runtime_layer_fuse_native">FUSE 兼容层</string>
@@ -206,6 +212,7 @@
     <string name="confirm_exit_restart">重新启动</string>
     <string name="no_root_access">无法访问 root</string>
     <string name="service_need_upgrade">服务需升级</string>
+    <string name="service_need_reboot">已安装更新，请重启手机</string>
     <string name="service_exception_logcat_shutdown">日志猫已退出，请重启 Cleaner 服务</string>
 
     <string name="service_settings">质感清理</string>
@@ -326,5 +333,12 @@
 
     <!-- 关于 -->
     <string name="slogan">质感设计的清理应用</string>
+    <string name="about_header">关于</string>
+    <string name="about_title">关于</string>
+    <string name="about_summary">版本与项目信息</string>
+    <string name="about_version">版本 %s</string>
+    <string name="about_project_url">项目地址：https://github.com/firesahc/MaterialCleaner</string>
+    <string name="open_project_url">打开项目地址</string>
+    <string name="cancel">取消</string>
 
 </resources>

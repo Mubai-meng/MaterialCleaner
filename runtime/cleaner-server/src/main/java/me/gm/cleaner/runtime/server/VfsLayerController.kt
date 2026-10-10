@@ -8,10 +8,10 @@ import hidden.HiddenApiBridge.UserHandle_isIsolated
 import me.gm.cleaner.core.common.RuntimeFileUtils
 import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.model.PackageStatus
-import me.gm.cleaner.runtime.server.observer.BaseProcessObserver
-import me.gm.cleaner.runtime.server.observer.ObserverManager
-import me.gm.cleaner.runtime.server.observer.PackageInfoMapper
-import me.gm.cleaner.runtime.server.observer.StorageEventListenerDelegate
+import me.gm.cleaner.runtime.server.process.BaseProcessObserver
+import me.gm.cleaner.runtime.server.process.PackageInfoMapper
+import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
+import me.gm.cleaner.runtime.server.storage.StorageEventListenerDelegate
 import me.gm.cleaner.runtime.server.orchestrator.LayerId
 import me.gm.cleaner.runtime.server.orchestrator.LayerReport
 import me.gm.cleaner.runtime.server.orchestrator.LayerState
@@ -91,9 +91,9 @@ class VfsLayerController {
         val userIds = mutableListOf<Int>()
         val mountFailedPids = observer.getMountFailedPids()
         val mkdir = observer.getMountedPackages().contains(packageName)
-        // 只有已配置重定向的包才走 uid 权威判定。非 sr 包（详情页也可能来查）
-        // 保持原 pkgList 语义，避免把"不在 sr 配置里"误判成"没有进程"。
-        val uidMappingReady = VfsRuntimeConfigStore.getStorageRedirectPackages()
+        // 只有已配置重定向的包才走 uid 权威判定，非重定向包保持 pkgList 语义，
+        // 避免把不在重定向配置中的查询误判成没有进程。
+        val uidMappingReady = VfsRuntimePolicy.getStorageRedirectPackages()
             .contains(packageName) && PackageInfoMapper.isMappingReady()
 
         processes
@@ -127,7 +127,7 @@ class VfsLayerController {
         val allStartUpAwarePids = observer.getAllStartUpAwarePids()
         val mountFailedPids = observer.getMountFailedPids()
         val mountedPackages = observer.getMountedPackages()
-        val srPackages = VfsRuntimeConfigStore.getStorageRedirectPackages()
+        val srPackages = VfsRuntimePolicy.getStorageRedirectPackages()
         val processes = selectProcesses(flags, allStartUpAwarePids)
         // 包级 pidRecords。getAllStartUpAwarePids() 只回答"这个 pid 被**任意**包接管过"，
         // 回答不了"是不是被**本包**接管"；那正是区分"未接管"和"挂了"的关键，
@@ -203,6 +203,7 @@ class VfsLayerController {
             val mountFailedPids = observer.getMountFailedPids().size
             val mountTotalAttempts = observer.getTotalMountAttempts()
             val mountFailureCount = observer.getMountFailureCount()
+            val mountGateRefusals = observer.getGateRefusalCount()
             val lastFailure = observer.getLastMountFailure()
             val lastMountErrorCode = observer.getLastMountErrorCode()
             val state = if (mountFailedPids > 0) {
@@ -223,7 +224,7 @@ class VfsLayerController {
                 },
                 metrics = mapOf(
                     "started" to "true",
-                    "configuredPackages" to VfsRuntimeConfigStore
+                    "configuredPackages" to VfsRuntimePolicy
                         .getStorageRedirectPackages()
                         .size
                         .toString(),
@@ -238,6 +239,7 @@ class VfsLayerController {
                     "mountFailedPids" to mountFailedPids.toString(),
                     "mountTotalAttempts" to mountTotalAttempts.toString(),
                     "mountFailureCount" to mountFailureCount.toString(),
+                    "mountGateRefusals" to mountGateRefusals.toString(),
                     "lastMountFailureAt" to (lastFailure?.timeMillis ?: 0L).toString(),
                     "lastMountFailurePackage" to (lastFailure?.packageName ?: ""),
                     "lastMountFailurePid" to (lastFailure?.pid ?: 0).toString(),
@@ -297,7 +299,7 @@ class VfsLayerController {
     private fun switchAppDataDirOwnersAsync() {
         Thread {
             for (userId in SystemService.getUserIdsNoThrow()) {
-                for (packageName in VfsRuntimeConfigStore.getStorageRedirectPackages()) {
+                for (packageName in VfsRuntimePolicy.getStorageRedirectPackages()) {
                     val ai = SystemService.getApplicationInfoNoThrow(packageName, 0, userId)
                         ?: continue
                     RuntimeFileUtils.switch_owner(
@@ -337,7 +339,7 @@ class VfsLayerController {
         mountFailedPids: Set<Int>,
         mkdir: Boolean,
     ): Int {
-        val targets = VfsRuntimeConfigStore.getMountTargets(packageName, userId)
+        val targets = VfsRuntimePolicy.getMountTargets(packageName, userId)
         val mountedIndices = RuntimeFileUtils.check_mounts(pid, targets.toTypedArray())
         var pidFlag = 0
         when {

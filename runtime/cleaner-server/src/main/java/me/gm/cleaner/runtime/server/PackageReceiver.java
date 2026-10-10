@@ -12,8 +12,8 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import api.SystemService;
-import me.gm.cleaner.runtime.server.observer.BaseIntentObserver;
-import me.gm.cleaner.runtime.server.observer.ObserverManager;
+import me.gm.cleaner.runtime.server.lifecycle.BaseIntentObserver;
+import me.gm.cleaner.runtime.server.lifecycle.ObserverManager;
 
 public class PackageReceiver {
     private static final String TAG = "PackageReceiver";
@@ -68,6 +68,9 @@ public class PackageReceiver {
                                 }
                                 break;
                         }
+                        // 包集合发生了变化：立即失效包列表缓存，避免在 TTL 窗口内
+                        // （PackageListCache.DEFAULT_TTL_MILLIS）读到过期列表。
+                        SystemService.invalidateInstalledPackagesCache();
                         if (ordered) {
                             try {
                                 api.SystemService.finishReceiver(this, resultCode, data,

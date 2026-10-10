@@ -37,10 +37,10 @@ static std::string xhook_init() {
            "\"xhookRefreshCalled\":false,"
            "\"symbols\":{\"containsMount\":false,\"startsWith\":false,"
            "\"isFuseBpfEnabled\":false,\"fuseReqUserdata\":false,"
-           "\"fuseBpfInstall\":false},"
+           "\"fillEntries\":false,\"install\":false,\"effective\":false},"
            "\"symbolMethods\":{\"containsMount\":\"none\",\"startsWith\":\"none\","
            "\"isFuseBpfEnabled\":\"none\",\"fuseReqUserdata\":\"none\","
-           "\"fuseBpfInstall\":\"none\"},"
+           "\"fillEntries\":\"none\",\"install\":\"none\"},"
            "\"lastError\":\"dlopen libfuse_jni.so failed\"}";
 }
 

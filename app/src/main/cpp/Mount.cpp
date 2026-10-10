@@ -504,8 +504,10 @@ static bool switch_mnt_ns(int pid) {
     }
     if (setns(nsFd, CLONE_NEWNS) != 0) {
         LOGE("Failed to setns %s"_iobfs.c_str(), strerror(errno));
+        close(nsFd);
         return false;
     }
+    close(nsFd);
     return true;
 }
 
@@ -653,13 +655,24 @@ namespace Mount {
                                            const char *source = nullptr,
                                            const char *target = nullptr) -> void {
             write_mount_progress(sock, MountPhase::ROLLING_BACK);
+            // P0：bypass 卸载返回值不可丢弃。EBUSY 残留而后续 baseline 恰成功时，
+            // rollback.ok==0 会掩盖残留导致 dirty=false 误判干净。
+            bool bypassCleanupFailed = false;
             if (dataBypassMounted) {
-                TEMP_FAILURE_RETRY(
-                        umount2(androidDataFuseDir.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH));
+                if (TEMP_FAILURE_RETRY(
+                        umount2(androidDataFuseDir.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH)) != 0 &&
+                    errno != EINVAL && errno != ENOENT) {
+                    bypassCleanupFailed = true;
+                    LOGE("Rollback bypass data umount failed: %s"_iobfs.c_str(), strerror(errno));
+                }
             }
             if (obbBypassMounted) {
-                TEMP_FAILURE_RETRY(
-                        umount2(androidObbFuseDir.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH));
+                if (TEMP_FAILURE_RETRY(
+                        umount2(androidObbFuseDir.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH)) != 0 &&
+                    errno != EINVAL && errno != ENOENT) {
+                    bypassCleanupFailed = true;
+                    LOGE("Rollback bypass obb umount failed: %s"_iobfs.c_str(), strerror(errno));
+                }
             }
             const auto rollback = restore_storage_baseline(
                     useSdcardFs, storage, storageSource, userSource);
@@ -667,7 +680,7 @@ namespace Mount {
                 LOGE("Rollback failed after %s at %s: %s"_iobfs.c_str(), stage,
                      rollback.stage, strerror(rollback.err));
             }
-            const bool namespace_dirty = dataRestrictionModified || rollback.ok != 0;
+            const bool namespace_dirty = dataRestrictionModified || rollback.ok != 0 || bypassCleanupFailed;
             if (namespace_dirty) {
                 fail_child(sock, "namespace_rollback_failed",
                            rollback.ok != 0 ? rollback.err : err,
@@ -681,8 +694,10 @@ namespace Mount {
         if (!useSdcardFs) {
             // unmount /Android/data to intercept filesystem operations in app-specific dir.
             if (unmountDataRestriction) {
+                // FUSE 限制挂载日常必 busy，普通 umount 必然 EBUSY；
+                // 与回滚路径一致用 DETACH（异步回收语义已在回滚处论证）。
                 if (TEMP_FAILURE_RETRY(
-                        umount2(androidDataFuseDir.c_str(), UMOUNT_NOFOLLOW)) == 0) {
+                        umount2(androidDataFuseDir.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH)) == 0) {
                     dataRestrictionModified = true;
                 } else if (errno != EINVAL && errno != ENOENT) {
                     const int error = errno;
@@ -693,7 +708,7 @@ namespace Mount {
                 const std::string androidDataDir = StringPrintf(
                         "/storage/emulated/%d/Android/data"_iobfs.c_str(), user_id);
                 if (TEMP_FAILURE_RETRY(
-                        umount2(androidDataDir.c_str(), UMOUNT_NOFOLLOW)) == 0) {
+                        umount2(androidDataDir.c_str(), UMOUNT_NOFOLLOW | MNT_DETACH)) == 0) {
                     dataRestrictionModified = true;
                 } else if (errno != EINVAL && errno != ENOENT) {
                     const int error = errno;

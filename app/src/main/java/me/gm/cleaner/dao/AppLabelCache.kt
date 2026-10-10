@@ -52,6 +52,14 @@ object AppLabelCache {
     fun getPackageLabel(packageInfo: PackageInfo): String =
         getPackageLabelFromCache(packageInfo, true)!!
 
+    /** 无 [PackageInfo] 时按 packageName 直接取持久化标签，本地降级路径使用。 */
+    @Synchronized
+    fun getLabelIfCached(packageName: String): String? {
+        val labelCache = readLabel()
+        val updateTimeToLabel = labelCache.optJSONArray(packageName) ?: return null
+        return if (updateTimeToLabel.length() == 2) updateTimeToLabel.getString(1) else null
+    }
+
     @Synchronized
     fun updatePackageLabelCacheInBulk(
         installedPackages: List<PackageInfo>, removeUninstalled: Boolean

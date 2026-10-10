@@ -32,7 +32,7 @@
     <string name="diagnostics_archive_privacy_message">The package may contain device details, process and mount state, logcat output, DataBus snapshots, redirect rules, and file paths. Basic identifiers are redacted, but please share it only with people you trust.</string>
     <string name="diagnostics_archive_privacy_confirm">Export</string>
     <string name="new_mount">New mount</string>
-    <string name="mounted_apps_title">Mounted apps</string>
+    <string name="mounted_apps_title">Configured apps</string>
     <string name="menu_add_to_hide_list">Add to hide list</string>
     <string name="delete">Delete</string>
     <string name="delete_all_mount_rules">Delete all mount rules</string>
@@ -42,12 +42,18 @@
     <string name="undo">Undo</string>
 
     <!-- Settings -->
-    <string name="enable_features_header">ENABLE FEATURES</string>
+    <string name="service_and_notification_header">Service &amp; Notifications</string>
     <string name="start_on_boot_key" translatable="false">start_on_boot</string>
     <string name="start_on_boot_title">Start Cleaner service on boot</string>
     <string name="start_on_boot_summary">Make sure the service works fine on your device before ticking.</string>
     <string name="post_notification_key" translatable="false">post_notification</string>
     <string name="post_notification_title">Receive update notifications</string>
+    <string name="check_update_key" translatable="false">check_update</string>
+    <string name="check_update_title">Check for updates</string>
+    <string name="check_update_summary">Fetch the latest release from GitHub</string>
+    <string name="new_version_available">New version %s available</string>
+    <string name="click_to_view_release">Click to view release</string>
+    <string name="update_available_channel_name">Update available</string>
     <string name="sort_key" translatable="false">sort_by</string>
     <string name="length_key" translatable="false">length</string>
     <string name="monitor_key" translatable="false">monitor</string>
@@ -107,8 +113,8 @@
     <string name="record_shared_storage_title">Record file operations in shared storage</string>
     <string name="record_external_app_specific_storage_title">(Experimental) Record file operations in external app-specific storage</string>
     <string name="record_external_app_specific_storage_summary">Enabling apps to access their specific storage via FUSE, which will cause a significant performance regression.</string>
-    <string name="fuse_bpf_block_all_title">(Experimental) Fully intercept FUSE BPF calls (including removal)</string>
-    <string name="fuse_bpf_block_all_summary">Off (recommended): only the BPF backing “install” is intercepted, while the platform’s own “remove” is passed through — the smallest intervention, and no kernel BPF program is left behind. On: the “remove” is intercepted as well, fully replicating the legacy fuse_bpf_install behavior — but a kernel BPF program may then linger on Android/data package directories, letting that subtree bypass FUSE and escape redirection.\nThis switch only takes effect while \"(Experimental) Record file operations in external app-specific storage\" is enabled.</string>
+    <string name="fuse_bpf_block_all_title">(Experimental) FUSE BPF interception scope (reserved)</string>
+    <string name="fuse_bpf_block_all_summary">Reserved compatibility option: the install path is always intercepted per the recording policy and removal is always passed through, so this switch currently does not change native behavior. Kept for old platforms and future extension.</string>
     <string name="upsert_title">Save data using upsert</string>
     <string name="upsert_summary">Only keep the latest one for duplicate data.</string>
     <string name="storage_redirect_prompt">Storage Redirect Prompt</string>
@@ -175,6 +181,7 @@
     <string name="service_status_retry_with_max">Attempt %1$d/%2$d</string>
     <string name="service_status_retry">Attempt %d</string>
     <string name="service_status_problem_detail">Issue: %1$s - %2$s</string>
+    <string name="service_status_stale_reboot">Version mismatch (%1$s), please reboot your phone</string>
     <string name="runtime_layer_vfs">VFS main redirect</string>
     <string name="runtime_layer_media_provider_hook">Media library path correction</string>
     <string name="runtime_layer_fuse_native">FUSE compatibility layer</string>
@@ -232,6 +239,7 @@
     <string name="no_root_access">Can\'t access root</string>
     <string name="confirm_exit_restart">RESTART</string>
     <string name="service_need_upgrade">SERVICE NEED UPGRADE</string>
+    <string name="service_need_reboot">Update installed, please reboot your phone</string>
     <string name="service_exception_logcat_shutdown">The logcat is shutdown, please restart the Cleaner service.</string>
     <string name="service_settings">Material Cleaner</string>
     <string name="file_picker_title">Pick file</string>
@@ -355,5 +363,13 @@
 
     <!-- About -->
     <string name="slogan">Material Design cleanup application</string>
+    <string name="about_header">About</string>
+    <string name="about_key" translatable="false">about</string>
+    <string name="about_title">About</string>
+    <string name="about_summary">Version and project info</string>
+    <string name="about_version">Version %s</string>
+    <string name="about_project_url">Project: https://github.com/firesahc/MaterialCleaner</string>
+    <string name="open_project_url">Open project</string>
+    <string name="cancel">Cancel</string>
 
 </resources>

@@ -24,7 +24,7 @@ import me.gm.cleaner.core.config.SecurityHelper;
 import me.gm.cleaner.runtime.server.BuildConfig;
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway;
 import me.gm.cleaner.core.config.ServicePreferences;
-import me.gm.cleaner.runtime.server.observer.ObserverManager;
+import me.gm.cleaner.runtime.server.lifecycle.ObserverManager;
 
 public class CleanerServer extends ContextWrapper {
     public final Handler handler = new Handler(Looper.getMainLooper());
@@ -99,6 +99,11 @@ public class CleanerServer extends ContextWrapper {
         mCleanerServerCallback = new CleanerServerCallback();
         cleanerService = new CleanerService(this, packageInfo.applicationInfo.uid);
         Log.i(BuildConfig.LIBRARY_PACKAGE_NAME, "Cleaner server v" + BuildConfig.VERSION_CODE + " started");
+        // DataBus 根（/data/local/tmp/cleaner）所在文件系统类型。
+        // 此前该事实只能靠 adb 确认：诊断归档的挂载采集全部带 grep 过滤，
+        // /data/local/tmp 从未出现在任何一条输出里。启动时打一条只读探针结论，
+        // 使任意 logcat 抓取都能直接读到（tag=MC_FsProbe）。
+        FilesystemProbe.INSTANCE.logStartupSummary();
         vfsLayerController = new VfsLayerController();
         noticeDispatcher = new NoticeDispatcher(this);
         layerOrchestrator = new LayerOrchestrator(this);

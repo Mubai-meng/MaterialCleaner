@@ -33,7 +33,13 @@ object CleanerHooksClient {
     private fun establishConnection(ctx: CleanerServer, reason: String): Boolean {
         val newBinder = CleanerHooksBinderRetriever.get(ctx)
         if (newBinder == null) {
-            Log.e("MC_REDIRECT", "[CleanerHooksClient] $reason: FAILED to get binder")
+            // 桥宿主是 me.gm.cleaner 应用进程：它尚未启动、正在重启、或被 ColorOS
+            // 回收时取不到 binder 都属**常态 transient**。onStart 之后由 whileAlive
+            // 与协调器退避继续重试，所以这里不是故障而是「暂不可用」。
+            // 记 E 会让正常预热与真故障在日志里无法区分 —— 实测诊断摘要报
+            // 「控制面 HEALTHY」的同时，模块全窗口仅有的 3 条 E 全是这一类。
+            Log.w("MC_REDIRECT", "[CleanerHooksClient] $reason: hooks binder not available yet " +
+                    "(app process not up or restarting), will retry")
             return false
         }
 
@@ -127,7 +133,11 @@ object CleanerHooksClient {
                     + (service != null) + " ping=" + (service?.let { pingBinder() } ?: false) + ")")
             val ctx = server ?: return
             if (!tryReconnect(ctx)) {
-                Log.e("MC_REDIRECT", "[CleanerHooksClient] whileAlive: reconnect failed")
+                // tryReconnect 返回 false 有两种成因：被 HookBridgeReconnectThrottlePolicy
+                // 节流（App 冻结/重启期间的预期行为，上一行已记 I），或 binder 暂不可用。
+                // 两者都由后续轮次继续重试，都不构成错误 —— 原实现记 E 会与真失败混淆。
+                Log.w("MC_REDIRECT", "[CleanerHooksClient] whileAlive: reconnect not established " +
+                        "(throttled or binder unavailable), will retry")
                 return
             }
             try {

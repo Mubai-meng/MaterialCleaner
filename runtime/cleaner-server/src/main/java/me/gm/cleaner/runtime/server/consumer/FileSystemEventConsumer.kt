@@ -2,8 +2,9 @@ package me.gm.cleaner.runtime.server.consumer
 
 import android.util.Log
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
-import me.gm.cleaner.runtime.server.observer.FileSystemObserver
-import me.gm.cleaner.runtime.server.observer.ObserverManager
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
+import me.gm.cleaner.runtime.server.recording.FileSystemObserver
+import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -71,7 +72,7 @@ object FileSystemEventConsumer {
 
     /** 从 DataBus 加载持久化游标 */
     fun loadCursor() {
-        cursor = DataBus.readCursor(DataBus.EVENT_FILESYSTEM)
+        cursor = DataBus.readCursor(DataBusProtocol.EVENT_FILESYSTEM)
         Log.d(TAG, "loadCursor: cursor='$cursor'")
     }
 
@@ -80,12 +81,13 @@ object FileSystemEventConsumer {
      * @return 消费的事件数量
      */
     fun pollAndConsume(): Int {
-        // 信号熔断：signal 未变化表示无新事件，跳过文件系统扫描（listFiles）以节省 tmpfs I/O
-        val signalTime = DataBus.getSignalTimestamp(DataBus.SIGNAL_FILESYSTEM_EVENTS_CHANGED)
+        // 信号熔断：signal 未变化表示无新事件，跳过文件系统扫描（listFiles）以节省目录 I/O
+        // （bus 根经 FilesystemProbe 证实为 f2fs，非 tmpfs：这里省下的是真实磁盘 I/O）
+        val signalTime = DataBus.getSignalTimestamp(DataBusProtocol.SIGNAL_FILESYSTEM_EVENTS_CHANGED)
         if (signalTime <= lastSignalTimestamp && lastSignalTimestamp > 0) return 0
         lastSignalTimestamp = signalTime
 
-        val events = DataBus.readEventFiles(DataBus.EVENT_FILESYSTEM, cursor)
+        val events = DataBus.readEventFiles(DataBusProtocol.EVENT_FILESYSTEM, cursor)
         if (events.isEmpty()) return 0
 
         val observer = ObserverManager.fastGetObserver(FileSystemObserver::class.java)
@@ -170,7 +172,7 @@ object FileSystemEventConsumer {
     }
 
     /**
-     * 清理 consumed/ 目录中超过 TTL 的归档事件文件，避免 tmpfs 空间占满。
+     * 清理 consumed/ 目录中超过 TTL 的归档事件文件，避免目录无界增长占满空间。
      * 阈值双重控制：过期时间（CONSUMED_TTL_MS）+ 最大文件数（CONSUMED_MAX_FILES）。
      */
     private fun cleanupConsumed() {
@@ -212,9 +214,9 @@ object FileSystemEventConsumer {
         }
     }
 
-    private fun advanceCursor(event: DataBus.EventFile) {
+    private fun advanceCursor(event: DataBusProtocol.EventFile) {
         cursor = event.name
-        DataBus.writeCursorToEvent(DataBus.EVENT_FILESYSTEM, event)
+        DataBus.writeCursorToEvent(DataBusProtocol.EVENT_FILESYSTEM, event)
     }
 
     private class ParsedEvent(
@@ -232,7 +234,7 @@ object FileSystemEventConsumer {
      * - **返回 null** = 结构无效（缺 `packageName`/`path`）→ 沿用原有"跳过"语义
      * - **返回对象** = 可投递
      */
-    private fun parseEvent(eventFile: DataBus.EventFile): ParsedEvent? {
+    private fun parseEvent(eventFile: DataBusProtocol.EventFile): ParsedEvent? {
         val event = JSONObject(eventFile.content)
         val packageName = event.optString("packageName", "")
         val path = event.optString("path", "")
@@ -261,12 +263,12 @@ object FileSystemEventConsumer {
      * @return true = 已隔离（证据保留）；false = 只能丢弃（隔离失败，证据丢失）
      */
     private fun settleEvent(
-        eventFile: DataBus.EventFile,
+        eventFile: DataBusProtocol.EventFile,
         reason: String,
         error: Throwable?,
     ): Boolean {
         val kept = EventDeadLetter.quarantine(
-            DataBus.EVENT_FILESYSTEM, eventFile.name, reason, error,
+            DataBusProtocol.EVENT_FILESYSTEM, eventFile.name, reason, error,
         ) == EventDeadLetter.Settlement.QUARANTINED
         deliveryFailures.remove(eventFile.name)
         advanceCursor(eventFile)
@@ -281,7 +283,7 @@ object FileSystemEventConsumer {
      */
     private fun cleanupEventQueue() {
         val pruned = DataBus.pruneConsumedEvents(
-            DataBus.EVENT_FILESYSTEM, keepAtMost = EVENT_QUEUE_MAX_FILES,
+            DataBusProtocol.EVENT_FILESYSTEM, keepAtMost = EVENT_QUEUE_MAX_FILES,
         )
         if (pruned > 0) {
             Log.i(TAG, "cleanupEventQueue: pruned $pruned consumed event files " +

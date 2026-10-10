@@ -348,7 +348,9 @@ public class HooksBridgeProvider extends ContentProvider {
                 // The server will reconnect via CleanerHooksClient.whileAlive when any operation is attempted.
                 // We signal the need for reconnection by setting a flag that the foreground UI can check.
             } else {
-                Log.w("MC_REDIRECT", "[HooksBridge] sServerCallback is null and never was set. "
+                // 文案说明：启动期这里必然为 null（server 尚未注册回调），属预期时序，
+                // 不是异常。"never was set" 读起来像永久故障，容易被现场日志误判。
+                Log.w("MC_REDIRECT", "[HooksBridge] sServerCallback is not yet set (startup). "
                         + "Waiting for server to register callback.");
             }
         }

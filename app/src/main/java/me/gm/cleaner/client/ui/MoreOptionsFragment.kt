@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -31,16 +32,21 @@ import me.gm.cleaner.R
 import me.gm.cleaner.app.ConfirmationDialog
 import me.gm.cleaner.client.CleanerClient
 import me.gm.cleaner.client.ui.storageredirect.MountWizard
+import me.gm.cleaner.client.ui.storageredirect.RedirectReachabilityAnalyzer
 import me.gm.cleaner.dao.RootPreferences
 import me.gm.cleaner.dao.ServiceMoreOptionsPreferences
+import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
-import me.gm.cleaner.core.storage.redirect.domain.MountRules
+import me.gm.cleaner.core.config.BatchCommitResult
+import me.gm.cleaner.core.config.StoragePolicyBatchEdit
+import me.gm.cleaner.core.config.getPackageSrCount
+import me.gm.cleaner.core.config.getPackageSrZipped
 import me.gm.cleaner.net.NOTIFICATION_CHANNEL
 import me.gm.cleaner.settings.BaseSettingsFragment
 import me.gm.cleaner.settings.theme.ThemeUtil
 import me.gm.cleaner.starter.Starter
-import me.gm.cleaner.util.FileUtils
-import me.gm.cleaner.util.FileUtils.toUserId
+import me.gm.cleaner.core.common.RuntimeFileUtils
+import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.util.PermissionUtils
 import me.gm.cleaner.util.RequesterFragment
 import me.gm.cleaner.util.fitsSystemWindowInsets
@@ -141,12 +147,12 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                             setAllAppsSupplier { inputApps }
                             setSelection(
                                 inputPackageNames.asSequence()
-                                    .filter { ServicePreferences.getPackageSrCount(it) == 0 }
+                                    .filter { ConfiguredPolicyStoreProvider.instance.getPackageSrCount(it) == 0 }
                                     .toSet()
                             )
                             addOnPositiveButtonClickListener { checkedApps ->
                                 MainScope().launch(Dispatchers.IO) {
-                                    ServicePreferences.beginBatchOperation()
+                                    val tx = StoragePolicyBatchEdit()
                                     for (packageInfo in checkedApps) {
                                         val list = mutableListOf<Pair<String, String>>()
                                         val rules = input.getJSONArray(packageInfo.packageName)
@@ -154,12 +160,20 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                                             val rule = rules.getJSONArray(i)
                                             list.add(rule.getString(0) to rule.getString(1))
                                         }
-                                        ServicePreferences.putStorageRedirect(
-                                            list, listOf(packageInfo.packageName)
-                                        )
+                                        tx.putRedirect(list, listOf(packageInfo.packageName))
                                     }
-                                    ServicePreferences.endBatchOperation()
-                                    CleanerClient.service?.notifySrChanged()
+                                    val r = tx.commitStructured()
+                                    when (r.overall) {
+                                        BatchCommitResult.Overall.SUCCESS -> CleanerClient.service?.notifySrChanged()
+                                        BatchCommitResult.Overall.FAILURE -> {
+                                            Log.e("MC/Policy", "import template batch commit failed: stageFailed=${r.stageFailed}, redirect=${r.redirect?.error}")
+                                            return@launch
+                                        }
+                                        BatchCommitResult.Overall.PARTIAL -> {
+                                            Log.e("MC/Policy", "unexpected partial commit: redirect=${r.redirect}, readOnly=${r.readOnly}")
+                                            return@launch
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -183,10 +197,9 @@ class MoreOptionsFragment : BaseSettingsFragment() {
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         preferenceManager.setStorageDeviceProtected()
         addPreferencesFromResource(R.xml.service_more_options_preferences)
-        addPreferencesFromResource(R.xml.root_preferences)
 
         val aggressivelyPromptForReadingMediaFiles = findPreference<SwitchPreferenceCompat>(
-            getString(me.gm.cleaner.shared.R.string.aggressively_prompt_for_reading_media_files_key)
+            getString(me.gm.cleaner.R.string.aggressively_prompt_for_reading_media_files_key)
         )!!
         aggressivelyPromptForReadingMediaFiles.onPreferenceChangeListener = object :
             NotifyServerPreferenceChangeListener() {
@@ -218,36 +231,43 @@ class MoreOptionsFragment : BaseSettingsFragment() {
         applyReadOnlyTemplateTo?.setOnPreferenceClickListener {
             AppPickerDialog()
                 .apply {
-                    val installedNonsystemApps = CleanerClient.getInstalledPackages(0).filter {
+                    val installedNonsystemApps = CleanerClient.getInstalledPackagesOrNull(0)?.filter {
                         it.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM == 0
-                    }
+                    } ?: emptyList()
                     setAllAppsSupplier { installedNonsystemApps }
                     addOnPositiveButtonClickListener { checkedApps ->
                         val readOnlyPaths =
                             ServiceMoreOptionsPreferences.editReadOnlyTemplate.sorted()
                         MainScope().launch(Dispatchers.IO) {
-                            ServicePreferences.beginBatchOperation()
+                            val tx = StoragePolicyBatchEdit()
                             val selectedApps = checkedApps.mapNotNull { packageInfo ->
                                 installedNonsystemApps.firstOrNull { it.packageName == packageInfo.packageName }
                             }
                             for (pi in selectedApps) {
-                                val rules = MountRules(
-                                    ServicePreferences.getPackageSrZipped(pi.packageName)
-                                )
+                                val rules = ConfiguredPolicyStoreProvider.instance
+                                    .getPackageSrZipped(pi.packageName)
                                 val mountedReadOnlyPaths = readOnlyPaths.asSequence()
                                     .map { path ->
-                                        rules.getMountedPath(path)
+                                        RedirectReachabilityAnalyzer.mountedPath(rules, path)
                                     }
                                     .filterNot { path ->
-                                        FileUtils.isKnownAppDirPaths(path, pi.packageName)
+                                        RuntimeFileUtils.isKnownAppDirPaths(path, pi.packageName)
                                     }
                                     .toList()
-                                ServicePreferences.putReadOnly(
-                                    mountedReadOnlyPaths, listOf(pi.packageName)
-                                )
+                                tx.putReadOnly(mountedReadOnlyPaths, listOf(pi.packageName))
                             }
-                            ServicePreferences.endBatchOperation()
-                            CleanerClient.service?.notifyReadOnlyChanged()
+                            val r = tx.commitStructured()
+                            when (r.overall) {
+                                BatchCommitResult.Overall.SUCCESS -> CleanerClient.service?.notifyReadOnlyChanged()
+                                BatchCommitResult.Overall.FAILURE -> {
+                                    Log.e("MC/Policy", "read-only template batch commit failed: stageFailed=${r.stageFailed}, readOnly=${r.readOnly?.error}")
+                                    return@launch
+                                }
+                                BatchCommitResult.Overall.PARTIAL -> {
+                                    Log.e("MC/Policy", "unexpected partial commit: redirect=${r.redirect}, readOnly=${r.readOnly}")
+                                    return@launch
+                                }
+                            }
                         }
                     }
                 }
@@ -261,25 +281,33 @@ class MoreOptionsFragment : BaseSettingsFragment() {
         applyMountRulesTemplateTo?.setOnPreferenceClickListener {
             AppPickerDialog()
                 .apply {
-                    val installedNonSystemApps = CleanerClient.getInstalledPackages(0).filter {
+                    val installedNonSystemApps = CleanerClient.getInstalledPackagesOrNull(0)?.filter {
                         it.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM == 0
-                    }
+                    } ?: emptyList()
                     setAllAppsSupplier { installedNonSystemApps }
                     addOnPositiveButtonClickListener { checkedApps ->
                         val answers = ServiceMoreOptionsPreferences.editMountRulesTemplate
                         MainScope().launch(Dispatchers.IO) {
-                            ServicePreferences.beginBatchOperation()
+                            val tx = StoragePolicyBatchEdit()
                             val selectedApps = checkedApps.mapNotNull { packageInfo ->
                                 installedNonSystemApps.firstOrNull { it.packageName == packageInfo.packageName }
                             }
                             for (pi in selectedApps) {
                                 val wizard = MountWizard(pi)
-                                ServicePreferences.putStorageRedirect(
-                                    wizard.createRules(answers), listOf(pi.packageName)
-                                )
+                                tx.putRedirect(wizard.createRules(answers), listOf(pi.packageName))
                             }
-                            ServicePreferences.endBatchOperation()
-                            CleanerClient.service?.notifySrChanged()
+                            val r = tx.commitStructured()
+                            when (r.overall) {
+                                BatchCommitResult.Overall.SUCCESS -> CleanerClient.service?.notifySrChanged()
+                                BatchCommitResult.Overall.FAILURE -> {
+                                    Log.e("MC/Policy", "mount template batch commit failed: stageFailed=${r.stageFailed}, redirect=${r.redirect?.error}")
+                                    return@launch
+                                }
+                                BatchCommitResult.Overall.PARTIAL -> {
+                                    Log.e("MC/Policy", "unexpected partial commit: redirect=${r.redirect}, readOnly=${r.readOnly}")
+                                    return@launch
+                                }
+                            }
                         }
                     }
                 }
@@ -288,12 +316,12 @@ class MoreOptionsFragment : BaseSettingsFragment() {
         }
 
         val autoLogging = findPreference<SwitchPreferenceCompat>(
-            getString(me.gm.cleaner.shared.R.string.auto_logging_key)
+            getString(me.gm.cleaner.R.string.auto_logging_key)
         )!!
         autoLogging.onPreferenceChangeListener = notifyPreferencesChangedListener
 
         val recordSharedStorage = findPreference<SwitchPreferenceCompat>(
-            getString(me.gm.cleaner.shared.R.string.record_shared_storage_key)
+            getString(me.gm.cleaner.R.string.record_shared_storage_key)
         )
         recordSharedStorage?.onPreferenceChangeListener = object :
             NotifyServerPreferenceChangeListener() {
@@ -310,7 +338,7 @@ class MoreOptionsFragment : BaseSettingsFragment() {
         }
 
         val recordExternalAppSpecificStorage = findPreference<SwitchPreferenceCompat>(
-            getString(me.gm.cleaner.shared.R.string.record_external_app_specific_storage_key)
+            getString(me.gm.cleaner.R.string.record_external_app_specific_storage_key)
         )
         recordExternalAppSpecificStorage?.onPreferenceChangeListener = object :
             NotifyServerPreferenceChangeListener() {
@@ -319,10 +347,11 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                 super.onPreferenceChange(preference, newValue)
         }
 
-        // 决策 D1：是否连 fuse_bpf_fill_entries 的“移除”语义一起拦截。
-        // 属于“记录外部应用专属目录”的子开关，随父开关一起下发到 MediaProvider Hook。
+        // 决策 D1：BPF 拦截范围开关，属“记录外部应用专属目录”的子开关。
+        // 走 Notify 链（偏好层真相 → 服务端投影 → redirect_policy 快照 → Hook Cache 透传），
+        // 不在此直调 JNI。
         val fuseBpfBlockAll = findPreference<SwitchPreferenceCompat>(
-            getString(me.gm.cleaner.shared.R.string.fuse_bpf_block_all_key)
+            getString(me.gm.cleaner.R.string.fuse_bpf_block_all_key)
         )
         fuseBpfBlockAll?.onPreferenceChangeListener = object :
             NotifyServerPreferenceChangeListener() {
@@ -332,7 +361,7 @@ class MoreOptionsFragment : BaseSettingsFragment() {
         }
 
         val upsert = findPreference<SwitchPreferenceCompat>(
-            getString(me.gm.cleaner.shared.R.string.upsert_key)
+            getString(me.gm.cleaner.R.string.upsert_key)
         )
         upsert?.onPreferenceChangeListener = notifyPreferencesChangedListener
 
@@ -384,6 +413,34 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                 }
                 hasPermission
             }
+
+        val checkUpdate = findPreference<Preference>(getString(R.string.check_update_key))!!
+        checkUpdate.onPreferenceClickListener = Preference.OnPreferenceClickListener {
+            lifecycleScope.launch(Dispatchers.IO) {
+                me.gm.cleaner.net.UpdateChecker.checkAndNotify(requireContext())
+            }
+            true
+        }
+
+        val about = findPreference<Preference>(getString(R.string.about_key))!!
+        about.onPreferenceClickListener = Preference.OnPreferenceClickListener {
+            com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+                .setTitle(R.string.about_title)
+                .setMessage(
+                    "${getString(R.string.app_name)}\n" +
+                            getString(R.string.about_version, me.gm.cleaner.BuildConfig.VERSION_NAME) +
+                            "\n" + getString(R.string.about_project_url)
+                )
+                .setPositiveButton(R.string.open_project_url) { _, _ ->
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                        data = android.net.Uri.parse("https://github.com/firesahc/MaterialCleaner")
+                    }
+                    startActivity(intent)
+                }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
+            true
+        }
 
         val language = findPreference<ListPreference>(getString(R.string.language_key))!!
         language.onPreferenceChangeListener =
