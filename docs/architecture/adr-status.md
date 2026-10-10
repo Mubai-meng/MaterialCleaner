@@ -16,6 +16,7 @@
 | 0012 | P1 职责收敛 | 有效 |
 | 0013 | R8 stub dontwarn 容忍 | 取代（被 0014 反转） |
 | 0014 | 恢复 hidden-api stub 编译边界 | 有效 |
+| 0015 | 恢复失败关闭与证据约束操作 | 有效 |
 
 后来的决定可反转之前的 ADR；AI 不得把历史 ADR 当设计要求，
 以 `docs/architecture/current.md` 为准。
