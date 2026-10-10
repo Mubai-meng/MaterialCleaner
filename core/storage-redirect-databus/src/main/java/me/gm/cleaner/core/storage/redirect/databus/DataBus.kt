@@ -353,6 +353,13 @@ object DataBus {
     /** 读取恢复总账 JSON，缺失/非法返回 null（调用方视为全新 episode）。 */
     fun readRecoveryLedger(): String? = DataBusRecoveryLedger.read()
 
+    /**
+     * 区分式读取恢复总账：Absent 可按全新处理，Corrupted 必须保守。
+     * 返回公开契约类型，跨模块可见。
+     */
+    fun readRecoveryLedgerDetailed(): DataBusProtocol.RecoveryLedgerRead =
+        DataBusRecoveryLedger.readDetailed()
+
     /** 原子持久化恢复总账 JSON。 */
     fun writeRecoveryLedger(content: String): Boolean = DataBusRecoveryLedger.write(content)
 

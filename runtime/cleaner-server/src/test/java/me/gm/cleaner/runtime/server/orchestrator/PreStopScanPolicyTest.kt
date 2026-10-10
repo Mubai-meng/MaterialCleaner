@@ -20,10 +20,10 @@ class PreStopScanPolicyTest {
     }
 
     @Test
-    fun `执行前确认无进程返回空集合而非中止`() {
-        // Success(empty) 是"确认没有"，不是"无法确认"：记录空目标继续执行。
-        val result = PreStopScanPolicy.resolve(MediaProcessScan.Success(emptyMap()))
-        assertEquals(emptyMap<Int, Long>(), result)
+    fun `执行前确认无进程必须中止`() {
+        // Success(empty) 是“确认没有活进程”：正确路径是唤醒+重探测，
+        // 包级清理需独立准入，不搭本轮便车，故同样返回 null 中止。
+        assertNull(PreStopScanPolicy.resolve(MediaProcessScan.Success(emptyMap())))
     }
 
     @Test
@@ -32,5 +32,12 @@ class PreStopScanPolicyTest {
         // 决策阶段扫描成功只证明当时观察过，不充当执行前身份依据，
         // 因此本判定只看执行前扫描结果。
         assertNull(PreStopScanPolicy.resolve(MediaProcessScan.Unavailable))
+    }
+
+    @Test
+    fun `uid推导userId与系统语义一致`() {
+        // UserHandle.getUserId(uid) = uid / 100000。
+        assertEquals(0, PreStopScanPolicy.userIdOf(10023))
+        assertEquals(10, PreStopScanPolicy.userIdOf(1001023))
     }
 }

@@ -14,15 +14,41 @@ internal object PreStopScanPolicy {
 
     /**
      * @param preStopScan 执行前最后一次扫描结果（唯一身份依据）
-     * @return 要记录的观测实例；null 表示无法确认身份，调用方必须中止本轮破坏操作
+     * @return 要记录的观测实例；null 表示无法确认身份或确认无活进程，
+     *   调用方必须中止本轮破坏操作（回退探测）。
+     *
+     * 成功但空集合同样中止：决策层对 Success(empty) 走 PROBE_ONLY，
+     * 执行层不得因“包已安装”扩大到包级强杀。无活进程时正确路径是
+     * 唤醒+重探测，包级清理需独立准入，不搭本轮便车。
      */
     fun resolve(preStopScan: MediaProcessScan): Map<Int, Long>? = when (preStopScan) {
-        // 成功即权威：Success(empty) 表示确认没有进程，
-        // 记录空目标并继续包级 force-stop（幂等），不是“无法确认”。
-        is MediaProcessScan.Success -> preStopScan.instances
+        is MediaProcessScan.Success ->
+            if (preStopScan.instances.isEmpty()) null else preStopScan.instances
         is MediaProcessScan.Unavailable -> null
     }
+
+    /**
+     * 从 uid 推导 userId（纯函数，可单测）。
+     *
+     * 等价于 UserHandle.getUserId(uid) = uid / 100000，避免在策略层
+     * 引入 Android 框架依赖。Strategy 侧用此函数填充观测目标。
+     */
+    fun userIdOf(uid: Int): Int = uid / 100000
 }
+
+/**
+ * 观测目标（执行层证据）：扫描时刻确实发现的进程实例。
+ *
+ * 与操作目标区分：本类只证明“当时看到过”，最终 API 实际影响的是
+ * 包+用户范围（见 forceStopMediaProviderPackages），两者关系必须在
+ * 执行层显式检查并日志留痕，不得用本类冒充精确杀灭保证。
+ */
+internal data class ObservedTarget(
+    val packageName: String,
+    val userId: Int,
+    val pid: Int,
+    val startTime: Long,
+)
 
 /** 扫描结果：区分"确认无进程"与"无法确认进程状态"。 */
 internal sealed interface MediaProcessScan {

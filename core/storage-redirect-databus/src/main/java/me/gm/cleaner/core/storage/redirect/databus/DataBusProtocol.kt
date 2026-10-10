@@ -142,6 +142,20 @@ object DataBusProtocol {
         }
     }
 
+    /**
+     * 恢复总账区分式读取结果（公开契约，跨模块可见）。
+     *
+     * Absent：路径确定不存在（新机/已清除），可按全新处理；
+     * Ok：常规文件且读取成功；
+     * Corrupted：存在但不可确认（非常规文件/读取异常），
+     *   调用方不得按全新处理，必须进保守恢复态。
+     */
+    sealed interface RecoveryLedgerRead {
+        data object Absent : RecoveryLedgerRead
+        data class Ok(val json: String) : RecoveryLedgerRead
+        data class Corrupted(val reason: String) : RecoveryLedgerRead
+    }
+
     // ── 快照清单（模块内可见，供健康检查遍历）──
     internal fun snapshotNames(): List<String> = listOf(
         SNAPSHOT_REDIRECT_POLICY,

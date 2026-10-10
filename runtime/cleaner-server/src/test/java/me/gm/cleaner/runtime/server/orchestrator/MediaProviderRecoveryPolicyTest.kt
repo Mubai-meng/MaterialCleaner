@@ -14,9 +14,10 @@ class MediaProviderRecoveryPolicyTest {
         destructiveRounds: Int = 0,
         mediaScan: MediaProcessScan =
             MediaProcessScan.Success(mapOf(100 to 50L)),
+        ledgerCorrupted: Boolean = false,
     ) = MediaProviderRecoveryPolicy.State(
         hookConnected, episodeStartMs, thresholdReached,
-        lastRound, destructiveRounds, mediaScan,
+        lastRound, destructiveRounds, mediaScan, ledgerCorrupted,
     )
 
     private fun round(pids: Set<Int>, starts: Map<Int, Long>, timeMs: Long = 1_000L) =
@@ -158,6 +159,28 @@ class MediaProviderRecoveryPolicyTest {
         )
     }
 
+    @Test
+    fun `总账腐败强制只探不杀`() {
+        // 轮次未知时不得破坏，即使熔断未满、实例新鲜。
+        val now = 500_000L
+        assertEquals(
+            MediaProviderRecoveryPolicy.Decision.PROBE_ONLY,
+            MediaProviderRecoveryPolicy.decide(now, state(ledgerCorrupted = true)),
+        )
+    }
+
+    @Test
+    fun `总账腐败优先于熔断态`() {
+        // 腐败走探测而非低频唤醒，以便尽快发现恢复；两者都不允许破坏。
+        val now = 500_000L
+        assertEquals(
+            MediaProviderRecoveryPolicy.Decision.PROBE_ONLY,
+            MediaProviderRecoveryPolicy.decide(
+                now, state(destructiveRounds = 3, ledgerCorrupted = true),
+            ),
+        )
+    }
+
     // ── mayTargetInstances：执行前同实例复检 ──
 
     @Test
@@ -198,5 +221,19 @@ class MediaProviderRecoveryPolicyTest {
         assertTrue(
             MediaProviderRecoveryPolicy.mayTargetInstances(r, emptyMap()),
         )
+    }
+
+    @Test
+    fun `总账JSON组装往返一致`() {
+        val r = round(setOf(100), mapOf(100 to 50L), timeMs = 777L)
+        val json = MediaProviderRecoveryPolicy.buildLedgerJson(2, r)
+        assertTrue(json != null && json.contains("\"destructiveRounds\":2"))
+        assertTrue(json!!.contains("777"))
+    }
+
+    @Test
+    fun `总账JSON空轮次组装不崩`() {
+        val json = MediaProviderRecoveryPolicy.buildLedgerJson(0, null)
+        assertTrue(json != null && json.contains("\"destructiveRounds\":0"))
     }
 }

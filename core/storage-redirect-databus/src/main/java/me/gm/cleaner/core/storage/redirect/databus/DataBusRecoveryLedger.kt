@@ -20,13 +20,34 @@ internal object DataBusRecoveryLedger {
     private const val FILE_NAME = "media_provider_recovery.json"
 
     /** 读取总账 JSON，缺失/非法返回 null（调用方视为全新 episode）。 */
-    fun read(): String? {
+    fun read(): String? = when (val r = readDetailed()) {
+        is DataBusProtocol.RecoveryLedgerRead.Ok -> r.json
+        else -> null
+    }
+
+    /**
+     * 区分式读取：调用方必须区分“确认不存在”与“不可确认”。
+     *
+     * - Absent：路径确定不存在（新机/已清除），可按全新处理；
+     * - Ok：常规文件且读取成功；
+     * - Corrupted：存在但非常规文件、读取抛异常（调用方不得按全新处理，
+     *   必须进保守恢复态）。
+     *
+     * 返回类型为公开契约 [DataBusProtocol.RecoveryLedgerRead]，跨模块可见。
+     */
+    fun readDetailed(): DataBusProtocol.RecoveryLedgerRead {
         val file = File("${DataBus.BUS_ROOT}/${DataBus.DIR_CURSORS}/$FILE_NAME")
         return try {
-            DataBus.readRegularText(file, "cursors/$FILE_NAME")
+            val path = file.toPath()
+            if (!java.nio.file.Files.exists(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                return DataBusProtocol.RecoveryLedgerRead.Absent
+            }
+            val content = DataBus.readRegularText(file, "cursors/$FILE_NAME")
+                ?: return DataBusProtocol.RecoveryLedgerRead.Corrupted("unreadable")
+            DataBusProtocol.RecoveryLedgerRead.Ok(content)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to read recovery ledger", e)
-            null
+            DataBusProtocol.RecoveryLedgerRead.Corrupted(e.message ?: "exception")
         }
     }
 

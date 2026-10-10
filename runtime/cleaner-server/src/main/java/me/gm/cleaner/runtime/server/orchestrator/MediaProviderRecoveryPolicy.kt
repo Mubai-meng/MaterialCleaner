@@ -57,10 +57,19 @@ internal object MediaProviderRecoveryPolicy {
          * Unavailable 与 Success(empty) 是两种不同语义，不得混为一谈。
          */
         val mediaScan: MediaProcessScan,
+        /**
+         * 总账腐败态（存在但不可确认）。true 时禁止任何破坏性准入，
+         * 只能 PROBE_ONLY，直到显式安全重置流程清除总账文件成功。
+         * 带默认值以保持既有调用兼容，含义为“确认不腐败”。
+         */
+        val ledgerCorrupted: Boolean = false,
     )
 
     fun decide(now: Long, state: State): Decision {
         if (state.hookConnected) return Decision.CONNECTED
+        // 腐败态优先于熔断态：熔断是已知轮次用尽，腐败是轮次未知，
+        // 两者都不允许破坏，但腐败必须走探测而非低频唤醒，以便尽快发现恢复。
+        if (state.ledgerCorrupted) return Decision.PROBE_ONLY
         if (state.destructiveRounds >= MAX_DESTRUCTIVE_ROUNDS) return Decision.WAKE_ONLY
         if (state.episodeStartMs <= 0L || now - state.episodeStartMs < STAGE1_WINDOW_MS) {
             return Decision.PROBE_ONLY
@@ -105,5 +114,27 @@ internal object MediaProviderRecoveryPolicy {
             pid in lastRound.targetPids && lastRound.targetStarts[pid] == start
         }
         return !overlap
+    }
+
+    /**
+     * 组装总账 JSON（纯函数，无 IO 无日志，可单测）。
+     *
+     * 失败返回 null。文件原子写与 fsync 语义由 Strategy.persistLedger
+     * 与 DataBusRecoveryLedger 保证，本函数只管组装。
+     */
+    fun buildLedgerJson(rounds: Int, round: RoundRecord?): String? {
+        return try {
+            org.json.JSONObject()
+                .put("destructiveRounds", rounds)
+                .put("lastRoundAt", round?.timeMs ?: 0L)
+                .put("lastRoundPids", org.json.JSONArray(round?.targetPids?.toList() ?: emptyList<Int>()))
+                .put("lastRoundStarts", org.json.JSONObject(
+                    round?.targetStarts?.mapKeys { it.key.toString() }
+                        ?: emptyMap<String, Long>(),
+                ))
+                .toString()
+        } catch (e: Exception) {
+            null
+        }
     }
 }

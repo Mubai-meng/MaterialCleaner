@@ -47,6 +47,13 @@ class MediaProviderRecoveryStrategy(
     private var destructiveRounds: Int = 0
     private var lastRound: MediaProviderRecoveryPolicy.RoundRecord? = null
     private var lastWakeOnlyWakeAt: Long = 0L
+    /**
+     * 总账腐败态：总账存在但不可确认（非常规文件/读取异常/JSON 损坏）。
+     * true 时 Policy 强制 PROBE_ONLY；只有总账文件被成功清除后才允许退出。
+     * @Volatile 保证 watchdog/Handler 线程可见性。
+     */
+    @Volatile
+    private var ledgerCorrupted: Boolean = false
 
     data class RecoverySnapshot(
         val consecutiveHookMissing: Int = 0,
@@ -57,12 +64,15 @@ class MediaProviderRecoveryStrategy(
         val episodeStartMs: Long = 0L,
         val destructiveRounds: Int = 0,
         val wakeOnlyMode: Boolean = false,
+        val ledgerCorrupted: Boolean = false,
     )
 
     init {
-        // 重启延续：不断电熔断总账；Hook 确认连上后才清零（见 connected 分支）。
+        // 重启延续：不断电熔断总账；Hook 确认连上且清账成功后才清零（见 connected 分支）。
+        // Corrupted 不归零，进保守探测态。
         runCatching { loadLedger() }.onFailure {
-            Log.w(TAG, "Failed to load recovery ledger, starting fresh", it)
+            Log.w(TAG, "Failed to load recovery ledger, entering conservative probe", it)
+            ledgerCorrupted = true
         }
     }
 
@@ -82,6 +92,7 @@ class MediaProviderRecoveryStrategy(
             episodeStartMs = episodeStartMs,
             destructiveRounds = destructiveRounds,
             wakeOnlyMode = destructiveRounds >= MediaProviderRecoveryPolicy.MAX_DESTRUCTIVE_ROUNDS,
+            ledgerCorrupted = ledgerCorrupted,
         )
     }
 
@@ -93,10 +104,17 @@ class MediaProviderRecoveryStrategy(
             }
             consecutiveMediaProviderHookMissing = 0
             episodeStartMs = 0L
-            if (destructiveRounds > 0) {
-                destructiveRounds = 0
-                lastRound = null
-                DataBus.clearRecoveryLedger()
+            if (destructiveRounds > 0 || lastRound != null || ledgerCorrupted) {
+                // 安全重置：只有总账文件真正清除成功，才允许清零内存与腐败态；
+                // clear 失败必须保持原状态，否则内存已清而文件仍在，下次重启误判。
+                if (DataBus.clearRecoveryLedger()) {
+                    destructiveRounds = 0
+                    lastRound = null
+                    ledgerCorrupted = false
+                } else {
+                    Log.w(TAG, "Failed to clear recovery ledger, keeping rounds=$destructiveRounds " +
+                            "corrupted=$ledgerCorrupted")
+                }
             }
             return false
         }
@@ -132,6 +150,7 @@ class MediaProviderRecoveryStrategy(
                     lastRound = lastRound,
                     destructiveRounds = destructiveRounds,
                     mediaScan = currentScan,
+                    ledgerCorrupted = ledgerCorrupted,
                 ),
             )
             when (decision) {
@@ -202,11 +221,11 @@ class MediaProviderRecoveryStrategy(
         }
         // 真正执行破坏前重新扫描实例身份：probe 的 wake+等待期间进程集合可能已变，
         // 决策时观测结果不等于执行时对象，不能直接当事实记录。
-        // 无法确认身份时必须中止本轮破坏操作——“不能确认身份则禁止盲杀”是硬约束，
-        // 回退陈旧快照继续杀会使该约束失效（第一次扫描成功只证明当时观察过）。
+        // 无法确认身份或确认无活进程时必须中止本轮破坏操作——“不能确认身份则禁止盲杀”、
+        // “无活进程只做唤醒+重探测”是硬约束。包级清理需独立准入，不搭本轮便车。
         val preStopObserved = PreStopScanPolicy.resolve(scanMediaProcessInstances())
         if (preStopObserved == null) {
-            Log.w(TAG, "Pre-stop scan unavailable, aborting destructive round " +
+            Log.w(TAG, "Pre-stop scan unavailable or empty, aborting destructive round " +
                     "to keep the blind-kill guard (will keep probing)")
             return true
         }
@@ -217,14 +236,46 @@ class MediaProviderRecoveryStrategy(
                     "aborting destructive round to keep the per-instance limit")
             return true
         }
+        // 防御性复检：decide 与执行之间内存状态理论上单线程不变，
+        // 但腐败态/熔断是硬门禁，在破坏前最后一刻再确认一次。
+        if (ledgerCorrupted ||
+            destructiveRounds >= MediaProviderRecoveryPolicy.MAX_DESTRUCTIVE_ROUNDS
+        ) {
+            Log.w(TAG, "Destructive guard tripped before force-stop " +
+                    "(corrupted=$ledgerCorrupted rounds=$destructiveRounds), aborting")
+            return true
+        }
+        // 观测目标 vs 操作目标显式对照：扫描给出 pid 级证据，
+        // API 实际影响包+用户范围。差集必须日志留痕，不得用观测精度冒充操作精度。
+        val observedTargets = scanObservedTargets()
+        if (observedTargets.isEmpty()) {
+            Log.w(TAG, "Observed targets empty at execution, aborting destructive round")
+            return true
+        }
+        // 预先记账：先把“已保留的尝试轮次”落盘，成功后才允许破坏。
+        // 杀后崩溃会多记不少记（偏保守），绝不能少记（偏危险）。
+        // destructiveRounds 语义为尝试次数：即使最终未找到已安装包同样计轮。
+        val nextRounds = destructiveRounds + 1
+        val nextRound = MediaProviderRecoveryPolicy.RoundRecord(
+            timeMs = now,
+            targetPids = preStopObserved.keys.toSet(),
+            targetStarts = preStopObserved.toMap(),
+        )
+        if (!persistLedger(nextRounds, nextRound)) {
+            Log.w(TAG, "Failed to persist recovery ledger, aborting force-stop to keep fail-closed")
+            return true
+        }
+        destructiveRounds = nextRounds
+        lastRound = nextRound
         // 语义固定为“破坏操作前观测到的目标实例”。平台不返回实际终止清单，
         // 且 forceStopPackage 是包级操作、与扫描瞬间的 PID 集合存在固有竞态窗口，
         // 因此这是准入证据而非身份保证；该窗口在下列情形不可避免：
         // - Success(empty)：确认无活进程，操作为包级清理+wake（幂等，用于拉起死进程）；
         // - Success(nonEmpty)：观测到活实例，但扫描到执行之间仍可能出现新实例。
         // 确认进入破坏路径后才重置需要重建的 Native 状态。
+        // 内存准入态已在预先记账时更新，此处只执行破坏与结果记录，不再二次计轮。
         MediaProviderHookGateway.resetNativeStateForReconnect()
-        val stoppedPackages = forceStopMediaProviderPackages()
+        val stoppedPackages = forceStopMediaProviderPackages(observedTargets)
         if (stoppedPackages.isEmpty()) {
             Log.w(TAG, "MediaProvider hook recovery requested, but no MediaProvider package was found")
         } else {
@@ -232,16 +283,8 @@ class MediaProviderRecoveryStrategy(
         }
         consecutiveMediaProviderHookMissing = 0
         lastMediaProviderRecoveryAt = now
-        lastRound = MediaProviderRecoveryPolicy.RoundRecord(
-            timeMs = now,
-            targetPids = preStopObserved.keys.toSet(),
-            targetStarts = preStopObserved.toMap(),
-        )
-        // destructiveRounds 语义固定为“破坏性尝试次数”：forceStop 返回空列表
-        // （未找到已安装的 MediaProvider 包）同样计入，因为已发起破坏性动作。
+        // destructiveRounds 语义固定为“破坏性尝试次数”（见预先记账注释）：
         // 诊断侧必须按尝试次数解读，不得当作成功强杀次数。
-        destructiveRounds++
-        persistLedger()
         scheduleMediaProviderWake()
         return true
     }
@@ -272,30 +315,93 @@ class MediaProviderRecoveryStrategy(
         }
     }
 
-    private fun persistLedger() {
-        val json = try {
-            JSONObject()
-                .put("destructiveRounds", destructiveRounds)
-                .put("lastRoundAt", lastRound?.timeMs ?: 0L)
-                .put("lastRoundPids", JSONArray(lastRound?.targetPids?.toList() ?: emptyList<Int>()))
-                .put("lastRoundStarts", JSONObject(
-                    lastRound?.targetStarts?.mapKeys { it.key.toString() }
-                        ?: emptyMap<String, Long>(),
-                ))
-                .toString()
+    /**
+     * 观测目标明细（执行层证据）：扫描时刻确实发现的进程实例。
+     *
+     * uid→userId 推导经 PreStopScanPolicy.userIdOf（= uid/100000），
+     * 与 UserHandle.getUserId 一致；不可解析的 PID 剔除（宁可不杀）。
+     * 本表只证明“当时看到过”，最终 API 影响包+用户范围，
+     * 两者差集在 forceStopMediaProviderPackages 中日志留痕。
+     */
+    private fun scanObservedTargets(): List<ObservedTarget> {
+        return try {
+            SystemService.getRunningAppProcessesNoThrow()
+                .asSequence()
+                .filter { proc ->
+                    proc.pkgList?.any { MEDIA_PROVIDER_PACKAGE_CANDIDATES.contains(it) } == true
+                }
+                .mapNotNull { proc ->
+                    val pkg = proc.pkgList?.firstOrNull {
+                        MEDIA_PROVIDER_PACKAGE_CANDIDATES.contains(it)
+                    } ?: return@mapNotNull null
+                    val start = ProcessIdentity
+                        .currentInstance(proc.pid)?.startTime ?: return@mapNotNull null
+                    ObservedTarget(
+                        packageName = pkg,
+                        userId = PreStopScanPolicy.userIdOf(proc.uid),
+                        pid = proc.pid,
+                        startTime = start,
+                    )
+                }
+                .toList()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to build recovery ledger", e)
-            return
-        }
-        if (!DataBus.writeRecoveryLedger(json)) {
-            Log.w(TAG, "Failed to persist recovery ledger")
+            Log.w(TAG, "Failed to scan observed targets", e)
+            emptyList()
         }
     }
 
+    /**
+     * 组装总账 JSON（委托纯策略函数；保留本方法以兼容既有调用点）。
+     *
+     * 纯组装逻辑见 MediaProviderRecoveryPolicy.buildLedgerJson（可单测）；
+     * 文件原子写与 fsync 语义依赖设备，由设备验收覆盖。
+     */
+    internal fun buildLedgerJson(
+        rounds: Int,
+        round: MediaProviderRecoveryPolicy.RoundRecord?,
+    ): String? = MediaProviderRecoveryPolicy.buildLedgerJson(rounds, round)
+
+    /**
+     * 预先记账：把“已保留的尝试轮次”落盘，成功返回 true。
+     *
+     * 原子性说明：依赖 DataBusRecoveryLedger 的 tmp→fsync→rename；
+     * 只保证 write==true 时文件已被替换，不承诺掉电级目录元数据持久。
+     * 失败必须禁杀（调用方中止），不得先杀后补。
+     */
+    private fun persistLedger(
+        rounds: Int,
+        round: MediaProviderRecoveryPolicy.RoundRecord?,
+    ): Boolean {
+        val json = buildLedgerJson(rounds, round)
+        if (json == null) {
+            Log.w(TAG, "Failed to build recovery ledger")
+            return false
+        }
+        if (!DataBus.writeRecoveryLedger(json)) {
+            Log.w(TAG, "Failed to persist recovery ledger")
+            return false
+        }
+        return true
+    }
+
     private fun loadLedger() {
-        val json = DataBus.readRecoveryLedger()
-            ?: return
-        val root = JSONObject(json)
+        when (val r = DataBus.readRecoveryLedgerDetailed()) {
+            // 确认不存在：新机/已清除，按全新处理。
+            is me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol.RecoveryLedgerRead.Absent -> return
+            is me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol.RecoveryLedgerRead.Corrupted -> {
+                Log.w(TAG, "Recovery ledger corrupted (${r.reason}), entering conservative probe")
+                ledgerCorrupted = true
+                return
+            }
+            is me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol.RecoveryLedgerRead.Ok -> {
+                val root = JSONObject(r.json)
+                applyLedgerRoot(root)
+            }
+        }
+    }
+
+    /** 解析已确认可读的总账 JSON；JSON 语法损坏抛给调用方转腐败态。 */
+    private fun applyLedgerRoot(root: JSONObject) {
         destructiveRounds = root.optInt("destructiveRounds", 0)
         val lastAt = root.optLong("lastRoundAt", 0L)
         val pids = mutableSetOf<Int>()
@@ -338,7 +444,17 @@ class MediaProviderRecoveryStrategy(
         }
     }
 
-    private fun forceStopMediaProviderPackages(): Set<String> {
+    /**
+     * 包级强杀：API 粒度为包+用户，无法精确到 PID。
+     *
+     * @param observed 执行前观测到的进程实例（pid 级证据）。
+     * @return 实际下发强杀的包集合。
+     *
+     * 观测 vs 操作差集必须日志留痕：若操作包不在观测中，说明杀了未观测到的
+     * 同包其他用户实例；若观测包未安装，则跳过。这是包级 API 固有语义，
+     * 不得用观测精度冒充操作精度。
+     */
+    private fun forceStopMediaProviderPackages(observed: List<ObservedTarget>): Set<String> {
         val userIds = SystemService.getUserIdsNoThrow()
         val packages = linkedSetOf<String>()
 
@@ -348,6 +464,18 @@ class MediaProviderRecoveryStrategy(
                 }) {
                 packages += packageName
             }
+        }
+
+        val observedPkgs = observed.map { it.packageName }.toSet()
+        val extraKilled = packages - observedPkgs
+        val uninstalled = observedPkgs - packages.toSet()
+        if (extraKilled.isNotEmpty()) {
+            Log.w(TAG, "force-stop scope exceeds observed instances: " +
+                    "observedPkgs=$observedPkgs operatedPkgs=$packages " +
+                    "observed=${observed.map { "${it.packageName}/u${it.userId}/${it.pid}" }}")
+        }
+        if (uninstalled.isNotEmpty()) {
+            Log.w(TAG, "observed packages not installed, skipping: $uninstalled")
         }
 
         for (userId in userIds) {
