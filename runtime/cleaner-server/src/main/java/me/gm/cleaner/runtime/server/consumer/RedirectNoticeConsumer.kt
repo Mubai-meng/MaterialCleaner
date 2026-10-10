@@ -123,6 +123,7 @@ object RedirectNoticeConsumer {
                         failed = true
                         break
                     }
+                    clearAttemptAfterAdvance(eventFile.name)
                     continue
                 }
 
@@ -153,6 +154,7 @@ object RedirectNoticeConsumer {
                         failed = true
                         break
                     }
+                    clearAttemptAfterAdvance(eventFile.name)
                     continue
                 }
 
@@ -167,6 +169,7 @@ object RedirectNoticeConsumer {
                                     failed = true
                                     break
                                 }
+                                clearAttemptAfterAdvance(eventFile.name)
                                 continue
                             }
                             srv.noticeDispatcher.showMediaNotFoundNotice(
@@ -183,6 +186,7 @@ object RedirectNoticeConsumer {
                                     failed = true
                                     break
                                 }
+                                clearAttemptAfterAdvance(eventFile.name)
                                 continue
                             }
                             srv.noticeDispatcher.showRedirectNotice(packageName, originalPath, mountedPath, type)
@@ -231,6 +235,9 @@ object RedirectNoticeConsumer {
                     failed = true
                     break
                 }
+                // 成功终态：游标已提交，清除重试计数。
+                // 清除失败只记限频日志：计数仅影响重试预算，绝不回退游标、不撤销分发。
+                clearAttemptAfterAdvance(eventFile.name)
                 infraStreak = 0
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to consume redirect notice ${eventFile.name}, keeping cursor", e)
@@ -294,6 +301,13 @@ object RedirectNoticeConsumer {
             DataBusProtocol.PruneResult(0, 0, 1, null)
         }
         failed = failed or reportPrune("quarantine", quarantine)
+        // 孤儿计数清理不依赖游标水位（只与事件存量有关），与隔离清理并列执行。
+        val orphanAttempts = runCatching {
+            DataBus.pruneOrphanAttempts(DataBusProtocol.EVENT_REDIRECT_NOTICE)
+        }.getOrElse {
+            DataBusProtocol.PruneResult(0, 0, 1, null)
+        }
+        failed = failed or reportPrune("orphanAttempts", orphanAttempts)
         pruneFailureStreak = if (failed) {
             val streak = pruneFailureStreak + 1
             if (streak >= EventQueueRetention.PRUNE_FAILURE_JOURNAL_THRESHOLD) {
@@ -351,5 +365,28 @@ object RedirectNoticeConsumer {
         // 本进程刚原子写入过即为可信：重确认后清理门重新打开。
         cursorRead = DataBusProtocol.CursorRead.OK
         return true
+    }
+
+    /**
+     * 终态游标提交成功后清除重试计数（成功/跳过路径共用）。
+     * 清除失败只记限频日志：计数仅影响重试预算，绝不回退游标、不撤销副作用。
+     */
+    private fun clearAttemptAfterAdvance(eventName: String) {
+        if (!DataBus.clearEventAttempt(DataBusProtocol.EVENT_REDIRECT_NOTICE, eventName)) {
+            ClearAttemptWarnThrottle.warn("Failed to clear attempt for $eventName, cursor already advanced")
+        }
+    }
+
+    /** clearEventAttempt 失败日志限频（60s），风格与 DataBusPrune 侧一致。 */
+    private object ClearAttemptWarnThrottle {
+        private var lastAt = 0L
+        private const val INTERVAL_MS = 60_000L
+
+        fun warn(message: String) {
+            val now = System.currentTimeMillis()
+            if (now - lastAt < INTERVAL_MS) return
+            lastAt = now
+            Log.w(TAG, message)
+        }
     }
 }

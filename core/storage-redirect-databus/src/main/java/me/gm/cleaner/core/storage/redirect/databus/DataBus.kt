@@ -434,6 +434,18 @@ object DataBus {
         DataBusPrune.pruneQuarantine(queue, retentionMs, maxDeletePerRun)
 
     /**
+     * 清理孤儿重试计数：计数对应事件文件已不在源队列时删除。
+     *
+     * 不依赖消费游标（计数清理只与事件存量有关），结果 cursorRead 恒为 null。
+     * 实现见 [DataBusEventQuarantine.pruneOrphanAttempts]。
+     */
+    fun pruneOrphanAttempts(
+        queue: String,
+        maxDeletePerRun: Int = 500,
+    ): DataBusProtocol.PruneResult =
+        DataBusEventQuarantine.pruneOrphanAttempts(queue, maxDeletePerRun)
+
+    /**
      * 源事件删除判定（纯函数，安全契约的可测载体）。
      *
      * 规则：
