@@ -23,7 +23,6 @@ import java.nio.file.LinkOption
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -31,7 +30,6 @@ object DiagnosticArchive {
     private const val TAG = "DiagnosticArchive"
     private const val OUTPUT_DIR = "/data/local/tmp/cleaner_diagnostics"
     private const val AUTO_LOG_DIR = "/data/local/tmp/cleaner_logs"
-    private const val MAX_COMMAND_BYTES = 4 * 1024 * 1024
     private const val MAX_TEXT_FILE_BYTES = 512 * 1024
     private const val MAX_AUTO_LOG_FILES = 8
     private const val MAX_EVENT_FILES = 20
@@ -634,7 +632,7 @@ object DiagnosticArchive {
     }
 
     private fun addCommand(zip: ZipOutputStream, entryName: String, command: String) {
-        val result = runCommand(command)
+        val result = DiagnosticCommandRunner.runCommand(command)
         addText(zip, entryName, buildString {
             appendLine("$ $command")
             appendLine("exitCode=${result.exitCode}")
@@ -663,53 +661,6 @@ object DiagnosticArchive {
             JSONObject(content).optJSONObject(sectionName)
         }.getOrNull() ?: return
         addText(zip, entryName, section.toString(2))
-    }
-
-    private fun runCommand(command: String): CommandResult {
-        var process: Process? = null
-        return try {
-            process = ProcessBuilder("/system/bin/sh", "-c", command)
-                .redirectErrorStream(true)
-                .start()
-            val output = ByteArrayOutputStream()
-            var truncated = false
-            val reader = Thread {
-                try {
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    val input = process.inputStream
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        if (output.size() + read <= MAX_COMMAND_BYTES) {
-                            output.write(buffer, 0, read)
-                        } else {
-                            val allowed = MAX_COMMAND_BYTES - output.size()
-                            if (allowed > 0) output.write(buffer, 0, allowed)
-                            truncated = true
-                            process.destroy()
-                            break
-                        }
-                    }
-                } catch (_: Exception) {
-                }
-            }
-            reader.start()
-            val finished = process.waitFor(15, TimeUnit.SECONDS)
-            if (!finished) {
-                process.destroyForcibly()
-            }
-            reader.join(1000)
-            CommandResult(
-                exitCode = if (finished) process.exitValue() else -1,
-                timedOut = !finished,
-                truncated = truncated,
-                output = output.toString(StandardCharsets.UTF_8.name()),
-            )
-        } catch (e: Exception) {
-            CommandResult(-1, timedOut = false, truncated = false, output = e.stackTraceToString())
-        } finally {
-            process?.destroy()
-        }
     }
 
     private fun addFileTail(zip: ZipOutputStream, file: File, entryName: String, maxBytes: Int) {
@@ -789,10 +740,6 @@ object DiagnosticArchive {
         }
     }
 
-    private data class CommandResult(
-        val exitCode: Int,
-        val timedOut: Boolean,
-        val truncated: Boolean,
-        val output: String,
-    )
+    // 命令执行实现见 DiagnosticCommandRunner（G2 粒度抽离）；
+    // 历史 CommandResult 已迁移为 DiagnosticCommandRunner.CommandResult。
 }
