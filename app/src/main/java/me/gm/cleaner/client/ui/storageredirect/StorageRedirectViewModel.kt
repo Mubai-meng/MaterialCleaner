@@ -213,6 +213,9 @@ class StorageRedirectViewModel(private val application: Application, state: Save
             val mkdirFailedPids = mutableListOf<Int>()
             val unknownPids = mutableListOf<Int>()
             val mountFailedPids = mutableListOf<Int>()
+            val partialPids = mutableListOf<Int>()
+            val notMountedPids = mutableListOf<Int>()
+            val unmanagedPids = mutableListOf<Int>()
             packageStatus.pidFlags.forEachIndexed { index, pidFlag ->
                 if (pidFlag and PackageStatus.PID_FLAG_MOUNTED != 0) {
                     mountedPids += packageStatus.pids[index]
@@ -232,8 +235,20 @@ class StorageRedirectViewModel(private val application: Application, state: Save
                 if (pidFlag and PackageStatus.PID_FLAG_MOUNT_FAILED != 0) {
                     mountFailedPids += packageStatus.pids[index]
                 }
+                if (pidFlag and PackageStatus.PID_FLAG_PARTIALLY_MOUNTED != 0) {
+                    partialPids += packageStatus.pids[index]
+                }
+                if (pidFlag and PackageStatus.PID_FLAG_NOT_MOUNTED != 0) {
+                    notMountedPids += packageStatus.pids[index]
+                }
+                if (pidFlag and PackageStatus.PID_FLAG_UNMANAGED != 0) {
+                    unmanagedPids += packageStatus.pids[index]
+                }
             }
-            if (packageStatus.pids.size == mountedPids.size) {
+            // UNMANAGED 不进分母：仅当 managed 全部命中才判已挂载；空列表保持旧语义。
+            if (packageStatus.pids.size - unmanagedPids.size == mountedPids.size &&
+                (mountedPids.isNotEmpty() || packageStatus.pids.isEmpty())
+            ) {
                 runningStatus += context.getString(R.string.storage_redirect_status_summary_suffix_mounted)
                 return@async
             }
@@ -283,13 +298,31 @@ class StorageRedirectViewModel(private val application: Application, state: Save
             }
             val remountedPids = packageStatus.pids.toList() -
                     mountedPids - startUpUnawarePids - deletedPids -
-                    mkdirFailedPids - unknownPids - mountFailedPids
+                    mkdirFailedPids - unknownPids - mountFailedPids -
+                    partialPids - notMountedPids - unmanagedPids
             if (remountedPids.isNotEmpty()) {
                 runningStatus += context.resources.getQuantityString(
                     R.plurals.storage_redirect_status_summary_suffix_not_mounted,
                     remountedPids.size,
                     context.getString(R.string.storage_redirect_status_not_mounted_remount),
                     remountedPids.joinToString(context.getString(R.string.delimiter))
+                )
+            }
+            val attentionPids = partialPids + notMountedPids
+            if (attentionPids.isNotEmpty()) {
+                runningStatus += context.resources.getQuantityString(
+                    R.plurals.storage_redirect_status_summary_suffix_not_mounted,
+                    attentionPids.size,
+                    context.getString(R.string.storage_redirect_status_not_mounted_remount),
+                    attentionPids.joinToString(context.getString(R.string.delimiter))
+                )
+            }
+            if (unmanagedPids.isNotEmpty()) {
+                runningStatus += context.resources.getQuantityString(
+                    R.plurals.storage_redirect_status_summary_suffix_not_mounted,
+                    unmanagedPids.size,
+                    context.getString(R.string.storage_redirect_status_not_mounted_unmanaged),
+                    unmanagedPids.joinToString(context.getString(R.string.delimiter))
                 )
             }
             runningStatus += context.getString(

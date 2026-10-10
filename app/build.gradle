@@ -271,6 +271,7 @@ dependencies {
     implementation project(':core:common')
     implementation project(':core:config-store')
     implementation project(':core:storage-redirect-domain')
+    implementation project(':core:storage-redirect-databus')
     implementation project(':runtime:media-provider-hook')
     runtimeOnly project(':runtime:cleaner-server')
     compileOnly files('libs/api-82.jar')

@@ -72,41 +72,31 @@ object DataBusProtocol {
         val error: String? = null,
     )
 
-    /**
-     * 单个队列目录的**双计数**，由 **一次目录遍历**同时算出。
-     *
-     * 之所以把两者绑在一起：它们都只需要**文件名**（积压判据就是 `name > cursor`），
-     * 分开算会让调用方对同一个目录扫两遍 —— `DataBusLayerReporter` 每轮（~2s）都要
-     * 出这两个数，实测覆盖 `events/filesystem`(~200) + `events/consumed`(~460) 条。
-     */
-    data class QueueCounts(
-        /** 目录内 `*.json` **累计写入量**，只增不减（游标越过不删除）。 */
-        val archived: Int,
-        /** 真实待消费深度：`文件名 > 游标` 的条数。无游标的归档目录恒为 0。 */
-        val pending: Int,
-    )
-
     data class HealthReport(
         val initialized: Boolean,
         val missingDirectories: List<String>,
         val permissionIssues: List<String>,
         val snapshots: List<SnapshotHealth>,
         /**
-         * 队列目录的**累计写入量**（`countJsonFiles` 语义），**不是积压量**。
-         *
-         * ⚠️ `events/<queue>/` 里的文件只被游标越过、从不主动删除，因此这个数只增不减。
-         * 把累计读成积压会得到永远为真的告警：实测 `filesystem=561` 时游标已指向目录里
-         * 最后一个事件、队列其实是空的，却每 60s 报一次假 backlog。
-         * 真实积压见 [pendingEventQueueCounts]；键集合与本体一致。
+         * 物理存在的源事件文件数（含已消费）。
+         * 用途是存储残留，不是积压——不得用它驱动 backlog 告警，
+         * 否则历史文件会让告警长期误报。
          */
         val eventQueueCounts: Map<String, Int>,
-        /**
-         * 队列**真实积压**（`文件名 > 游标`），与 [eventQueueCounts] 出自**同一次**目录遍历。
-         *
-         * 有默认值以兼容既有构造点；`DataBus.checkHealth` 一定会填充。
-         */
-        val pendingEventQueueCounts: Map<String, Int> = emptyMap(),
         val leaseCounts: Map<String, Int>,
+        /**
+         * 待处理事件数（`name > cursor` 的有效事件）。
+         * 唯一驱动积压告警的口径；与消费端 `readEventFiles`
+         * 用同一筛选规则（命名格式 + 常规文件 + 同字典序边界）。
+         */
+        val pendingEventCounts: Map<String, Int> = emptyMap(),
+        /** 隔离目录中的证据文件数（毒丸增长监控）。 */
+        val quarantineCounts: Map<String, Int> = emptyMap(),
+        /**
+         * 各队列游标可信状态。map 中缺失 == 状态未知，**不得当作 OK**；
+         * UNREADABLE 的队列，其 pending 计数不可信，不得作为积压判断依据。
+         */
+        val cursorReadStates: Map<String, CursorRead> = emptyMap(),
     ) {
         fun hasSnapshot(name: String): Boolean =
             snapshots.any { it.name == name && it.exists && it.validJson }
@@ -127,6 +117,44 @@ object DataBusProtocol {
         val name: String,
         val content: String,
     )
+
+    /**
+     * 持久化游标的可信读取状态。
+     *
+     * ABSENT：确定不存在（新队列，尚未消费过）。
+     * OK：成功读到非空游标，可作为删除/统计水位。
+     * UNREADABLE：路径存在但无法确认内容（软链/目录/读取异常/内容空白），
+     *   此时不得把游标当作可信空值使用。
+     */
+    enum class CursorRead { ABSENT, OK, UNREADABLE }
+
+    /** 清理结果：删除授权状态必须原样交还调用方，不能压成布尔值。 */
+    data class PruneResult(
+        val scanned: Int,
+        val deleted: Int,
+        val failed: Int,
+        /** 源事件清理返回 ABSENT/OK/UNREADABLE；隔离目录清理不依赖游标，返回 null。 */
+        val cursorRead: CursorRead?,
+    ) {
+        companion object {
+            /** 参数非法或队列名校验失败：未做任何事，也未获得任何删除授权。 */
+            fun rejected(): PruneResult = PruneResult(0, 0, 0, null)
+        }
+    }
+
+    /**
+     * 恢复总账区分式读取结果（公开契约，跨模块可见）。
+     *
+     * Absent：路径确定不存在（新机/已清除），可按全新处理；
+     * Ok：常规文件且读取成功；
+     * Corrupted：存在但不可确认（非常规文件/读取异常），
+     *   调用方不得按全新处理，必须进保守恢复态。
+     */
+    sealed interface RecoveryLedgerRead {
+        data object Absent : RecoveryLedgerRead
+        data class Ok(val json: String) : RecoveryLedgerRead
+        data class Corrupted(val reason: String) : RecoveryLedgerRead
+    }
 
     // ── 快照清单（模块内可见，供健康检查遍历）──
     internal fun snapshotNames(): List<String> = listOf(

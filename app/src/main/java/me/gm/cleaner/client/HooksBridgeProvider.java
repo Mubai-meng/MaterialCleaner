@@ -423,7 +423,11 @@ public class HooksBridgeProvider extends ContentProvider {
                 allowed = isAuthorizedRegisterHooksCallbackCaller(getContext(), uid);
                 break;
             case METHOD_GET_HOOKS_SERVICE:
-                allowed = isAuthorizedGetHooksServiceCaller(uid);
+                // 注册表存活监视需要媒体侧持有该 Binder 做 linkToDeath；
+                // 特权方法在调用时二次按 UID 鉴权，媒体 UID 仅能 ping/link，
+                // 且 setMediaProviderBinder 本来就可经 register 接口调用，无新增权限。
+                allowed = isAuthorizedGetHooksServiceCaller(uid)
+                        || isKnownMediaProviderUid(getContext(), uid);
                 break;
             default:
                 allowed = false;

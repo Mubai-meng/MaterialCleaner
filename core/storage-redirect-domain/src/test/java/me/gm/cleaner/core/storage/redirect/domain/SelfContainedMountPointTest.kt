@@ -2,7 +2,6 @@ package me.gm.cleaner.core.storage.redirect.domain
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -30,9 +29,7 @@ class SelfContainedMountPointTest {
 
     @Test
     fun `真机自包含规则对不再下发`() {
-        val plan = MountPlanDeriver.derive(pkg, 0, onDeviceRules())
-        assertNotNull(plan)
-        plan!!
+        val plan = MountPlanDeriver.derive(pkg, 0, onDeviceRules()) ?: error("规则非空时不应返回 null")
 
         // 只保留通用重定向那一对；恒等 carve-out 的自包含派生点被剔除。
         assertEquals(listOf("$selfDir/cache"), plan.sources)
@@ -66,7 +63,7 @@ class SelfContainedMountPointTest {
     fun `恒等规则对仍照旧保留`() {
         // 只有一条恒等规则：既不产生自包含，也不能被剔除（oracle 已钉死该形状）。
         val plan = MountPlanDeriver.derive("pkg", 0, listOf(RedirectRule("/a/b", "/a/b")))
-        assertNotNull(plan)
+            ?: error("规则非空时不应返回 null")
         assertEquals(listOf("/a/b"), plan.sources)
         assertEquals(listOf("/a/b"), plan.mountPoints)
         assertTrue(plan.selfContainedPoints.isEmpty())
@@ -83,8 +80,7 @@ class SelfContainedMountPointTest {
                 RedirectRule("/visible/A", "/visible/A"),
                 RedirectRule("/final", "/backing/sub"),
             ),
-        )
-        assertNotNull(plan)
+        ) ?: error("规则非空时不应返回 null")
         assertEquals(listOf("/visible/A", "/backing", "/backing/sub"), plan.mountPoints)
         assertTrue(plan.selfContainedPoints.isEmpty())
         assertEquals(3, plan.sources.size)
@@ -95,9 +91,7 @@ class SelfContainedMountPointTest {
         val plan = MountPlanDeriver.derive(
             pkg, 0,
             listOf(RedirectRule(source = "/a", target = "/a/b")),
-        )
-        assertNotNull(plan)
-        plan!!
+        ) ?: error("规则非空时不应返回 null")
         assertTrue(plan.isEmpty())
         assertTrue(plan.mountPoints.isEmpty())
         assertTrue(plan.sources.isEmpty())

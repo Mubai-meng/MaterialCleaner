@@ -2,11 +2,11 @@ package me.gm.cleaner.runtime.mediaprovider.hook.policy
 import android.os.SystemClock
 import android.util.Log
 import me.gm.cleaner.core.common.err.ErrorCodes
-import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.HookDataBusBridge
 import org.json.JSONArray
 import org.json.JSONObject
 import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
+import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeStatusSnapshotParser.describe
 
 object NativeHookStatus {
     private const val TAG = "NativeHookStatus"
@@ -129,6 +129,8 @@ object NativeHookStatus {
     @Volatile
     private var mountPointsGeneration = 0L
     @Volatile
+    private var mountPointsAppliedEpoch = ""
+    @Volatile
     private var lastMountPointsApplyAt = 0L
     @Volatile
     private var lastMountPointsApplyGeneration = 0L
@@ -148,6 +150,25 @@ object NativeHookStatus {
     private var mountPointsPublishedRevision = ""
     @Volatile
     private var mountPointsObservedAt = 0L
+
+    /**
+     * 最近一次 mountPoints 应用**尝试开始**时间（P2-1）。
+     * 与 lastMountPointsApplyAt（尝试完成时间）分离：epoch 变更后，
+     * "上一次成功应用" 反映的是旧 epoch 的活动，不能当作新 epoch 的进展证据；
+     * 而"尝试开始时间"能证明同步机制正在处理当前配置，无论成败。
+     */
+    @Volatile
+    private var lastMountPointsAttemptAt = 0L
+
+    /**
+     * 最近一次 attempt 的目标身份（P2，与 attemptAt 配套）。
+     * 仅记录时间无法区分该次尝试服务的是旧 epoch 还是当前配置，
+     * 必须连同 generation 一起记录，消费侧才能判断"正在处理当前配置"。
+     */
+    @Volatile
+    private var lastMountPointsAttemptEpoch = ""
+    @Volatile
+    private var lastMountPointsAttemptGeneration = 0L
 
     @Volatile
     private var redirectAppliedRevision = ""
@@ -242,7 +263,7 @@ object NativeHookStatus {
     }
 
     fun markInlineLoadSucceeded(statusJson: String) {
-        val parsed = parseNativeStatus(statusJson)
+        val parsed = NativeStatusSnapshotParser.parse(statusJson)
         nativeStatus = parsed
         inlineLibraryLoaded = true
         inlineHookInitialized = parsed.coreAvailable
@@ -381,9 +402,13 @@ object NativeHookStatus {
         generation: Long,
         count: Int,
         redirectRevision: String,
+        publisherEpoch: String,
     ) {
         lastMountPointsApplySuccess = true
         mountPointsGeneration = generation
+        // 已应用代次确认：仅成功路径更新；失败/不支持路径绝不碰它，
+        // 否则会把尚未成功应用的配置误判为正常。
+        mountPointsAppliedEpoch = publisherEpoch
         lastMountPointsApplyAt = System.currentTimeMillis()
         lastMountPointsApplyGeneration = generation
         lastMountPointsApplyCount = count
@@ -401,11 +426,20 @@ object NativeHookStatus {
         publishSnapshot()
     }
 
-    fun markMountPointsApplyStarted(redirectRevision: String) {
+    fun markMountPointsApplyStarted(
+        generation: Long,
+        redirectRevision: String,
+        publisherEpoch: String,
+    ) {
         mountPointsLastAttemptRevision = redirectRevision
         mountPointsConfiguredRevision = redirectRevision
         mountPointsPublishedRevision = redirectRevision
         mountPointsObservedAt = System.currentTimeMillis()
+        // 每次 attempt 必经入口：记录开始时间与目标身份，
+        // 作为"当前配置正在同步"的可验证证据（无身份的时间戳不可作为证据）。
+        lastMountPointsAttemptAt = mountPointsObservedAt
+        lastMountPointsAttemptEpoch = publisherEpoch
+        lastMountPointsAttemptGeneration = generation
         mountPointsState = POLICY_STATE_APPLYING
         publishSnapshot()
     }
@@ -734,6 +768,7 @@ object NativeHookStatus {
             put("native", nativeStatus.toJson())
             put("policy", JSONObject().apply {
                 put("mountPointsGeneration", mountPointsGeneration)
+                put("appliedPublisherEpoch", mountPointsAppliedEpoch)
                 put("lastApplySuccess", lastMountPointsApplySuccess)
                 put("appliedToExecutor", lastMountPointsApplySuccess)
                 put("applicationState", mountPointsState)
@@ -747,6 +782,9 @@ object NativeHookStatus {
                 put("lastAttemptRedirectRevision", mountPointsLastAttemptRevision)
                 put("lastApplyAt", lastMountPointsApplyAt)
                 put("lastApplyGeneration", lastMountPointsApplyGeneration)
+                put("lastAttemptAt", lastMountPointsAttemptAt)
+                put("lastAttemptEpoch", lastMountPointsAttemptEpoch)
+                put("lastAttemptGeneration", lastMountPointsAttemptGeneration)
                 put("lastApplyCount", lastMountPointsApplyCount)
                 put("lastApplyError", lastMountPointsApplyError)
             })
@@ -796,124 +834,6 @@ object NativeHookStatus {
         status.fuseLibraryLoaded -> STATE_HOOK_UNAVAILABLE
         inlineLibraryLoaded -> STATE_INLINE_LOADED
         else -> STATE_NOT_LOADED
-    }
-
-    private fun parseNativeStatus(json: String): NativeStatusSnapshot {
-        return try {
-            val root = JSONObject(json)
-            val symbols = root.optJSONObject("symbols")
-            val symbolMethods = root.optJSONObject("symbolMethods")
-            // 按 C2 协议解析 BPF 三字段：fillEntries 主拦截点、install 兼容点、effective 有效位。
-            val fillEntriesHooked = symbols?.optBoolean("fillEntries", false) ?: false
-            val installHooked = symbols?.optBoolean("install", false) ?: false
-            val effectiveHooked = symbols?.optBoolean("effective", fillEntriesHooked || installHooked)
-                ?: (fillEntriesHooked || installHooked)
-            NativeStatusSnapshot(
-                fuseAvailable = root.optBoolean("fuseAvailable", true),
-                fuseLibraryLoaded = root.optBoolean("fuseLibraryLoaded", false),
-                fuseLibraryName = root.optString("fuseLibraryName", ""),
-                hookMode = root.optString("hookMode", "UNKNOWN"),
-                fuseJniLoadMode = root.optString("fuseJniLoadMode", "UNKNOWN"),
-                embeddedFuseJniFound = root.optBoolean("embeddedFuseJniFound", false),
-                containsMountHooked = symbols?.optBoolean("containsMount", false) ?: false,
-                startsWithHooked = symbols?.optBoolean("startsWith", false) ?: false,
-                isFuseBpfEnabledHooked = symbols?.optBoolean("isFuseBpfEnabled", false) ?: false,
-                fuseReqUserdataHooked = symbols?.optBoolean("fuseReqUserdata", false) ?: false,
-                fillEntriesHooked = fillEntriesHooked,
-                installHooked = installHooked,
-                effectiveHooked = effectiveHooked,
-                containsMountMethod = symbolMethods?.optString("containsMount", "") ?: "",
-                startsWithMethod = symbolMethods?.optString("startsWith", "") ?: "",
-                isFuseBpfEnabledMethod = symbolMethods?.optString("isFuseBpfEnabled", "") ?: "",
-                fuseReqUserdataMethod = symbolMethods?.optString("fuseReqUserdata", "") ?: "",
-                fillEntriesMethod = symbolMethods?.optString("fillEntries", "") ?: "",
-                installMethod = symbolMethods?.optString("install", "") ?: "",
-                xhookRefreshCalled = root.optBoolean("xhookRefreshCalled", false),
-                lastError = root.optString("lastError", ""),
-            )
-        } catch (e: Exception) {
-            NativeStatusSnapshot(lastError = "Invalid native status: ${describe(e)}")
-        }
-    }
-
-    private fun describe(error: Throwable): String {
-        val message = error.message?.takeIf { it.isNotBlank() }
-        return if (message == null) error.javaClass.name else "${error.javaClass.name}: $message"
-    }
-
-    private data class NativeStatusSnapshot(
-        val fuseAvailable: Boolean = true,
-        val fuseLibraryLoaded: Boolean = false,
-        val fuseLibraryName: String = "",
-        val hookMode: String = "UNKNOWN",
-        val fuseJniLoadMode: String = "UNKNOWN",
-        val embeddedFuseJniFound: Boolean = false,
-        val containsMountHooked: Boolean = false,
-        val startsWithHooked: Boolean = false,
-        val isFuseBpfEnabledHooked: Boolean = false,
-        val fuseReqUserdataHooked: Boolean = false,
-        val fillEntriesHooked: Boolean = false,
-        val installHooked: Boolean = false,
-        val effectiveHooked: Boolean = false,
-        val containsMountMethod: String = "",
-        val startsWithMethod: String = "",
-        val isFuseBpfEnabledMethod: String = "",
-        val fuseReqUserdataMethod: String = "",
-        val fillEntriesMethod: String = "",
-        val installMethod: String = "",
-        val xhookRefreshCalled: Boolean = false,
-        val lastError: String = "",
-    ) {
-        val coreAvailable: Boolean
-            get() = containsMountHooked
-
-        val fullAvailable: Boolean
-            get() = containsMountHooked &&
-                    startsWithHooked &&
-                    isFuseBpfEnabledHooked &&
-                    fuseReqUserdataHooked &&
-                    effectiveHooked
-
-        private val missingSymbols: List<String>
-            get() = buildList {
-                if (!fuseLibraryLoaded) return@buildList
-                if (!containsMountHooked) add("containsMount")
-                if (!startsWithHooked) add("startsWith")
-                if (!isFuseBpfEnabledHooked) add("isFuseBpfEnabled")
-                if (!fuseReqUserdataHooked) add("fuseReqUserdata")
-                if (!effectiveHooked) add("fillEntries/install")
-            }
-
-        fun toJson(): JSONObject = JSONObject().apply {
-            put("fuseAvailable", fuseAvailable)
-            put("fuseLibraryLoaded", fuseLibraryLoaded)
-            put("fuseLibraryName", fuseLibraryName)
-            put("hookMode", hookMode)
-            put("fuseJniLoadMode", fuseJniLoadMode)
-            put("embeddedFuseJniFound", embeddedFuseJniFound)
-            put("xhookRefreshCalled", xhookRefreshCalled)
-            put("coreAvailable", coreAvailable)
-            put("fullAvailable", fullAvailable)
-            put("symbols", JSONObject().apply {
-                put("containsMount", containsMountHooked)
-                put("startsWith", startsWithHooked)
-                put("isFuseBpfEnabled", isFuseBpfEnabledHooked)
-                put("fuseReqUserdata", fuseReqUserdataHooked)
-                put("fillEntries", fillEntriesHooked)
-                put("install", installHooked)
-                put("effective", effectiveHooked)
-            })
-            put("symbolMethods", JSONObject().apply {
-                put("containsMount", containsMountMethod)
-                put("startsWith", startsWithMethod)
-                put("isFuseBpfEnabled", isFuseBpfEnabledMethod)
-                put("fuseReqUserdata", fuseReqUserdataMethod)
-                put("fillEntries", fillEntriesMethod)
-                put("install", installMethod)
-            })
-            put("missingSymbols", JSONArray(missingSymbols))
-            put("lastError", lastError)
-        }
     }
 
     private data class FuseJavaGateStatus(

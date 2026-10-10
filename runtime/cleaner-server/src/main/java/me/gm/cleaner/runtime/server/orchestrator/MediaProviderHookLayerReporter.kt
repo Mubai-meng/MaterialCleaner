@@ -2,6 +2,10 @@ package me.gm.cleaner.runtime.server.orchestrator
 
 object MediaProviderHookLayerReporter {
 
+    // ── 指标键契约（DiagnosticArchive 等消费方必须引用此处，不得另写字面量） ──
+    const val KEY_WAKE_ONLY_MODE = "mediaProviderWakeOnlyMode"
+    const val KEY_DESTRUCTIVE_ROUNDS = "mediaProviderDestructiveRounds"
+
     fun collect(
         generation: Long,
         now: Long,
@@ -28,6 +32,7 @@ object MediaProviderHookLayerReporter {
             lastError = when {
                 mediaProviderHookConnected -> null
                 hookRecovery.hooksReconnectScheduled -> "Hook bridge reconnect scheduled"
+                mediaRecovery.wakeOnlyMode -> "MediaProvider hook missing, wake-only (recovery budget exhausted)"
                 mediaRecovery.mediaProviderWakeScheduled -> "MediaProvider wake scheduled"
                 mediaRecovery.recoveryCooldownRemainingMs > 0L ->
                     "MediaProvider recovery cooldown active"
@@ -47,6 +52,9 @@ object MediaProviderHookLayerReporter {
                         mediaRecovery.recoveryCooldownRemainingMs.toString(),
                 "mediaProviderWakeScheduled" to
                         mediaRecovery.mediaProviderWakeScheduled.toString(),
+                "mediaProviderEpisodeStartMs" to mediaRecovery.episodeStartMs.toString(),
+                KEY_DESTRUCTIVE_ROUNDS to mediaRecovery.destructiveRounds.toString(),
+                KEY_WAKE_ONLY_MODE to mediaRecovery.wakeOnlyMode.toString(),
             ),
         )
     }

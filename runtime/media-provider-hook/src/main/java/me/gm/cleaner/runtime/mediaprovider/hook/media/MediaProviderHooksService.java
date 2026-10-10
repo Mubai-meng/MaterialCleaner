@@ -177,6 +177,8 @@ public class MediaProviderHooksService extends IMediaProviderHooksService.Stub {
         }
         // 尝试从 DataBus 刷新 native 挂载点（独立于 Binder 同步）
         HookPolicyCache.INSTANCE.refreshFromDataBus();
+        // 辅助补强：server 来访即注册表可能已换新，经门控重发布一次（幂等）。
+        requestReRegister("server callback refreshed");
     }
 
     private static final Pattern PATHS_HAVE_USER_ID = Pattern.compile("(?i)(^/[^/]+/[^/]+/)([0-9]+)(/.*)?");

@@ -5,6 +5,7 @@ import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 import me.gm.cleaner.runtime.server.recording.FileSystemObserver
 import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -26,30 +27,6 @@ object FileSystemEventConsumer {
     /** consumed/ 目录最大文件数上限，超过时触发清理最旧文件 */
     private const val CONSUMED_MAX_FILES = 10000
 
-    /**
-     * events/filesystem 目录低水位上限。
-     *
-     * 目录里的文件只被游标越过、从不删除，会随运行时间无界增长
-     * （实测 11 分钟已有 561 个）。超过该值时清理**游标及之前**的文件
-     * （这些文件不可能再被读出，删除不造成重复或丢失）。
-     *
-     * 数值取 200 而非 2000：清理本身是 O(n) 的，而且任何在写入路径上
-     * 扫描该目录的逻辑都会随文件数线性变慢。消费者每 2 s 轮询一次并消费
-     * 全部积压，200 已远超单轮可能积压的量级（>100 事件/秒的持续速率才会触顶，
-     * 且触顶只是触发一次清理，不会丢事件）。
-     */
-    private const val EVENT_QUEUE_MAX_FILES = 200
-
-    /**
-     * 单个事件**投递**失败的最大重试次数，超过即隔离。
-     *
-     * 投递（[FileSystemObserver.onEvent] → Room 写入 / Binder 派发）可能因瞬态原因失败
-     * （磁盘满、`DeadObjectException`），值得重试；但**必须有限**，
-     * 否则确定性失败会重新变成毒丸（见 [EventDeadLetter]）。
-     * 3 次 × 2 s 轮询 ≈ 6 s 内收敛。
-     */
-    private const val MAX_DELIVERY_ATTEMPTS = 3
-
     @Volatile
     private var cursor: String = ""
 
@@ -58,22 +35,43 @@ object FileSystemEventConsumer {
     private var lastSignalTimestamp: Long = 0L
 
     /**
-     * 投递失败次数，按事件文件名计。
-     *
-     * 只用于区分"可重试"与"确定性失败"。不承担跨进程语义：
-     * server 重启后计数归零，但游标也会重读，坏事件仍会在
-     * [MAX_DELIVERY_ATTEMPTS] 次后被隔离，不会重新形成毒丸。
-     *
-     * 消费循环运行在单一 HandlerThread 上（`EventConsumerScheduler`），
-     * 用并发容器只是为了让"单线程"这个前提将来被改动时依然安全。
+     * 跨轮次基础设施故障计数：单次 pollAndConsume 只处理队首附近事件，
+     * 系统性故障（Binder/DB/磁盘）会跨轮复现，必须跨轮累积才能触发熔断。
+     * 事件成功消费或非基础设施失败时清零。
      */
-    private val deliveryFailures =
-        java.util.concurrent.ConcurrentHashMap<String, Int>()
+    @Volatile
+    private var infraStreak: Int = 0
+
+    /**
+     * 游标可信状态：与内存游标值 [cursor] 是两个独立概念。
+     *
+     * 冷启动时若游标不可读，按兼容性策略仍把 [cursor] 置为 "" 继续处理可见事件，
+     * 但本状态保持 UNREADABLE，源事件清理因此被禁止，直到本进程首次
+     * 成功写入游标后重新确认。
+     */
+    @Volatile
+    private var cursorRead: DataBusProtocol.CursorRead = DataBusProtocol.CursorRead.OK
+
+    /** 上次清理尝试时间（成功或失败都记录，失败用更短的重试间隔）。 */
+    @Volatile
+    private var lastQueuePruneAt: Long = 0L
+
+    /** 连续清理失败次数，用于限频与故障留痕。 */
+    @Volatile
+    private var pruneFailureStreak: Int = 0
 
     /** 从 DataBus 加载持久化游标 */
     fun loadCursor() {
-        cursor = DataBus.readCursor(DataBusProtocol.EVENT_FILESYSTEM)
-        Log.d(TAG, "loadCursor: cursor='$cursor'")
+        val (state, value) = DataBus.readCursorDetailed(DataBusProtocol.EVENT_FILESYSTEM)
+        cursorRead = state
+        cursor = value
+        if (state == DataBusProtocol.CursorRead.UNREADABLE) {
+            // 不可信游标不静默降级：留痕并禁止源事件清理，直到首次写游标成功。
+            Log.e(TAG, "loadCursor: cursor unreadable for ${DataBusProtocol.EVENT_FILESYSTEM}, " +
+                    "source event pruning disabled until a cursor write succeeds")
+        } else {
+            Log.d(TAG, "loadCursor: cursor='$cursor' state=$state")
+        }
     }
 
     /**
@@ -81,98 +79,228 @@ object FileSystemEventConsumer {
      * @return 消费的事件数量
      */
     fun pollAndConsume(): Int {
-        // 信号熔断：signal 未变化表示无新事件，跳过文件系统扫描（listFiles）以节省目录 I/O
-        // （bus 根经 FilesystemProbe 证实为 f2fs，非 tmpfs：这里省下的是真实磁盘 I/O）
+        // 信号熔断：signal 未变化表示无新事件，跳过文件系统扫描（listFiles）以节省 tmpfs I/O
         val signalTime = DataBus.getSignalTimestamp(DataBusProtocol.SIGNAL_FILESYSTEM_EVENTS_CHANGED)
-        if (signalTime <= lastSignalTimestamp && lastSignalTimestamp > 0) return 0
+        if (signalTime <= lastSignalTimestamp && lastSignalTimestamp > 0) {
+            // 清理独立于消费流程：静默队列（无新事件）仍需回收过期文件，
+            // 否则低流量队列的保留期形同虚设。节流在 maybePruneQueue 内部。
+            maybePruneQueue()
+            return 0
+        }
         lastSignalTimestamp = signalTime
 
         val events = DataBus.readEventFiles(DataBusProtocol.EVENT_FILESYSTEM, cursor)
-        if (events.isEmpty()) return 0
+        if (events.isEmpty()) {
+            maybePruneQueue()
+            return 0
+        }
 
         val observer = ObserverManager.fastGetObserver(FileSystemObserver::class.java)
         if (observer == null) {
             Log.w(TAG, "FileSystemObserver not available, keeping cursor for ${events.size} events")
             lastSignalTimestamp = 0L
+            // observer 缺失只阻塞消费，不阻塞清理：清理基于 DataBus 持久化游标，
+            // 与内存 observer 无关。
+            maybePruneQueue()
             return 0
         }
 
         var consumed = 0
-        var quarantined = 0
-        var discarded = 0
-
-        /** true = 因"可能瞬态"的投递失败提前退出且**游标未推进**，下一轮重试。 */
-        var retryPending = false
-
+        var failed = false
         for (eventFile in events) {
-            // ── 阶段 1：解析 ──
-            // 事件文件是 tmp→fsync→rename 原子落盘的，磁盘上的 .json 只可能是完整内容，
-            // 解析失败即**永久**失败。必须结清该事件并推进游标，否则整条队列被毒丸卡死。
-            val event = try {
-                parseEvent(eventFile)
-            } catch (e: Exception) {
-                if (settleEvent(eventFile, "json parse failed", e)) quarantined++ else discarded++
-                continue
-            }
-
-            if (event == null) {
-                // 结构无效（缺 packageName/path）：沿用原有"跳过"语义
-                advanceCursor(eventFile)
-                continue
-            }
-
-            // ── 阶段 2：投递 ──
-            // 投递失败可能瞬态（Room 磁盘满 / Binder DeadObject），做**有限**重试；
-            // 达到阈值说明是确定性失败，同样结清，避免再次形成毒丸。
             try {
-                observer.onEvent(event.timeMillis, event.packageName, event.path, event.flags)
-            } catch (e: Exception) {
-                val attempts = recordDeliveryFailure(eventFile.name)
-                if (attempts < MAX_DELIVERY_ATTEMPTS) {
-                    Log.w(
-                        TAG,
-                        "delivery failed for ${eventFile.name} " +
-                                "(attempt $attempts/$MAX_DELIVERY_ATTEMPTS), will retry",
-                        e,
-                    )
-                    retryPending = true
+                val eventJson = eventFile.content
+                val event = try {
+                    JSONObject(eventJson)
+                } catch (e: JSONException) {
+                    // 隔离或游标提交失败时必须中止本轮：游标仍在事件前，
+                    // 若继续消费后续事件会把游标推过这个未确认的坏事件。
+                    if (!quarantineAndAdvance(
+                            eventFile, eventJson,
+                            reason = "json-parse-failed: ${e.message}",
+                            stage = "parse",
+                        )
+                    ) {
+                        failed = true
+                        break
+                    }
+                    continue
+                }
+                val timeMillis = event.optLong("timeMillis", System.currentTimeMillis())
+                val packageName = event.optString("packageName", "")
+                val path = event.optString("path", "")
+                val flags = event.optInt("flags", 0)
+
+                if (packageName.isEmpty() || path.isEmpty()) {
+                    if (!quarantineAndAdvance(
+                            eventFile, eventJson,
+                            reason = "missing-required-field",
+                            stage = "validate",
+                        )
+                    ) {
+                        failed = true
+                        break
+                    }
+                    continue
+                }
+
+                try {
+                    observer.onEvent(timeMillis, packageName, path, flags)
+                } catch (e: Exception) {
+                    val infra = EventConsumePolicy.isInfrastructureFault(e)
+                    infraStreak = if (infra) infraStreak + 1 else 0
+                    val next = DataBus.readEventAttempt(
+                        DataBusProtocol.EVENT_FILESYSTEM, eventFile.name,
+                    ) + 1
+                    if (!DataBus.writeEventAttempt(
+                            DataBusProtocol.EVENT_FILESYSTEM, eventFile.name, next,
+                        )
+                    ) {
+                        Log.e(TAG, "Failed to persist attempt for ${eventFile.name}, keeping cursor", e)
+                        failed = true
+                        break
+                    }
+                    when (EventConsumePolicy.decideTransient(next, infraStreak)) {
+                        EventConsumePolicy.TransientDecision.QUARANTINE -> {
+                            Log.w(TAG, "Quarantining event ${eventFile.name} after $next attempts", e)
+                            if (!quarantineAndAdvance(
+                                    eventFile, eventJson,
+                                    reason = "onEvent-failed: ${e.message}",
+                                    stage = "onEvent",
+                                    attempts = next,
+                                )
+                            ) {
+                                failed = true
+                                break
+                            }
+                            continue
+                        }
+                        EventConsumePolicy.TransientDecision.RETRY -> {
+                            Log.e(TAG, "Failed to consume event ${eventFile.name} " +
+                                    "(attempt=$next), keeping cursor", e)
+                            failed = true
+                            break
+                        }
+                    }
+                }
+                consumed++
+
+                // 归档到 consumed/ 目录，保留事件记录供审计。
+                // 归档失败视为基础设施故障：不推进游标，下轮重放（原文仍在队列目录）。
+                if (!archiveEvent(eventJson)) {
+                    Log.e(TAG, "Failed to archive event ${eventFile.name}, keeping cursor")
+                    failed = true
                     break
                 }
-                val kept = settleEvent(eventFile, "delivery failed after $attempts attempts", e)
-                if (kept) quarantined++ else discarded++
-                continue
+                if (!advanceCursor(eventFile)) {
+                    Log.e(TAG, "Failed to persist cursor for ${eventFile.name}, keeping cursor")
+                    failed = true
+                    break
+                }
+                // 成功终态：游标已提交，清除重试计数。
+                // 清除失败只记限频日志：计数仅影响重试预算，绝不回退游标、不撤销归档。
+                clearAttemptAfterAdvance(eventFile.name)
+                infraStreak = 0
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to consume event ${eventFile.name}, keeping cursor", e)
+                failed = true
+                break
             }
-            deliveryFailures.remove(eventFile.name)
-            consumed++
-
-            // 归档到 consumed/ 目录，保留事件记录供审计
-            // 直接文件写入（不含序列号），避免浪费事件序列号计数器
-            archiveEvent(eventFile.content)
-            advanceCursor(eventFile)
         }
-
-        // 只有"值得重试"的失败才解除熔断；事件结清后不再重置，
-        // 让 signal 熔断重新生效，避免每 2 s 空扫目录。
-        if (retryPending) {
+        if (failed) {
             lastSignalTimestamp = 0L
         }
 
-        if (consumed > 0 || quarantined > 0 || discarded > 0) {
-            Log.d(
-                TAG,
-                "Consumed $consumed events, quarantined $quarantined, " +
-                        "discarded $discarded, cursor='$cursor'",
-            )
+        if (consumed > 0) {
+            Log.d(TAG, "Consumed $consumed events, cursor='$cursor'")
         }
 
         // 定期清理过期归档事件
         cleanupConsumed()
-        cleanupEventQueue()
+        // 有界保留：清理本轮已确认消费的源事件与过期毒丸证据。
+        // 执行前提是线程亲缘性——pollOnce 只在 EventConsumerScheduler 的
+        // HandlerThread 上执行，prepare() 不触发清理；@Volatile 仅保证可见性。
+        maybePruneQueue()
         return consumed
     }
 
     /**
-     * 清理 consumed/ 目录中超过 TTL 的归档事件文件，避免目录无界增长占满空间。
+     * 节流执行源事件与隔离目录清理。
+     *
+     * - 源事件清理的门是 cursorRead == OK：UNREADABLE 时即使 cursor 被兼容
+     *   置为 "" 也不得删除（内存游标值与可信状态是两个独立概念）。
+     * - 两个清理操作分别执行、分别记录，互不遮蔽。
+     * - 失败用 30s 短间隔重试；成功恢复 5min 节流。
+     * - 失败都不阻断消费主链路，只记限频日志与连续失败留痕。
+     */
+    private fun maybePruneQueue() {
+        val now = System.currentTimeMillis()
+        val interval = if (pruneFailureStreak > 0) {
+            EventQueueRetention.PRUNE_RETRY_INTERVAL_MS
+        } else {
+            EventQueueRetention.PRUNE_INTERVAL_MS
+        }
+        if (now - lastQueuePruneAt < interval) return
+        lastQueuePruneAt = now
+        var failed = false
+        if (cursorRead == DataBusProtocol.CursorRead.OK) {
+            val result = runCatching {
+                DataBus.pruneQueueEvents(
+                    DataBusProtocol.EVENT_FILESYSTEM,
+                    EventQueueRetention.SOURCE_RETENTION_MS,
+                )
+            }.getOrElse {
+                // 异常即失败：不能压成零失败结果，否则重试节流被重置为长间隔。
+                DataBusProtocol.PruneResult(0, 0, 1, cursorRead)
+            }
+            failed = failed or reportPrune("source", result)
+        } else {
+            Log.w(TAG, "pruneQueue: skipped source events, cursorRead=$cursorRead")
+        }
+        val quarantine = runCatching {
+            DataBus.pruneQuarantine(
+                DataBusProtocol.EVENT_FILESYSTEM,
+                EventQueueRetention.QUARANTINE_RETENTION_MS,
+            )
+        }.getOrElse {
+            DataBusProtocol.PruneResult(0, 0, 1, null)
+        }
+        failed = failed or reportPrune("quarantine", quarantine)
+        // 孤儿计数清理不依赖游标水位（只与事件存量有关），与隔离清理并列执行。
+        val orphanAttempts = runCatching {
+            DataBus.pruneOrphanAttempts(DataBusProtocol.EVENT_FILESYSTEM)
+        }.getOrElse {
+            DataBusProtocol.PruneResult(0, 0, 1, null)
+        }
+        failed = failed or reportPrune("orphanAttempts", orphanAttempts)
+        pruneFailureStreak = if (failed) {
+            val streak = pruneFailureStreak + 1
+            if (streak >= EventQueueRetention.PRUNE_FAILURE_JOURNAL_THRESHOLD) {
+                Log.e(TAG, "pruneQueue: $streak consecutive failures " +
+                        "for ${DataBusProtocol.EVENT_FILESYSTEM}")
+            }
+            streak
+        } else {
+            0
+        }
+    }
+
+    /** 记录单次清理结果；返回 true 表示本次存在失败。 */
+    private fun reportPrune(kind: String, result: DataBusProtocol.PruneResult): Boolean {
+        if (result.failed > 0) {
+            Log.w(TAG, "pruneQueue: $kind scanned=${result.scanned} " +
+                    "deleted=${result.deleted} failed=${result.failed} " +
+                    "cursorRead=${result.cursorRead}")
+            return true
+        }
+        if (result.deleted > 0) {
+            Log.d(TAG, "pruneQueue: $kind scanned=${result.scanned} deleted=${result.deleted}")
+        }
+        return false
+    }
+
+    /**
+     * 清理 consumed/ 目录中超过 TTL 的归档事件文件，避免 tmpfs 空间占满。
      * 阈值双重控制：过期时间（CONSUMED_TTL_MS）+ 最大文件数（CONSUMED_MAX_FILES）。
      */
     private fun cleanupConsumed() {
@@ -214,91 +342,72 @@ object FileSystemEventConsumer {
         }
     }
 
-    private fun advanceCursor(event: DataBusProtocol.EventFile) {
-        cursor = event.name
-        DataBus.writeCursorToEvent(DataBusProtocol.EVENT_FILESYSTEM, event)
-    }
-
-    private class ParsedEvent(
-        val timeMillis: Long,
-        val packageName: String,
-        val path: String,
-        val flags: Int,
-    )
-
     /**
-     * 解析事件 JSON。
-     *
-     * 契约（很重要，调用方据此分流）：
-     * - **抛异常** = 确定性毒丸（见 [EventDeadLetter] 的安全性论证）→ 隔离 + 推进游标
-     * - **返回 null** = 结构无效（缺 `packageName`/`path`）→ 沿用原有"跳过"语义
-     * - **返回对象** = 可投递
+     * 隔离毒丸并推进游标：quarantine 落盘成功后才写游标；任一步失败返回 false，
+     * 调用方不得宣称已消费。隔离文件名确定，重复隔离幂等覆盖。
      */
-    private fun parseEvent(eventFile: DataBusProtocol.EventFile): ParsedEvent? {
-        val event = JSONObject(eventFile.content)
-        val packageName = event.optString("packageName", "")
-        val path = event.optString("path", "")
-        if (packageName.isEmpty() || path.isEmpty()) return null
-        return ParsedEvent(
-            timeMillis = event.optLong("timeMillis", System.currentTimeMillis()),
-            packageName = packageName,
-            path = path,
-            flags = event.optInt("flags", 0),
-        )
-    }
-
-    /** 记录一次投递失败并返回累计次数（`merge` 保证读改写原子）。 */
-    private fun recordDeliveryFailure(name: String): Int =
-        deliveryFailures.merge(name, 1) { current, increment -> current + increment } ?: 1
-
-    /**
-     * 结清一个无法处理的事件：让它离开队列目录**并推进游标**。
-     * 这是"解开毒丸"的关键动作 —— 只要游标越过它，该事件就永远不可能再被读到。
-     *
-     * [EventDeadLetter.quarantine] 保证**不会失败到需要重试**：它要么把文件移入隔离区
-     * （证据保留），要么退化为删除 / 留在原地由 `pruneConsumedEvents` 回收。
-     * 因此"任何单个事件都无法永久阻塞队列"这一不变式**由构造成立**，
-     * 不依赖任何重试机制。
-     *
-     * @return true = 已隔离（证据保留）；false = 只能丢弃（隔离失败，证据丢失）
-     */
-    private fun settleEvent(
-        eventFile: DataBusProtocol.EventFile,
+    private fun quarantineAndAdvance(
+        event: DataBusProtocol.EventFile,
+        content: String,
         reason: String,
-        error: Throwable?,
+        stage: String,
+        attempts: Int = DataBus.readEventAttempt(DataBusProtocol.EVENT_FILESYSTEM, event.name),
     ): Boolean {
-        val kept = EventDeadLetter.quarantine(
-            DataBusProtocol.EVENT_FILESYSTEM, eventFile.name, reason, error,
-        ) == EventDeadLetter.Settlement.QUARANTINED
-        deliveryFailures.remove(eventFile.name)
-        advanceCursor(eventFile)
-        return kept
+        if (!DataBus.quarantineEvent(
+                DataBusProtocol.EVENT_FILESYSTEM,
+                DataBusProtocol.EventFile(event.name, content),
+                reason, stage, attempts,
+            )
+        ) {
+            Log.e(TAG, "Failed to quarantine event ${event.name}, keeping cursor")
+            return false
+        }
+        DataBus.clearEventAttempt(DataBusProtocol.EVENT_FILESYSTEM, event.name)
+        return advanceCursor(event)
+    }
+
+    private fun advanceCursor(event: DataBusProtocol.EventFile): Boolean {
+        // 先持久化、后更新内存：写失败时内存游标必须保持原位，否则本轮后续
+        // readEventFiles 会跳过未确认事件（at-least-once 保障）。
+        if (!DataBus.writeCursorToEvent(DataBusProtocol.EVENT_FILESYSTEM, event)) return false
+        cursor = event.name
+        // 本进程刚原子写入过即为可信：重确认后清理门重新打开。
+        cursorRead = DataBusProtocol.CursorRead.OK
+        return true
     }
 
     /**
-     * 收紧 events/filesystem 目录：超过低水位时删除**游标及之前**的已消费事件文件。
-     *
-     * 只删除不可能再被读出的条目（游标是唯一读取起点），因此不会造成重复消费或丢失；
-     * `consumed/` 归档仍按自身的 TTL / 上限保留审计副本。
+     * 终态游标提交成功后清除重试计数（成功/跳过路径共用）。
+     * 清除失败只记限频日志：计数仅影响重试预算，绝不回退游标、不撤销副作用。
      */
-    private fun cleanupEventQueue() {
-        val pruned = DataBus.pruneConsumedEvents(
-            DataBusProtocol.EVENT_FILESYSTEM, keepAtMost = EVENT_QUEUE_MAX_FILES,
-        )
-        if (pruned > 0) {
-            Log.i(TAG, "cleanupEventQueue: pruned $pruned consumed event files " +
-                    "(cursor='$cursor', keepAtMost=$EVENT_QUEUE_MAX_FILES)")
+    private fun clearAttemptAfterAdvance(eventName: String) {
+        if (!DataBus.clearEventAttempt(DataBusProtocol.EVENT_FILESYSTEM, eventName)) {
+            ClearAttemptWarnThrottle.warn("Failed to clear attempt for $eventName, cursor already advanced")
+        }
+    }
+
+    /** clearEventAttempt 失败日志限频（60s），风格与 DataBusPrune 侧一致。 */
+    private object ClearAttemptWarnThrottle {
+        private var lastAt = 0L
+        private const val INTERVAL_MS = 60_000L
+
+        fun warn(message: String) {
+            val now = System.currentTimeMillis()
+            if (now - lastAt < INTERVAL_MS) return
+            lastAt = now
+            Log.w(TAG, message)
         }
     }
 
     /**
      * 归档已消费事件到 consumed/ 目录。
      * 使用时间戳+随机数命名文件（不含事件序列号），避免浪费 DataBus 全局序列号计数器。
+     * @return true 归档成功；false 基础设施故障，调用方须保留游标重试。
      */
-    private fun archiveEvent(content: String) {
-        if (!DataBus.ensureInitialized()) return
+    private fun archiveEvent(content: String): Boolean {
+        if (!DataBus.ensureInitialized()) return false
         val consumedDir = File(DataBus.BUS_ROOT, "events/consumed")
-        if (!Files.isDirectory(consumedDir.toPath(), LinkOption.NOFOLLOW_LINKS)) return
+        if (!Files.isDirectory(consumedDir.toPath(), LinkOption.NOFOLLOW_LINKS)) return false
 
         val now = System.currentTimeMillis()
         val rand = ((Math.random() * 0xFFFF).toInt() and 0xFFFF)
@@ -307,7 +416,7 @@ object FileSystemEventConsumer {
             Files.createTempFile(consumedDir.toPath(), "$filename-", ".tmp").toFile()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create consumed archive temp file", e)
-            return
+            return false
         }
         val targetFile = File(consumedDir, filename)
 
@@ -320,10 +429,13 @@ object FileSystemEventConsumer {
             if (!tmpFile.renameTo(targetFile)) {
                 Log.e(TAG, "Failed to rename consumed archive: $filename")
                 tmpFile.delete()
+                return false
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to archive consumed event", e)
             tmpFile.delete()
+            return false
         }
+        return true
     }
 }

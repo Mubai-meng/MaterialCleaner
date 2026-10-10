@@ -18,6 +18,11 @@ public class PackageStatus implements Parcelable {
     public static final int PID_FLAG_MKDIR_FAILED = 1 << 4;
     public static final int PID_FLAG_UNKNOWN = 1 << 5;
     public static final int PID_FLAG_MOUNT_FAILED = 1 << 6;
+    // 维度 A 互斥终态：PARTIALLY_MOUNTED / NOT_MOUNTED / UNMANAGED（各自 KDoc 见下），
+    // 每个 PID 至多占其一，且不得与 MOUNTED/UNKNOWN/DELETED/OVERRIDE 共存。
+    // 维度 B 正交证据：MOUNT_FAILED 仅表示发生过明确挂载失败的操作历史，不参与终态互斥；
+    // STARTUP_AWARE / MKDIR_FAILED 同理保持正交。两个维度不可混为一谈。
+    // （本适配分支与上游在同一组 bit 上各自独立引入了这三面旗，合并时去重，语义一致。）
 
     /**
      * 目标里存在已生效的挂载项，但没有覆盖全部 target（0 &lt; 命中数 &lt; target 数）。
