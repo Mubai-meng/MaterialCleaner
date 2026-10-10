@@ -27,9 +27,18 @@ object DataBusLayerReporter {
             "busRootExists" to health.initialized.toString(),
             "missingDirectoryCount" to health.missingDirectories.size.toString(),
             "permissionIssueCount" to health.permissionIssues.size.toString(),
+            // 物理存量（已消费未清理也计入），用途是存储残留，不是积压。
             "eventQueueFilesystem" to (health.eventQueueCounts[DataBusProtocol.EVENT_FILESYSTEM] ?: 0).toString(),
             "eventQueueRedirectNotice" to (health.eventQueueCounts[DataBusProtocol.EVENT_REDIRECT_NOTICE] ?: 0).toString(),
             "eventQueueConsumed" to (health.eventQueueCounts["consumed"] ?: 0).toString(),
+            // 待处理量：唯一驱动积压告警的口径。
+            "pendingQueueFilesystem" to (health.pendingEventCounts[DataBusProtocol.EVENT_FILESYSTEM] ?: 0).toString(),
+            "pendingQueueRedirectNotice" to (health.pendingEventCounts[DataBusProtocol.EVENT_REDIRECT_NOTICE] ?: 0).toString(),
+            // 隔离证据量与游标可信状态（UNREADABLE 队列的 pending 不可信）。
+            "quarantineFilesystem" to (health.quarantineCounts[DataBusProtocol.EVENT_FILESYSTEM] ?: 0).toString(),
+            "quarantineRedirectNotice" to (health.quarantineCounts[DataBusProtocol.EVENT_REDIRECT_NOTICE] ?: 0).toString(),
+            "cursorReadFilesystem" to (health.cursorReadStates[DataBusProtocol.EVENT_FILESYSTEM]?.name ?: "UNKNOWN"),
+            "cursorReadRedirectNotice" to (health.cursorReadStates[DataBusProtocol.EVENT_REDIRECT_NOTICE]?.name ?: "UNKNOWN"),
             "leaseQuerySessions" to (health.leaseCounts[DataBusProtocol.LEASE_QUERY_SESSIONS] ?: 0).toString(),
         )
 
@@ -55,6 +64,10 @@ object DataBusLayerReporter {
         }
 
         val state = when {
+            // 游标不可信是独立故障：即使总线基础设施健康，也不得报完全健康。
+            // ABSENT（新队列）不是故障，只有 UNREADABLE 降级。
+            health.cursorReadStates.any { it.value == DataBusProtocol.CursorRead.UNREADABLE } ->
+                LayerState.DEGRADED
             health.healthy -> LayerState.HEALTHY
             health.initialized -> LayerState.DEGRADED
             else -> LayerState.UNAVAILABLE
@@ -81,6 +94,15 @@ object DataBusLayerReporter {
     }
 
     private fun buildError(health: DataBusProtocol.HealthReport): String? {
+        val unreadable = health.cursorReadStates
+            .filterValues { it == DataBusProtocol.CursorRead.UNREADABLE }
+            .keys
+        // 游标故障独立成错：即使总线其他部分健康，也必须显式暴露，
+        // 否则 UNREADABLE 队列的 pending 不可信却无任何错误说明。
+        if (unreadable.isNotEmpty()) {
+            return "cursor unreadable: ${unreadable.joinToString(",")} " +
+                    "(pending counts for these queues are not credible)"
+        }
         if (health.healthy) return null
         val parts = mutableListOf<String>()
         if (!health.initialized) parts += "bus unavailable"
@@ -103,8 +125,14 @@ object DataBusLayerReporter {
     }
 
     private fun warnIfBacklog(health: DataBusProtocol.HealthReport, now: Long) {
-        val filesystem = health.eventQueueCounts[DataBusProtocol.EVENT_FILESYSTEM] ?: 0
-        val redirectNotice = health.eventQueueCounts[DataBusProtocol.EVENT_REDIRECT_NOTICE] ?: 0
+        // 积压告警只看可信队列的 pending：UNREADABLE 队列的数字是估算值，
+        // 不得作为积压依据（由独立的游标故障告警覆盖）。
+        fun crediblePending(queue: String): Int {
+            if (health.cursorReadStates[queue] == DataBusProtocol.CursorRead.UNREADABLE) return 0
+            return health.pendingEventCounts[queue] ?: 0
+        }
+        val filesystem = crediblePending(DataBusProtocol.EVENT_FILESYSTEM)
+        val redirectNotice = crediblePending(DataBusProtocol.EVENT_REDIRECT_NOTICE)
         val consumed = health.eventQueueCounts["consumed"] ?: 0
         val querySessionLease = health.leaseCounts[DataBusProtocol.LEASE_QUERY_SESSIONS] ?: 0
 
@@ -122,6 +150,7 @@ object DataBusLayerReporter {
             exceeded += "${DataBusProtocol.LEASE_QUERY_SESSIONS}=$querySessionLease"
         }
         if (exceeded.isEmpty() || now - lastBacklogWarningAt < BACKLOG_WARN_INTERVAL_MS) {
+            warnIfCursorUnreadable(health, now)
             return
         }
         lastBacklogWarningAt = now
@@ -132,6 +161,28 @@ object DataBusLayerReporter {
             put("consumed", consumed)
             put("querySessionLease", querySessionLease)
             put("exceeded", exceeded.joinToString(","))
+        }.toString())
+        warnIfCursorUnreadable(health, now)
+    }
+
+    /**
+     * 游标故障告警：与积压告警分离的第二类告警。
+     *
+     * UNREADABLE 队列的 pending 数字不可信，不得作为积压依据；
+     * 此处独立暴露故障，使游标损坏在诊断层可见。
+     */
+    @Volatile
+    private var lastCursorFailureAt = 0L
+
+    private fun warnIfCursorUnreadable(health: DataBusProtocol.HealthReport, now: Long) {
+        val unreadable = health.cursorReadStates
+            .filterValues { it == DataBusProtocol.CursorRead.UNREADABLE }
+            .keys
+        if (unreadable.isEmpty() || now - lastCursorFailureAt < BACKLOG_WARN_INTERVAL_MS) return
+        lastCursorFailureAt = now
+        Log.w("MC_STATE", JSONObject().apply {
+            put("event", "databus_cursor_unreadable")
+            put("queues", unreadable.joinToString(","))
         }.toString())
     }
 }

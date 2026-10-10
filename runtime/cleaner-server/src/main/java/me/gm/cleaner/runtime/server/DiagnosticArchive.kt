@@ -162,7 +162,10 @@ object DiagnosticArchive {
         if (health != null) {
             appendLine("DataBus:")
             appendLine("- initialized=${health.initialized}, healthy=${health.healthy}, criticalSnapshotsReady=${health.criticalSnapshotsReady}")
-            appendLine("- eventQueueCounts=${health.eventQueueCounts}")
+            appendLine("- eventQueueCounts=${health.eventQueueCounts} (physical, includes consumed-but-retained)")
+            appendLine("- pendingEventCounts=${health.pendingEventCounts} (drives backlog alerts)")
+            appendLine("- quarantineCounts=${health.quarantineCounts}")
+            appendLine("- cursorReadStates=${health.cursorReadStates} (UNREADABLE queues excluded from backlog)")
             appendLine("- leaseCounts=${health.leaseCounts}")
             appendLine("- missingDirectories=${health.missingDirectories.size}, permissionIssues=${health.permissionIssues.size}")
             appendLine()
@@ -306,7 +309,10 @@ object DiagnosticArchive {
         if (health != null) {
             appendLine("DataBus：")
             appendLine("- initialized=${health.initialized}, healthy=${health.healthy}, criticalSnapshotsReady=${health.criticalSnapshotsReady}")
-            appendLine("- eventQueueCounts=${health.eventQueueCounts}")
+            appendLine("- eventQueueCounts=${health.eventQueueCounts}（物理量，含已消费未清理）")
+            appendLine("- pendingEventCounts=${health.pendingEventCounts}（待处理，唯一告警口径）")
+            appendLine("- quarantineCounts=${health.quarantineCounts}")
+            appendLine("- cursorReadStates=${health.cursorReadStates}（UNREADABLE 队列不计入告警）")
             appendLine("- leaseCounts=${health.leaseCounts}")
             appendLine("- missingDirectories=${health.missingDirectories.size}, permissionIssues=${health.permissionIssues.size}")
             appendLine()
@@ -525,6 +531,11 @@ object DiagnosticArchive {
         put("missingDirectories", JSONArray(health.missingDirectories))
         put("permissionIssues", JSONArray(health.permissionIssues))
         put("eventQueueCounts", JSONObject(health.eventQueueCounts))
+        put("pendingEventCounts", JSONObject(health.pendingEventCounts))
+        put("quarantineCounts", JSONObject(health.quarantineCounts))
+        put("cursorReadStates", JSONObject(
+            health.cursorReadStates.mapValues { it.value.name },
+        ))
         put("leaseCounts", JSONObject(health.leaseCounts))
         put("snapshots", JSONArray().apply {
             for (snapshot in health.snapshots) {
