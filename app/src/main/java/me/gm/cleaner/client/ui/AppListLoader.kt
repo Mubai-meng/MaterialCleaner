@@ -89,51 +89,50 @@ class AppListLoader(
     }
 
     /**
-     * 把服务端的逐 pid flag 归约成列表页的三态。
-     *
-     * 三条不变式：
-     * 1. **状态缺失分两种**：映射就绪但查无记录 = 真无（`statusUnknown=false`）；
-     *    未就绪或链路失败 = 未知（`statusUnknown=true`）。不混用空值的两种含义。
-     * 2. **分母只算 Mounter 接管过的 pid**（`STARTUP_AWARE` 或明确 `MOUNT_FAILED`）。
-     *    未接管的 pid（`UNMANAGED`）与重定向无关，把它计入会让状态随无关进程的生灭抖动
-     *    —— 这正是"第一次开显示挂载异常、第二次显示已挂载"的成因。
-     * 3. **优先级固定**：真失败 > 部分挂载 > 全挂载 > 未知 > 未挂载。
-     *    旧实现把"有 UNKNOWN"判在"部分已挂载"之前，会把真故障降级成"未知"；
-     *    且单进程下 base flag = 0 会掉到 `STATE_UNMOUNTED`，与多进程下的口径互相矛盾。
+     * 服务端状态缺失分两种：映射就绪但查无记录等于真无，未就绪或链路失败等于未知。
+     * 用 statusUnknown 显式区分，不混用空值的两种含义。
      */
     private fun parseMountState(packageStatus: PackageStatus?, statusUnknown: Boolean): Int {
         if (statusUnknown) return AppListModel.STATE_UNKNOWN
         packageStatus ?: return AppListModel.STATE_UNMOUNTED
+        val mountedPids = mutableListOf<Int>()
+        val unknownPids = mutableListOf<Int>()
         var managedCount = 0
-        var mountedCount = 0
-        var unknownCount = 0
-        var failedCount = 0
-        var partialCount = 0
-        packageStatus.pidFlags.forEach { pidFlag ->
-            val managed = pidFlag and PackageStatus.PID_FLAG_STARTUP_AWARE != 0 ||
-                    pidFlag and PackageStatus.PID_FLAG_MOUNT_FAILED != 0
-            if (!managed) return@forEach
+        packageStatus.pidFlags.forEachIndexed { index, pidFlag ->
+            // UNMANAGED 不进分母；其余终态互斥，MOUNT_FAILED 等为正交证据不影响分类。
+            if (pidFlag and PackageStatus.PID_FLAG_UNMANAGED != 0) return@forEachIndexed
             managedCount++
-            when {
-                pidFlag and (PackageStatus.PID_FLAG_MOUNT_FAILED
-                        or PackageStatus.PID_FLAG_OVERRIDE
-                        or PackageStatus.PID_FLAG_DELETED) != 0 -> failedCount++
-
-                pidFlag and PackageStatus.PID_FLAG_PARTIALLY_MOUNTED != 0 -> partialCount++
-                pidFlag and PackageStatus.PID_FLAG_MOUNTED != 0 -> mountedCount++
-                pidFlag and PackageStatus.PID_FLAG_UNKNOWN != 0 -> unknownCount++
+            if (pidFlag and PackageStatus.PID_FLAG_MOUNTED != 0) {
+                mountedPids += packageStatus.pids[index]
+            } else if (pidFlag and PackageStatus.PID_FLAG_UNKNOWN != 0) {
+                unknownPids += packageStatus.pids[index]
+            } else if (pidFlag and (
+                    PackageStatus.PID_FLAG_PARTIALLY_MOUNTED or
+                        PackageStatus.PID_FLAG_NOT_MOUNTED or
+                        PackageStatus.PID_FLAG_DELETED or
+                        PackageStatus.PID_FLAG_OVERRIDE
+                    ) == 0
+            ) {
+                // 无终态位（含旧版本 0 盲区）：证据不足，按 UNKNOWN 处理，不判未挂载。
+                unknownPids += packageStatus.pids[index]
             }
         }
-        return when {
-            managedCount == 0 -> AppListModel.STATE_UNMOUNTED
-            failedCount > 0 -> AppListModel.STATE_MOUNT_EXCEPTION
-            // 挂上了一部分 target：这是"异常"而不是"已挂载"，
-            // 但也绝不能退化成一个不带原因的布尔位。
-            partialCount > 0 -> AppListModel.STATE_MOUNT_EXCEPTION
-            mountedCount == managedCount -> AppListModel.STATE_MOUNTED
-            mountedCount > 0 -> AppListModel.STATE_MOUNT_EXCEPTION
-            unknownCount > 0 -> AppListModel.STATE_UNKNOWN
-            else -> AppListModel.STATE_UNMOUNTED
+        if (managedCount == 0) {
+            // 空列表保持旧语义 UNMOUNTED；存在进程但全部 UNMANAGED 则无法验证，判 UNKNOWN。
+            return if (packageStatus.pids.isNotEmpty()) {
+                AppListModel.STATE_UNKNOWN
+            } else {
+                AppListModel.STATE_UNMOUNTED
+            }
+        }
+        return if (managedCount == mountedPids.size) {
+            AppListModel.STATE_MOUNTED
+        } else if (unknownPids.isNotEmpty()) {
+            AppListModel.STATE_UNKNOWN
+        } else if (mountedPids.isNotEmpty()) {
+            AppListModel.STATE_MOUNT_EXCEPTION
+        } else {
+            AppListModel.STATE_UNMOUNTED
         }
     }
 

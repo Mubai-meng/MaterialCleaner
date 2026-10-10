@@ -675,20 +675,20 @@ object DataBus {
 
         // 每个队列只计算一次：pending 数量与游标状态必须来自同一次观测。
         // 若分两次调用，并发消费或游标变化会把不可信数量与可信状态拼在一起。
-        val filesystemPending = countPendingEvents(DataBusProtocol.EVENT_FILESYSTEM)
-        val redirectPending = countPendingEvents(DataBusProtocol.EVENT_REDIRECT_NOTICE)
+        // 另：物理存量与积压来自**同一次**目录遍历（queueCensus），不再对同一目录
+        // 各扫一遍 —— checkHealth 由 DataBusLayerReporter 每 2s 调用一次，
+        // 旧实现（pending 一遍 listFiles+逐条 stat、eventQueueCounts 再一遍）对
+        // filesystem/redirect_notice 两个队列共白扫 2 遍、每条目多 1 次 stat。
+        val filesystemCensus = queueCensus(DataBusProtocol.EVENT_FILESYSTEM)
+        val redirectCensus = queueCensus(DataBusProtocol.EVENT_REDIRECT_NOTICE)
         return DataBusProtocol.HealthReport(
             initialized = init && missingDirs.isEmpty(),
             missingDirectories = missingDirs,
             permissionIssues = permissionIssues,
             snapshots = DataBusProtocol.snapshotNames().map { inspectSnapshot(it) },
             eventQueueCounts = mapOf(
-                DataBusProtocol.EVENT_FILESYSTEM to countJsonFiles(
-                    "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_FILESYSTEM}",
-                ),
-                DataBusProtocol.EVENT_REDIRECT_NOTICE to countJsonFiles(
-                    "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_REDIRECT_NOTICE}",
-                ),
+                DataBusProtocol.EVENT_FILESYSTEM to filesystemCensus.first,
+                DataBusProtocol.EVENT_REDIRECT_NOTICE to redirectCensus.first,
                 DIR_CONSUMED to countJsonFiles("$BUS_ROOT/$DIR_EVENTS/$DIR_CONSUMED"),
             ),
             leaseCounts = mapOf(
@@ -699,8 +699,8 @@ object DataBus {
             // pending 与游标可信状态：与 readEventFiles 同筛选同边界，
             // 数据损坏时按队列退化，不吞并整体状态。
             pendingEventCounts = mapOf(
-                DataBusProtocol.EVENT_FILESYSTEM to filesystemPending.first,
-                DataBusProtocol.EVENT_REDIRECT_NOTICE to redirectPending.first,
+                DataBusProtocol.EVENT_FILESYSTEM to filesystemCensus.second,
+                DataBusProtocol.EVENT_REDIRECT_NOTICE to redirectCensus.second,
             ),
             quarantineCounts = mapOf(
                 DataBusProtocol.EVENT_FILESYSTEM to countJsonFiles(
@@ -711,8 +711,8 @@ object DataBus {
                 ),
             ),
             cursorReadStates = mapOf(
-                DataBusProtocol.EVENT_FILESYSTEM to filesystemPending.second,
-                DataBusProtocol.EVENT_REDIRECT_NOTICE to redirectPending.second,
+                DataBusProtocol.EVENT_FILESYSTEM to filesystemCensus.third,
+                DataBusProtocol.EVENT_REDIRECT_NOTICE to redirectCensus.third,
             ),
         )
     }
@@ -729,16 +729,40 @@ object DataBus {
      * - UNREADABLE：pending 按剩余文件估算但标记不可信，
      *   调用方不得把它当作可信积压依据。
      */
-    private fun countPendingEvents(queue: String): Pair<Int, DataBusProtocol.CursorRead> {
+    /**
+     * 队列普查：**一次目录遍历**同时得到「物理存量」与「真实积压」与「游标可信状态」。
+     *
+     * `checkHealth` 由 `DataBusLayerReporter` 每 2s 调用一次。上游拆分前的实现是
+     * `countPendingEvents`（积压）与 `countJsonFiles`（物理存量）各自 `listFiles()` 一遍，
+     * 且各自对每个条目做一次 `isRegularFileNoFollow`（= 1 次 `stat`）—— 同一个目录、
+     * 同一批文件被扫两遍、每条目多 1 次 `stat`。这里合成一遍，判定口径完全沿用
+     * [DataBusPrune.isEventFile]（= 常规文件 + `.json`），因此
+     * `accumulated` 与原 `countJsonFiles` 逐字节等价。
+     *
+     * 积压语义与上游 `countPendingEvents` 完全一致：
+     * `ABSENT` ⇒ 全部算积压（旧口径 `name > ""` 恒真，不能退化成 0，
+     * 否则游标文件缺失时积压告警被静默关闭）；`OK` ⇒ 只数严格大于游标的；
+     * `UNREADABLE` ⇒ 数值不可信（原样返回 `files.size`），由
+     * `cursorReadStates` 单独告警、且不计入积压告警。
+     */
+    private fun queueCensus(
+        queue: String,
+    ): Triple<Int, Int, DataBusProtocol.CursorRead> {
         val (read, cursor) = readCursorDetailed(queue)
         val dir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
-        val files = dir.listFiles()?.filter { isEventFile(it) } ?: emptyList()
-        val pending = when (read) {
-            DataBusProtocol.CursorRead.ABSENT -> files.size
-            DataBusProtocol.CursorRead.OK -> files.count { it.name > cursor }
-            DataBusProtocol.CursorRead.UNREADABLE -> files.size
+        val files = dir.listFiles() ?: return Triple(0, 0, read)
+        var accumulated = 0
+        var pending = 0
+        for (file in files) {
+            if (!isEventFile(file)) continue
+            accumulated++
+            val isPending = when (read) {
+                DataBusProtocol.CursorRead.OK -> file.name > cursor
+                else -> true
+            }
+            if (isPending) pending++
         }
-        return pending to read
+        return Triple(accumulated, pending, read)
     }
 
     private fun requiredDirectories(): List<String> = listOf(

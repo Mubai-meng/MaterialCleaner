@@ -8,16 +8,7 @@ data class AppListModel(
     val mountRulesCount: Int,
     val readOnlyCount: Int,
     val mountState: Int,
-) : AppListSortable {
-
-    // 排序键：只是把字段换个名字暴露给 AppListOrdering，
-    // 不参与 equals/hashCode（因此不改变本类的相等语义）。
-    override val sortLabel: String get() = label
-    override val sortPackageName: String get() = packageInfo.packageName ?: ""
-    override val sortLastUpdateTime: Long get() = packageInfo.lastUpdateTime
-    override val sortMountState: Int get() = mountState
-    override val sortMountRulesCount: Int get() = mountRulesCount
-    override val sortReadOnlyCount: Int get() = readOnlyCount
+) {
 
     override fun hashCode(): Int {
         var result = label.hashCode()

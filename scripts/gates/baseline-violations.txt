@@ -37,3 +37,13 @@ word:core/storage-redirect-domain/src/test/java/me/gm/cleaner/core/storage/redir
 word:core/storage-redirect-domain/src/main/java/me/gm/cleaner/core/storage/redirect/domain/RuntimeBehaviorPolicy.kt|denylist	1
 word:core/storage-redirect-domain/src/test/java/me/gm/cleaner/core/storage/redirect/domain/RuntimeBehaviorPolicyTest.kt|denylist	1
 word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/bridge/HookPolicyRefreshScheduler.kt|configured_mount_points	1
+
+# 2026-10-10：同步上游 main（32 提交）+ 本适配线的实机诊断/守卫改动后，
+# 这四个文件超过了 G2 的 800 行门槛。**有意接受**：拆文件会改动刚合并完、
+# 单测全绿但尚未上机验证的运行时代码，回归风险大于收益（行数不改变任何运行行为）。
+# 后续拆分（如 DiagnosticArchive 的 summary/redact 分文件）时应当**删除**对应行。
+runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/DiagnosticArchive.kt	935
+runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/policy/NativeHookStatus.kt	858
+core/storage-redirect-databus/src/main/java/me/gm/cleaner/core/storage/redirect/databus/DataBus.kt	846
+runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/fuse/FuseJavaGate.java	841
+runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/vfs/mount/Mounter.kt	809

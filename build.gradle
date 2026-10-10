@@ -61,11 +61,13 @@ ext {
     targetSdk = 34
     compileSdk = targetSdk
     buildToolsVersion = '34.0.0'
-    // 本适配分支按发布节奏**手工指定**版本号，不再随提交数自增。
-    // 上游的"提交数即 versionCode"逻辑整体保留在上方 resolveGitCommitCount 中，
-    // 若要切回，把下面一行改回 `versionCode = gitCommitCount` 即可。
-    versionCode = 427
-    versionName = '4.2.7'
+    // 版本号跟随上游 5.0.0（用户 2026-10-10 决定）。
+    // versionCode 不能直接用上游的 `gitCommitCount`：本仓库 `git rev-list --count HEAD`
+    // 在本次合并后是 389，**低于**已装机产物的 427 ⇒ 直接采用会让 versionCode 回退，
+    // 用户无法覆盖安装。因此保留"手工指定"的做法，取 500（> 427，且与 5.0.0 对齐）。
+    // 若要切回上游口径，把下面一行改回 `versionCode = gitCommitCount` 即可。
+    versionCode = 500
+    versionName = '5.0.0'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 

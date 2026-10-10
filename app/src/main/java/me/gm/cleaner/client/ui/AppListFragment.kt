@@ -186,9 +186,8 @@ class AppListFragment : BaseServiceSettingsFragment() {
                 viewModel.appsFlow.collect { state ->
                     when (state) {
                         is AppListState.Done -> {
-                            // "已挂载应用"列表 = 设置过**任意**规则的应用（含只读规则）。
-                            // 过滤 + 排序统一走 ViewModel，见 AppListViewModelBase.mountedApps。
-                            adapter.submitList(viewModel.mountedApps(state.list))
+                            val configured = state.list.filter { it.mountRulesCount > 0 || it.readOnlyCount > 0 }
+                            adapter.submitList(configured)
                             listContainer.isRefreshing = false
                         }
                         is AppListState.Loading -> {
