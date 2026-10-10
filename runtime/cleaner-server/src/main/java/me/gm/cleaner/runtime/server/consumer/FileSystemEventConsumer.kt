@@ -42,10 +42,36 @@ object FileSystemEventConsumer {
     @Volatile
     private var infraStreak: Int = 0
 
+    /**
+     * 游标可信状态：与内存游标值 [cursor] 是两个独立概念。
+     *
+     * 冷启动时若游标不可读，按兼容性策略仍把 [cursor] 置为 "" 继续处理可见事件，
+     * 但本状态保持 UNREADABLE，源事件清理因此被禁止，直到本进程首次
+     * 成功写入游标后重新确认。
+     */
+    @Volatile
+    private var cursorRead: DataBusProtocol.CursorRead = DataBusProtocol.CursorRead.OK
+
+    /** 上次清理尝试时间（成功或失败都记录，失败用更短的重试间隔）。 */
+    @Volatile
+    private var lastQueuePruneAt: Long = 0L
+
+    /** 连续清理失败次数，用于限频与故障留痕。 */
+    @Volatile
+    private var pruneFailureStreak: Int = 0
+
     /** 从 DataBus 加载持久化游标 */
     fun loadCursor() {
-        cursor = DataBus.readCursor(DataBusProtocol.EVENT_FILESYSTEM)
-        Log.d(TAG, "loadCursor: cursor='$cursor'")
+        val (state, value) = DataBus.readCursorDetailed(DataBusProtocol.EVENT_FILESYSTEM)
+        cursorRead = state
+        cursor = value
+        if (state == DataBusProtocol.CursorRead.UNREADABLE) {
+            // 不可信游标不静默降级：留痕并禁止源事件清理，直到首次写游标成功。
+            Log.e(TAG, "loadCursor: cursor unreadable for ${DataBusProtocol.EVENT_FILESYSTEM}, " +
+                    "source event pruning disabled until a cursor write succeeds")
+        } else {
+            Log.d(TAG, "loadCursor: cursor='$cursor' state=$state")
+        }
     }
 
     /**
@@ -55,16 +81,27 @@ object FileSystemEventConsumer {
     fun pollAndConsume(): Int {
         // 信号熔断：signal 未变化表示无新事件，跳过文件系统扫描（listFiles）以节省 tmpfs I/O
         val signalTime = DataBus.getSignalTimestamp(DataBusProtocol.SIGNAL_FILESYSTEM_EVENTS_CHANGED)
-        if (signalTime <= lastSignalTimestamp && lastSignalTimestamp > 0) return 0
+        if (signalTime <= lastSignalTimestamp && lastSignalTimestamp > 0) {
+            // 清理独立于消费流程：静默队列（无新事件）仍需回收过期文件，
+            // 否则低流量队列的保留期形同虚设。节流在 maybePruneQueue 内部。
+            maybePruneQueue()
+            return 0
+        }
         lastSignalTimestamp = signalTime
 
         val events = DataBus.readEventFiles(DataBusProtocol.EVENT_FILESYSTEM, cursor)
-        if (events.isEmpty()) return 0
+        if (events.isEmpty()) {
+            maybePruneQueue()
+            return 0
+        }
 
         val observer = ObserverManager.fastGetObserver(FileSystemObserver::class.java)
         if (observer == null) {
             Log.w(TAG, "FileSystemObserver not available, keeping cursor for ${events.size} events")
             lastSignalTimestamp = 0L
+            // observer 缺失只阻塞消费，不阻塞清理：清理基于 DataBus 持久化游标，
+            // 与内存 observer 无关。
+            maybePruneQueue()
             return 0
         }
 
@@ -177,7 +214,79 @@ object FileSystemEventConsumer {
 
         // 定期清理过期归档事件
         cleanupConsumed()
+        // 有界保留：清理本轮已确认消费的源事件与过期毒丸证据。
+        // 执行前提是线程亲缘性——pollOnce 只在 EventConsumerScheduler 的
+        // HandlerThread 上执行，prepare() 不触发清理；@Volatile 仅保证可见性。
+        maybePruneQueue()
         return consumed
+    }
+
+    /**
+     * 节流执行源事件与隔离目录清理。
+     *
+     * - 源事件清理的门是 cursorRead == OK：UNREADABLE 时即使 cursor 被兼容
+     *   置为 "" 也不得删除（内存游标值与可信状态是两个独立概念）。
+     * - 两个清理操作分别执行、分别记录，互不遮蔽。
+     * - 失败用 30s 短间隔重试；成功恢复 5min 节流。
+     * - 失败都不阻断消费主链路，只记限频日志与连续失败留痕。
+     */
+    private fun maybePruneQueue() {
+        val now = System.currentTimeMillis()
+        val interval = if (pruneFailureStreak > 0) {
+            EventQueueRetention.PRUNE_RETRY_INTERVAL_MS
+        } else {
+            EventQueueRetention.PRUNE_INTERVAL_MS
+        }
+        if (now - lastQueuePruneAt < interval) return
+        lastQueuePruneAt = now
+        var failed = false
+        if (cursorRead == DataBusProtocol.CursorRead.OK) {
+            val result = runCatching {
+                DataBus.pruneQueueEvents(
+                    DataBusProtocol.EVENT_FILESYSTEM,
+                    EventQueueRetention.SOURCE_RETENTION_MS,
+                )
+            }.getOrElse {
+                // 异常即失败：不能压成零失败结果，否则重试节流被重置为长间隔。
+                DataBusProtocol.PruneResult(0, 0, 1, cursorRead)
+            }
+            failed = failed or reportPrune("source", result)
+        } else {
+            Log.w(TAG, "pruneQueue: skipped source events, cursorRead=$cursorRead")
+        }
+        val quarantine = runCatching {
+            DataBus.pruneQuarantine(
+                DataBusProtocol.EVENT_FILESYSTEM,
+                EventQueueRetention.QUARANTINE_RETENTION_MS,
+            )
+        }.getOrElse {
+            DataBusProtocol.PruneResult(0, 0, 1, null)
+        }
+        failed = failed or reportPrune("quarantine", quarantine)
+        pruneFailureStreak = if (failed) {
+            val streak = pruneFailureStreak + 1
+            if (streak >= EventQueueRetention.PRUNE_FAILURE_JOURNAL_THRESHOLD) {
+                Log.e(TAG, "pruneQueue: $streak consecutive failures " +
+                        "for ${DataBusProtocol.EVENT_FILESYSTEM}")
+            }
+            streak
+        } else {
+            0
+        }
+    }
+
+    /** 记录单次清理结果；返回 true 表示本次存在失败。 */
+    private fun reportPrune(kind: String, result: DataBusProtocol.PruneResult): Boolean {
+        if (result.failed > 0) {
+            Log.w(TAG, "pruneQueue: $kind scanned=${result.scanned} " +
+                    "deleted=${result.deleted} failed=${result.failed} " +
+                    "cursorRead=${result.cursorRead}")
+            return true
+        }
+        if (result.deleted > 0) {
+            Log.d(TAG, "pruneQueue: $kind scanned=${result.scanned} deleted=${result.deleted}")
+        }
+        return false
     }
 
     /**
@@ -252,6 +361,8 @@ object FileSystemEventConsumer {
         // readEventFiles 会跳过未确认事件（at-least-once 保障）。
         if (!DataBus.writeCursorToEvent(DataBusProtocol.EVENT_FILESYSTEM, event)) return false
         cursor = event.name
+        // 本进程刚原子写入过即为可信：重确认后清理门重新打开。
+        cursorRead = DataBusProtocol.CursorRead.OK
         return true
     }
 
