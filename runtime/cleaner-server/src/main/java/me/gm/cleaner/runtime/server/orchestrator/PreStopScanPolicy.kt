@@ -50,6 +50,21 @@ internal data class ObservedTarget(
     val startTime: Long,
 )
 
+/**
+ * 操作目标：最终下发 force-stop 的包+用户组合。
+ *
+ * 由 resolveOperationTargets 从观测目标裁决而来（观测 ∩ 已安装），
+ * 是包级 API 实际杀伤面的精确描述。不得包含无观测依据的组合。
+ */
+internal data class OperationTarget(
+    val packageName: String,
+    val userId: Int,
+)
+
+/** 同一份执行前快照派生的 pid→starttime 视图，供同实例守卫与记账使用。 */
+internal fun List<ObservedTarget>.pidMap(): Map<Int, Long> =
+    associate { it.pid to it.startTime }
+
 /** 扫描结果：区分"确认无进程"与"无法确认进程状态"。 */
 internal sealed interface MediaProcessScan {
     data class Success(val instances: Map<Int, Long>) : MediaProcessScan

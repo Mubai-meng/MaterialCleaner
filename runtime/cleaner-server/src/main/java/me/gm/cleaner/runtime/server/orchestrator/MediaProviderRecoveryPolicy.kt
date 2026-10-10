@@ -137,4 +137,93 @@ internal object MediaProviderRecoveryPolicy {
             null
         }
     }
+
+    /** 总账语义解析结果：只有 Valid 可恢复轮次，其余一律保守。 */
+    sealed interface LedgerParsed {
+        data class Valid(val rounds: Int, val round: RoundRecord?) : LedgerParsed
+        data object Corrupted : LedgerParsed
+    }
+
+    /**
+     * 解析并校验总账 JSON（纯函数，可单测）。
+     *
+     * 不用 opt* 默认值：缺失字段、类型错误、负轮次、异常时间戳、
+     * pids/starts 失配一律 Corrupted。`{}` 不是空账本，而是不可确认的历史，
+     * 必须保守——静默归零会重新放行破坏，方向偏危险。
+     *
+     * 校验规则按当前写入格式（见 buildLedgerJson）制定，不做版本框架。
+     */
+    fun parseLedger(json: String): LedgerParsed {
+        val root = try {
+            org.json.JSONObject(json)
+        } catch (e: Exception) {
+            return LedgerParsed.Corrupted
+        }
+        if (!root.has("destructiveRounds")) return LedgerParsed.Corrupted
+        val rounds = try {
+            root.getInt("destructiveRounds")
+        } catch (e: Exception) {
+            return LedgerParsed.Corrupted
+        }
+        if (rounds < 0 || rounds > MAX_DESTRUCTIVE_ROUNDS) return LedgerParsed.Corrupted
+        val lastAt = try {
+            if (!root.has("lastRoundAt")) 0L else root.getLong("lastRoundAt")
+        } catch (e: Exception) {
+            return LedgerParsed.Corrupted
+        }
+        if (lastAt < 0L) return LedgerParsed.Corrupted
+        val pids = try {
+            if (!root.has("lastRoundPids")) {
+                mutableSetOf<Int>()
+            } else {
+                val arr = root.getJSONArray("lastRoundPids")
+                (0 until arr.length()).map { arr.getInt(it) }.toMutableSet()
+            }
+        } catch (e: Exception) {
+            return LedgerParsed.Corrupted
+        }
+        if (pids.any { it <= 0 }) return LedgerParsed.Corrupted
+        val starts = try {
+            if (!root.has("lastRoundStarts")) {
+                mutableMapOf<Int, Long>()
+            } else {
+                val obj = root.getJSONObject("lastRoundStarts")
+                val map = mutableMapOf<Int, Long>()
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val pid = key.toIntOrNull() ?: return LedgerParsed.Corrupted
+                    map[pid] = obj.getLong(key)
+                }
+                map
+            }
+        } catch (e: Exception) {
+            return LedgerParsed.Corrupted
+        }
+        if (starts.any { it.key <= 0 || it.value < 0L }) return LedgerParsed.Corrupted
+        if (!starts.keys.all { it in pids }) return LedgerParsed.Corrupted
+        val round = if (rounds > 0 || lastAt > 0L) {
+            RoundRecord(timeMs = lastAt, targetPids = pids, targetStarts = starts)
+        } else {
+            null
+        }
+        return LedgerParsed.Valid(rounds, round)
+    }
+
+    /**
+     * 由观测目标裁决操作目标（纯函数，可单测）。
+     *
+     * 操作集合 = 观测到的 (package,userId) ∩ 该用户下已安装。
+     * 无观测的包/用户不杀——包级 API 杀伤面不得大于准入证据。
+     * 安装检查以函数参数注入，保持纯函数可测。
+     */
+    fun resolveOperationTargets(
+        observed: List<ObservedTarget>,
+        isInstalled: (packageName: String, userId: Int) -> Boolean,
+    ): Set<OperationTarget> =
+        observed
+            .map { OperationTarget(it.packageName, it.userId) }
+            .toSet()
+            .filter { isInstalled(it.packageName, it.userId) }
+            .toSet()
 }

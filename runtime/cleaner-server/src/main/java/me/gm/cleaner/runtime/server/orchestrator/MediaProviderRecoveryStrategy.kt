@@ -8,8 +8,6 @@ import me.gm.cleaner.runtime.server.CleanerServer
 import me.gm.cleaner.runtime.server.SnapshotPublisher
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway
 import me.gm.cleaner.runtime.server.process.ProcessIdentity
-import org.json.JSONArray
-import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -219,16 +217,24 @@ class MediaProviderRecoveryStrategy(
             }
             return false
         }
-        // 真正执行破坏前重新扫描实例身份：probe 的 wake+等待期间进程集合可能已变，
+        // 单次执行前扫描贯穿准入、记账与操作：同实例守卫检查的快照必须
+        // 与最终操作依据同一份快照，否则两份独立扫描的竞态窗口会使守卫失效。
         // 决策时观测结果不等于执行时对象，不能直接当事实记录。
         // 无法确认身份或确认无活进程时必须中止本轮破坏操作——“不能确认身份则禁止盲杀”、
         // “无活进程只做唤醒+重探测”是硬约束。包级清理需独立准入，不搭本轮便车。
-        val preStopObserved = PreStopScanPolicy.resolve(scanMediaProcessInstances())
-        if (preStopObserved == null) {
+        val targets = scanObservedTargets()
+        if (targets.isEmpty()) {
             Log.w(TAG, "Pre-stop scan unavailable or empty, aborting destructive round " +
                     "to keep the blind-kill guard (will keep probing)")
             return true
         }
+        // 同一份快照派生 pid 集合，复用唯一转换点做守卫与记账。
+        val preStopObserved =
+            PreStopScanPolicy.resolve(MediaProcessScan.Success(targets.pidMap()))
+                ?: run {
+                    Log.w(TAG, "Pre-stop identity unresolvable, aborting destructive round")
+                    return true
+                }
         // 执行前复检同实例守卫：决策时扫描可能已过期（进程在 wake/等待期间更替），
         // 只有执行前实例才是真正的杀灭对象，必须用它而非决策快照做最终准入。
         if (!MediaProviderRecoveryPolicy.mayTargetInstances(lastRound, preStopObserved)) {
@@ -245,11 +251,16 @@ class MediaProviderRecoveryStrategy(
                     "(corrupted=$ledgerCorrupted rounds=$destructiveRounds), aborting")
             return true
         }
-        // 观测目标 vs 操作目标显式对照：扫描给出 pid 级证据，
-        // API 实际影响包+用户范围。差集必须日志留痕，不得用观测精度冒充操作精度。
-        val observedTargets = scanObservedTargets()
-        if (observedTargets.isEmpty()) {
-            Log.w(TAG, "Observed targets empty at execution, aborting destructive round")
+        // 操作目标裁决：观测 (package,userId) ∩ 该用户下已安装。
+        // 无观测依据的包/用户不杀——包级 API 杀伤面不得大于准入证据。
+        val operations = MediaProviderRecoveryPolicy.resolveOperationTargets(
+            targets,
+        ) { packageName, userId ->
+            SystemService.getPackageInfoNoThrow(packageName, 0, userId) != null
+        }
+        if (operations.isEmpty()) {
+            Log.w(TAG, "No operable targets (observed but not installed), " +
+                    "aborting destructive round without consuming a round")
             return true
         }
         // 预先记账：先把“已保留的尝试轮次”落盘，成功后才允许破坏。
@@ -269,13 +280,12 @@ class MediaProviderRecoveryStrategy(
         lastRound = nextRound
         // 语义固定为“破坏操作前观测到的目标实例”。平台不返回实际终止清单，
         // 且 forceStopPackage 是包级操作、与扫描瞬间的 PID 集合存在固有竞态窗口，
-        // 因此这是准入证据而非身份保证；该窗口在下列情形不可避免：
-        // - Success(empty)：确认无活进程，操作为包级清理+wake（幂等，用于拉起死进程）；
-        // - Success(nonEmpty)：观测到活实例，但扫描到执行之间仍可能出现新实例。
+        // 因此这是准入证据而非身份保证；操作集合已收敛为观测交集（见上），
+        // 残余窗口仅为扫描到执行之间出现的新实例。
         // 确认进入破坏路径后才重置需要重建的 Native 状态。
         // 内存准入态已在预先记账时更新，此处只执行破坏与结果记录，不再二次计轮。
         MediaProviderHookGateway.resetNativeStateForReconnect()
-        val stoppedPackages = forceStopMediaProviderPackages(observedTargets)
+        val stoppedPackages = forceStopMediaProviderPackages(operations)
         if (stoppedPackages.isEmpty()) {
             Log.w(TAG, "MediaProvider hook recovery requested, but no MediaProvider package was found")
         } else {
@@ -394,31 +404,24 @@ class MediaProviderRecoveryStrategy(
                 return
             }
             is me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol.RecoveryLedgerRead.Ok -> {
-                val root = JSONObject(r.json)
-                applyLedgerRoot(root)
+                // 语法层由 JSONObject 抛异常兜底（init 转腐败），语义层由 parseLedger
+                // 显式校验：opt* 默认值永不抛，语义错误到不了异常通道，必须显式判。
+                when (val parsed = MediaProviderRecoveryPolicy.parseLedger(r.json)) {
+                    is MediaProviderRecoveryPolicy.LedgerParsed.Valid -> {
+                        destructiveRounds = parsed.rounds
+                        lastRound = parsed.round
+                        if (parsed.round != null) {
+                            Log.i(TAG, "Restored recovery ledger: " +
+                                    "destructiveRounds=$destructiveRounds")
+                        }
+                    }
+                    is MediaProviderRecoveryPolicy.LedgerParsed.Corrupted -> {
+                        Log.w(TAG, "Recovery ledger failed semantic validation, " +
+                                "entering conservative probe")
+                        ledgerCorrupted = true
+                    }
+                }
             }
-        }
-    }
-
-    /** 解析已确认可读的总账 JSON；JSON 语法损坏抛给调用方转腐败态。 */
-    private fun applyLedgerRoot(root: JSONObject) {
-        destructiveRounds = root.optInt("destructiveRounds", 0)
-        val lastAt = root.optLong("lastRoundAt", 0L)
-        val pids = mutableSetOf<Int>()
-        val starts = mutableMapOf<Int, Long>()
-        val arr = root.optJSONArray("lastRoundPids")
-        if (arr != null) {
-            for (i in 0 until arr.length()) pids.add(arr.optInt(i))
-        }
-        val obj = root.optJSONObject("lastRoundStarts")
-        obj?.keys()?.forEach { key ->
-            key.toIntOrNull()?.let { pid -> starts[pid] = obj.optLong(key) }
-        }
-        if (destructiveRounds > 0 || lastAt > 0L) {
-            lastRound = MediaProviderRecoveryPolicy.RoundRecord(
-                timeMs = lastAt, targetPids = pids, targetStarts = starts,
-            )
-            Log.i(TAG, "Restored recovery ledger: destructiveRounds=$destructiveRounds")
         }
     }
 
@@ -445,46 +448,23 @@ class MediaProviderRecoveryStrategy(
     }
 
     /**
-     * 包级强杀：API 粒度为包+用户，无法精确到 PID。
+     * 包级强杀：操作集合已由 resolveOperationTargets 收敛为观测交集，
+     * 此处只执行、不再扩大范围。
      *
-     * @param observed 执行前观测到的进程实例（pid 级证据）。
+     * @param operations 最终操作目标（包+用户组合）。
      * @return 实际下发强杀的包集合。
-     *
-     * 观测 vs 操作差集必须日志留痕：若操作包不在观测中，说明杀了未观测到的
-     * 同包其他用户实例；若观测包未安装，则跳过。这是包级 API 固有语义，
-     * 不得用观测精度冒充操作精度。
      */
-    private fun forceStopMediaProviderPackages(observed: List<ObservedTarget>): Set<String> {
-        val userIds = SystemService.getUserIdsNoThrow()
+    private fun forceStopMediaProviderPackages(
+        operations: Set<OperationTarget>,
+    ): Set<String> {
         val packages = linkedSetOf<String>()
-
-        for (packageName in MEDIA_PROVIDER_PACKAGE_CANDIDATES) {
-            if (userIds.any { userId ->
-                    SystemService.getPackageInfoNoThrow(packageName, 0, userId) != null
-                }) {
-                packages += packageName
-            }
-        }
-
-        val observedPkgs = observed.map { it.packageName }.toSet()
-        val extraKilled = packages - observedPkgs
-        val uninstalled = observedPkgs - packages.toSet()
-        if (extraKilled.isNotEmpty()) {
-            Log.w(TAG, "force-stop scope exceeds observed instances: " +
-                    "observedPkgs=$observedPkgs operatedPkgs=$packages " +
-                    "observed=${observed.map { "${it.packageName}/u${it.userId}/${it.pid}" }}")
-        }
-        if (uninstalled.isNotEmpty()) {
-            Log.w(TAG, "observed packages not installed, skipping: $uninstalled")
-        }
-
-        for (userId in userIds) {
-            for (packageName in packages) {
-                runCatching {
-                    SystemService.forceStopPackageNoThrow(packageName, userId)
-                }.onFailure {
-                    Log.w(TAG, "force-stop MediaProvider failed: package=$packageName user=$userId", it)
-                }
+        for (op in operations) {
+            packages += op.packageName
+            runCatching {
+                SystemService.forceStopPackageNoThrow(op.packageName, op.userId)
+            }.onFailure {
+                Log.w(TAG, "force-stop MediaProvider failed: " +
+                        "package=${op.packageName} user=${op.userId}", it)
             }
         }
         return packages

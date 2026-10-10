@@ -236,4 +236,82 @@ class MediaProviderRecoveryPolicyTest {
         val json = MediaProviderRecoveryPolicy.buildLedgerJson(0, null)
         assertTrue(json != null && json.contains("\"destructiveRounds\":0"))
     }
+
+    @Test
+    fun `合法总账解析通过`() {
+        val r = round(setOf(100), mapOf(100 to 50L), timeMs = 777L)
+        val json = MediaProviderRecoveryPolicy.buildLedgerJson(2, r)!!
+        val parsed = MediaProviderRecoveryPolicy.parseLedger(json)
+        assertTrue(parsed is MediaProviderRecoveryPolicy.LedgerParsed.Valid)
+        val valid = parsed as MediaProviderRecoveryPolicy.LedgerParsed.Valid
+        assertEquals(2, valid.rounds)
+    }
+
+    @Test
+    fun `空对象不是空账本而是腐败`() {
+        // {} 意味着历史不可确认，静默归零会重新放行破坏，方向偏危险。
+        assertTrue(
+            MediaProviderRecoveryPolicy.parseLedger("{}") is
+                MediaProviderRecoveryPolicy.LedgerParsed.Corrupted,
+        )
+    }
+
+    @Test
+    fun `类型错误与负轮次判腐败`() {
+        assertTrue(
+            MediaProviderRecoveryPolicy.parseLedger(
+                "{\"destructiveRounds\":\"invalid\",\"lastRoundAt\":0}",
+            ) is MediaProviderRecoveryPolicy.LedgerParsed.Corrupted,
+        )
+        assertTrue(
+            MediaProviderRecoveryPolicy.parseLedger(
+                "{\"destructiveRounds\":-1,\"lastRoundAt\":0}",
+            ) is MediaProviderRecoveryPolicy.LedgerParsed.Corrupted,
+        )
+        assertTrue(
+            MediaProviderRecoveryPolicy.parseLedger(
+                "{\"destructiveRounds\":99,\"lastRoundAt\":0}",
+            ) is MediaProviderRecoveryPolicy.LedgerParsed.Corrupted,
+        )
+    }
+
+    @Test
+    fun `语法错误判腐败`() {
+        assertTrue(
+            MediaProviderRecoveryPolicy.parseLedger("{not json") is
+                MediaProviderRecoveryPolicy.LedgerParsed.Corrupted,
+        )
+    }
+
+    @Test
+    fun `pids与starts失配判腐败`() {
+        assertTrue(
+            MediaProviderRecoveryPolicy.parseLedger(
+                "{\"destructiveRounds\":1,\"lastRoundAt\":7," +
+                    "\"lastRoundPids\":[100]," +
+                    "\"lastRoundStarts\":{\"200\":50}}",
+            ) is MediaProviderRecoveryPolicy.LedgerParsed.Corrupted,
+        )
+    }
+
+    @Test
+    fun `操作目标仅含观测且已安装组合`() {
+        val observed = listOf(
+            ObservedTarget("pkg.a", 0, 100, 50L),
+            ObservedTarget("pkg.a", 10, 200, 60L),
+            ObservedTarget("pkg.b", 0, 300, 70L),
+        )
+        val ops = MediaProviderRecoveryPolicy.resolveOperationTargets(
+            observed,
+        ) { pkg, user -> !(pkg == "pkg.a" && user == 10) && pkg != "pkg.b" }
+        assertEquals(setOf(OperationTarget("pkg.a", 0)), ops)
+    }
+
+    @Test
+    fun `无观测无操作`() {
+        val ops = MediaProviderRecoveryPolicy.resolveOperationTargets(
+            emptyList(),
+        ) { _, _ -> true }
+        assertTrue(ops.isEmpty())
+    }
 }

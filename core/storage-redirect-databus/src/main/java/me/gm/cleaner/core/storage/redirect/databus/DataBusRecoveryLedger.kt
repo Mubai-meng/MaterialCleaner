@@ -87,7 +87,15 @@ internal object DataBusRecoveryLedger {
     fun clear(): Boolean {
         val file = File("${DataBus.BUS_ROOT}/${DataBus.DIR_CURSORS}/$FILE_NAME")
         return try {
-            !file.exists() || file.delete()
+            // 与 readDetailed 一致的不跟随语义：悬空符号链接本身存在，
+            // File.exists() 跟随链接会误判不存在而谎报成功。成功标准是
+            // 调用后路径（不跟随）确实不存在。
+            val path = file.toPath()
+            if (!java.nio.file.Files.exists(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                return true
+            }
+            java.nio.file.Files.deleteIfExists(path)
+            !java.nio.file.Files.exists(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to clear recovery ledger", e)
             false
