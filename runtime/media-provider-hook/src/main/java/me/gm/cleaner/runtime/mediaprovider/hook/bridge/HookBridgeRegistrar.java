@@ -114,14 +114,22 @@ public final class HookBridgeRegistrar {
         if (fresh == null || !fresh.pingBinder()) {
             return false;
         }
+        // 竞争分支的存活复核是跨进程调用，必须移出锁：先快照、锁外 ping、再按需加锁更新。
+        final IBinder competing;
+        synchronized (sWatchLock) {
+            competing = (sWatchedRegistryBinder != null && sWatchedRegistryBinder != watched)
+                    ? sWatchedRegistryBinder : null;
+        }
+        final boolean competingAlive = competing != null && competing.pingBinder();
         synchronized (sWatchLock) {
             // 安装期间若已有活体（并发尝试先装好），丢弃本次结果，避免监听堆积。
             // 引用比对即可：同一周期内只有本监视器会写入该字段。
-            if (sWatchedRegistryBinder != null && sWatchedRegistryBinder != watched) {
+            // 仅当竞争者仍为当前值时采信锁外 ping 结果；期间已变更则按新状态处理。
+            if (competing != null && sWatchedRegistryBinder == competing) {
                 // 竞争分支必须复核存活：他线程装的 Binder 可能在我们进入本锁前已死亡
                 // （死亡回调尚未执行或时序交错），此时若直接返回 true，
                 // 将没有有效监视器却又报告成功。已死则清理后继续安装本次结果。
-                if (sWatchedRegistryBinder.pingBinder()) {
+                if (competingAlive) {
                     return true;
                 }
                 try {
@@ -130,6 +138,12 @@ public final class HookBridgeRegistrar {
                 }
                 sWatchedRegistryBinder = null;
                 sRegistryDeathRecipient = null;
+            }
+            // 锁外 ping 期间若装入未经复核的新竞争者，不在锁内 ping、不直接覆盖：
+            // 返回 false 交由调用方重试，下轮在方法入口快照并复核其存活。
+            // （不返回 true，避免谎报“已确认监视中”；注册成功 vs 死亡监视成功语义不变。）
+            if (sWatchedRegistryBinder != null && sWatchedRegistryBinder != watched) {
+                return false;
             }
             if (sWatchedRegistryBinder != null) {
                 try {
