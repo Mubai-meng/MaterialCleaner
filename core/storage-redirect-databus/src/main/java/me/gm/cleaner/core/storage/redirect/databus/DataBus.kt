@@ -86,6 +86,40 @@ object DataBus {
     private var initialized = false
 
     /**
+     * 本进程内已经报告过目录准备失败的路径。
+     *
+     * MediaProvider 等非 root 进程对 `/data/local/tmp` 没有写权限（也不一定有权 stat），
+     * `Files.createDirectories("/data/local/tmp/cleaner")` 必然抛 `AccessDeniedException`。
+     * 这是**预期情形**（该进程的正路是 Binder bridge，见 `HookDataBusBridge`），
+     * 但早期实现每次调用都 `Log.e(..., e)`，一个进程启动就打出一条 40+ 行的完整堆栈
+     * ——真机实测一次 80s 会话里光这一条就占 38 行、且以 E 级出现，让现场看起来在报错。
+     * 按路径去重后只报一条 W（不带堆栈，类名 + 消息已足够定位）。
+     *
+     * ⚠️ 该去重**只在进程内有效**：进程重启后会重新报一次，这是刻意的——
+     * "本进程无权写 bus 根"是需要每个进程各自知道一次的信息。
+     */
+    private val reportedPrepareFailures =
+        java.util.Collections.newSetFromMap(
+            java.util.concurrent.ConcurrentHashMap<String, Boolean>(),
+        )
+
+    /**
+     * 文件名消毒用的正则。`Pattern.compile` 只做一次：
+     * `sanitizeFileName` / `createTempFileIn` 都在**每次事件写入路径**上被调用
+     * （事件文件、计数器文件、游标、隔离证据），逐次编译正则是纯浪费。
+     */
+    private val UNSAFE_FILENAME_CHARS = Regex("[^A-Za-z0-9._-]")
+
+    /**
+     * 最近一次目录准备失败的原因（`"<path>: <ExceptionClass>: <message>"`）。
+     *
+     * 与 [reportedPrepareFailures] 配套：日志只报一行（不带堆栈），
+     * 完整成因留在这里，供状态快照 / 诊断读取，做到"日志不刷屏但不丢证据"。
+     */
+    @Volatile
+    private var lastInitFailure: String? = null
+
+    /**
      * 确保总线目录结构存在，设置跨进程可访问权限。
      * 幂等，可在 server 或 MediaProvider 进程中调用。
      */
@@ -484,13 +518,23 @@ object DataBus {
         makeWorldAccessible(dir, executable = true)
         true
     } catch (e: Exception) {
-        Log.e(TAG, "Failed to prepare directory: ${dir.path}", e)
+        // 设计内的降级：非 root 进程建不了 /data/local/tmp 下的目录 ⇒ 回退 Binder bridge。
+        // 按路径去重 + 不带堆栈（见 reportedPrepareFailures 的 KDoc）。
+        lastInitFailure = "${dir.path}: ${e.javaClass.simpleName}: ${e.message}"
+        if (reportedPrepareFailures.add(dir.path)) {
+            Log.w(
+                TAG,
+                "DataBus directory not writable from this process (uid=${Process.myUid()}), " +
+                        "falling back to Binder bridge: ${dir.path}" +
+                        " (${e.javaClass.simpleName}: ${e.message})",
+            )
+        }
         false
     }
 
     internal fun createTempFileIn(dir: File, prefix: String, suffix: String): File {
         val safePrefix = prefix
-            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .replace(UNSAFE_FILENAME_CHARS, "_")
             .take(120)
             .padEnd(3, '_')
         return Files.createTempFile(dir.toPath(), safePrefix, suffix).toFile()
@@ -571,7 +615,7 @@ object DataBus {
         DataBusPrune.readCursor(queue)
 
     internal fun sanitizeFileName(value: String): String =
-        value.replace(Regex("[^A-Za-z0-9._-]"), "_").take(180).ifBlank { "lease" }
+        value.replace(UNSAFE_FILENAME_CHARS, "_").take(180).ifBlank { "lease" }
 
     private fun isValidSnapshotName(name: String): Boolean =
         isValidName("snapshot", name, DataBusProtocol.validSnapshotNames)
