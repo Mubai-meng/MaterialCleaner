@@ -2,10 +2,28 @@
 
 > 一款 Android 存储重定向工具，通过 bind mount + Xposed Hook 实现文件系统级路径重定向。
 > 需要 Root（KernelSU / APatch / Magisk）和 LSPosed 框架。
->
-> 详细中文文档见 [`MaterialCleaner.wiki`](https://github.com/firesahc/MaterialCleaner/wiki)（GitHub Wiki 格式：架构、领域术语、DataBus、三层 Hook、构建部署、诊断排障）。
 
----
+## 适配说明（ColorOS 17 / Android 17 ）
+
+本仓库为 MaterialCleaner 的适配分支，目标运行环境：
+
+- **设备 / ROM**：OnePlus 15（PLK110）/ ColorOS 17
+- **Android 版本**：Android 17（API 37）
+- **Root 方案**：KernelSU（国行）
+- **Xposed 框架**：libxposed API 102
+- **构建产物**：`versionCode=500` / `versionName=5.0.0`，单 `arm64-v8a` ABI
+
+相对上游的主要改动方向（非侵入式，优先新增文件/类）：
+
+- 不可访问路径链路：反解派生、规则下发、FUSE Java Gate 先于重定向拒绝、MediaProvider query SQL 下推与结果集兜底
+- 只读规则递归覆盖与判定修正
+- 事件死信隔离、挂载状态判定、规则无意义判据后置、应用列表全序排序
+- 模块侧错误可见化（诊断归档中的 `errors/` 与 `hookErrors` 段）
+- FUSE 热路径性能：进程内有界 UID→包名缓存（LRU + TTL），减少 PackageManager Binder 查询
+- 应用列表图标 `LruCache`，避免主线程反复 `loadIcon`
+- 若干 native 健壮性修复与日志流关闭加固
+
+> 说明：以上为适配目标的工程改动，实机稳定性请以设备在 ColorOS 17 / Android 17 上的长期观察与诊断归档为准。
 
 ## 功能
 
@@ -173,34 +191,14 @@ App → Shell.cmd(Starter.command) → start.sh → starter (ELF 二进制)
 - **FUSE Native Hook 依赖平台形态**：Android 版本、APEX MediaProvider 与 libfuse_jni.so 加载方式会影响可用 Hook 模式
 - **main.jar 需随代码更新**：修改 `runtime/media-provider-hook` 后需重新构建，Gradle task 会自动处理
 
-## 适配说明（ColorOS 17 / Android 17 / OnePlus 15）
 
-本仓库为 MaterialCleaner 的适配分支，目标运行环境：
-
-- **设备 / ROM**：OnePlus 15（PLK110）/ ColorOS 17
-- **Android 版本**：Android 17（API 37）
-- **Root 方案**：KernelSU（国行）
-- **Xposed 框架**：libxposed API 102（本地 `app/libs/libxposed-api-102.jar`）
-- **构建产物**：`versionCode=500` / `versionName=5.0.0`，单 `arm64-v8a` ABI，未签名 release
-
-相对上游的主要改动方向（非侵入式，优先新增文件/类）：
-
-- 不可访问路径链路：反解派生、规则下发、FUSE Java Gate 先于重定向拒绝、MediaProvider query SQL 下推与结果集兜底
-- 只读规则递归覆盖与判定修正
-- 事件死信隔离、挂载状态判定、规则无意义判据后置、应用列表全序排序
-- 模块侧错误可见化（诊断归档中的 `errors/` 与 `hookErrors` 段）
-- FUSE 热路径性能：进程内有界 UID→包名缓存（LRU + TTL），减少 PackageManager Binder 查询
-- 应用列表图标 `LruCache`，避免主线程反复 `loadIcon`
-- 若干 native 健壮性修复与日志流关闭加固
-
-> 说明：以上为适配目标的工程改动，实机稳定性请以设备在 ColorOS 17 / Android 17 上的长期观察与诊断归档为准。
 
 ## 赞助
 
-vibe coding的价格有些超出预期🫠，如果觉得软件好用可以赞助作者。
+如果觉得软件好用可以赞助作者。
 
-[![爱发电赞助作者](Donate.jpg)](https://www.ifdian.net/a/firesahc)
+<img width="1260" height="1456" alt="1791686415378" src="https://github.com/user-attachments/assets/2ffd957d-5c6e-47f0-b9de-46ae7de0709b" />
+<img width="1549" height="1965" alt="mm_facetoface_collect_qrcode_1791686353720" src="https://github.com/user-attachments/assets/26c17986-7a3f-4ccd-b369-00b428eb976d" />
 
-> 图片加载失败？请直接访问 [https://www.ifdian.net/a/firesahc](https://www.ifdian.net/a/firesahc)
 
 
