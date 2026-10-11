@@ -156,6 +156,16 @@ object OrderedRedirectInterpreter {
     internal fun startsWithPath(path: String, prefix: String): Boolean =
         path == prefix || path.startsWith(ensureTrailingSeparator(prefix))
 
+    /** 非抛版本，供解析边界过滤脏数据；热路径永不抛异常。 */
+    fun isCanonicalAbsolutePath(path: String): Boolean {
+        if (!path.startsWith('/')) return false
+        if (path != "/" && path.endsWith('/')) return false
+        if ("//" in path) return false
+        if (path.split('/').any { it == "." || it == ".." }) return false
+        if (0.toChar() in path) return false
+        return true
+    }
+
     internal fun requireCanonicalAbsolutePath(path: String, label: String) {
         require(path.startsWith('/')) { "$label 必须是绝对路径" }
         require(path == "/" || !path.endsWith('/')) { "$label 不能包含尾部分隔符" }

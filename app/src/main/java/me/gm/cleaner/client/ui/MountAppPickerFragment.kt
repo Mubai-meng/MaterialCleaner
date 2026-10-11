@@ -1,6 +1,7 @@
 package me.gm.cleaner.client.ui
 
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.Menu
 import android.view.MenuInflater
@@ -10,20 +11,17 @@ import android.view.ViewGroup
 import androidx.appcompat.widget.SearchView
 import androidx.core.view.MenuCompat
 import androidx.fragment.app.viewModels
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.asLiveData
-import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView.Adapter.StateRestorationPolicy
 import com.google.android.material.appbar.AppBarLayout
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.launch
 import me.gm.cleaner.R
 import me.gm.cleaner.app.BaseFragment
 import me.gm.cleaner.app.ConfirmationDialog
 import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.config.removeReadOnlyRules
+import me.gm.cleaner.core.config.removeRedirectRules
 import me.gm.cleaner.databinding.MountAppPickerFragmentBinding
 import me.gm.cleaner.util.buildStyledTitle
 import me.gm.cleaner.util.colorAccent
@@ -43,13 +41,6 @@ class MountAppPickerFragment : BaseFragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        viewLifecycleOwner.lifecycleScope.launch {
-            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                ConfiguredPolicyStoreProvider.instance.snapshots.collect {
-                    viewModel.updateAppsRuleCount()
-                }
-            }
-        }
     }
 
     override fun onCreateView(
@@ -95,8 +86,19 @@ class MountAppPickerFragment : BaseFragment() {
                     )
                     .apply {
                         addOnPositiveButtonClickListener {
-                            ServicePreferences.removeStorageRedirect(uninstalledPackages)
-                            ServicePreferences.removeReadOnly(uninstalledPackages)
+                            val store = ConfiguredPolicyStoreProvider.instance
+                            val redirectResult = store
+                                .updateRedirect(store.snapshots.value.redirect.revision) { it.removeRedirectRules(uninstalledPackages) }
+                            if (!redirectResult.success) {
+                                Log.e("MC/Policy", "remove redirect failed: ${redirectResult.error}")
+                                return@addOnPositiveButtonClickListener
+                            }
+                            val readOnlyResult = ConfiguredPolicyStoreProvider.instance
+                                .updateReadOnly(ConfiguredPolicyStoreProvider.instance.snapshots.value.readOnly.revision) { it.removeReadOnlyRules(uninstalledPackages) }
+                            if (!readOnlyResult.success) {
+                                Log.e("MC/Policy", "remove read-only failed: ${readOnlyResult.error}")
+                                return@addOnPositiveButtonClickListener
+                            }
                             val denyList = ServicePreferences.denylist - uninstalledPackages.toSet()
                             ServicePreferences.denylist = denyList
                         }
@@ -122,10 +124,6 @@ class MountAppPickerFragment : BaseFragment() {
                 else -> {}
             }
         }
-        ServicePreferences.preferencesChangeLiveData.observe(viewLifecycleOwner) {
-            viewModel.updateAppsRuleCount()
-        }
-
         return binding.root
     }
 

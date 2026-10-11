@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -31,25 +32,96 @@ namespace ProcInfo {
         return env->NewStringUTF(nice_name);
     }
 
-    jint read_uid(JNIEnv *env, jclass clazz, jint pid) {
-        int fd = sys_open(StringPrintf("/proc/%d/cgroup"_iobfs.c_str(), pid).c_str(), O_RDONLY, 0);
-        if (fd < 0) {
-            return -3;
+    /**
+     * 在任意一行 cgroup 文本里查找 "uid_<d>/pid_<d>" 子串。
+     *
+     * 刻意**不锚定位置**：cgroup 的层级形态随 Android 版本变化，
+     * 见 [read_uid] 的注释。命中返回 true，并给出同段解析出的 pid，
+     * 供调用方挑选「属于本进程」的那一行。
+     */
+    bool scan_uid_pid(const char *line, int *outUid, int *outPid) {
+        const char *p = line;
+        while ((p = strstr(p, "uid_")) != nullptr) {
+            int uid = -1, pidv = -1;
+            if (sscanf(p, "uid_%d/pid_%d", &uid, &pidv) == 2 && uid >= 0) {
+                *outUid = uid;
+                *outPid = pidv;
+                return true;
+            }
+            p += 4;
         }
-        FILE *fp = fdopen(fd, "r"_iobfs.c_str());
-        if (fp == nullptr) {
-            sys_close(fd);
-            return -2;
-        }
+        return false;
+    }
 
-        int cuid = -1, cpid;
-        char line[PATH_MAX];
-        while (fgets(line, PATH_MAX - 1, fp) != nullptr) {
-            if (sscanf(line, "%*[^/]/uid_%d/pid_%d"_iobfs.c_str(), &cuid, &cpid) == 2) {
-                break;
+    jint read_uid(JNIEnv *env, jclass clazz, jint pid) {
+        // ⚠️ 旧实现用 sscanf("%*[^/]/uid_%d/pid_%d") 把 "uid_" 锚定在
+        // **第一个 '/' 之后**，只能匹配 "0::/uid_X/pid_Y" 这一种形态。
+        // ColorOS 17 / Android 17 的实际形态是 "0::/apps/uid_X/pid_Y"
+        // （libprocessgroup 建的是 /sys/fs/cgroup/apps/uid_X/pid_Y，
+        //   多一级 "apps/"，真机日志可见），于是解析恒失败返回 -1。
+        //
+        // 后果（2026-10-10 第 13 批真机实证）—— 三处调用点全部静默失效：
+        //   1. VfsLayerController 的隔离进程过滤：!isIsolated(-1) == true，
+        //      WebView 沙箱进程（真 uid 99000、u0a369i0）被算成目标 app 的
+        //      NOT_MOUNTED pid ⇒ UI 显示「挂载异常」；
+        //   2. Mounter 挂载重试的 PID 复用防护恒触发 ⇒ 延迟挂载重试永不执行；
+        //   3. resetAllMounts 恒跳过 ⇒ 挂载永不回滚。
+        //
+        // 现在改为在整行里查找子串，并优先取 pid 与请求 pid 相同的那一行。
+        int cuid = -1;
+        int fallbackUid = -1;
+        int fd = sys_open(StringPrintf("/proc/%d/cgroup"_iobfs.c_str(), pid).c_str(), O_RDONLY, 0);
+        if (fd >= 0) {
+            FILE *fp = fdopen(fd, "r"_iobfs.c_str());
+            if (fp == nullptr) {
+                sys_close(fd);
+            } else {
+                char line[PATH_MAX];
+                while (fgets(line, PATH_MAX - 1, fp) != nullptr) {
+                    int uid = -1, cpid = -1;
+                    if (scan_uid_pid(line, &uid, &cpid)) {
+                        if (cpid == pid) {
+                            cuid = uid;
+                            break;
+                        }
+                        if (fallbackUid < 0) {
+                            fallbackUid = uid;
+                        }
+                    }
+                }
+                fclose(fp);
             }
         }
-        fclose(fp);
+        if (cuid < 0 && fallbackUid >= 0) {
+            cuid = fallbackUid;
+        }
+
+        // ── 兜底：/proc/<pid>/status 的 "Uid:" 行是 uid 的权威来源 ──
+        // cgroup 层级形态还会继续变，任何形态假设都可能再次失效。兜底把
+        // 「解析失败」从「静默返回 -1 让调用方误判」降级为「仍拿到正确 uid」；
+        // 只有进程确实已死（两者都读不到）才返回负值，而那正是调用方该排除的情形。
+        if (cuid < 0) {
+            int sfd = sys_open(StringPrintf("/proc/%d/status"_iobfs.c_str(), pid).c_str(), O_RDONLY,
+                               0);
+            if (sfd >= 0) {
+                FILE *fp = fdopen(sfd, "r"_iobfs.c_str());
+                if (fp == nullptr) {
+                    sys_close(sfd);
+                } else {
+                    char line[PATH_MAX];
+                    while (fgets(line, PATH_MAX - 1, fp) != nullptr) {
+                        if (strncmp(line, "Uid:", 4) == 0) {
+                            int uid = -1;
+                            if (sscanf(line + 4, "%d", &uid) == 1 && uid >= 0) {
+                                cuid = uid;
+                            }
+                            break;
+                        }
+                    }
+                    fclose(fp);
+                }
+            }
+        }
         return cuid;
     }
 

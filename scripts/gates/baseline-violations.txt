@@ -1,6 +1,4 @@
-app/src/main/java/me/gm/cleaner/client/ui/storageredirect/MountWizard.kt	1298
-core/storage-redirect-databus/src/main/java/me/gm/cleaner/core/storage/redirect/databus/DataBus.kt	836
-runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/NativeHookStatus.kt	822
+app/src/main/java/me/gm/cleaner/client/ui/storageredirect/MountWizard.kt	1320
 word:app/src/main/java/me/gm/cleaner/client/BasePromptActivity.kt|denylist	9
 word:app/src/main/java/me/gm/cleaner/client/NotificationService.kt|denylist	8
 word:app/src/main/java/me/gm/cleaner/client/ui/AppListViewModelBase.kt|denylist	1
@@ -9,7 +7,7 @@ word:app/src/main/java/me/gm/cleaner/client/ui/MountAppPickerFragment.kt|denylis
 word:app/src/main/java/me/gm/cleaner/client/ui/ServiceStatusFormatter.kt|ConfiguredMountPoint	3
 word:app/src/test/java/me/gm/cleaner/client/ui/ServiceStatusFormatterTest.kt|ConfiguredMountPoint	2
 word:core/config-store/src/main/java/me/gm/cleaner/core/config/ServicePreferences.kt|denylist	13
-word:core/storage-redirect-databus/src/main/java/me/gm/cleaner/core/storage/redirect/databus/DataBus.kt|configured_mount_points	10
+word:core/storage-redirect-databus/src/main/java/me/gm/cleaner/core/storage/redirect/databus/DataBusProtocol.kt|configured_mount_points	8
 word:core/storage-redirect-domain/src/main/java/me/gm/cleaner/core/storage/redirect/domain/ConfiguredMountPointsSnapshot.kt|ConfiguredMountPoint	1
 word:core/storage-redirect-domain/src/main/java/me/gm/cleaner/core/storage/redirect/domain/RedirectPolicyDeriver.kt|ConfiguredMountPoint	3
 word:core/storage-redirect-domain/src/main/java/me/gm/cleaner/core/storage/redirect/domain/RedirectPolicySnapshot.kt|configured_mount_points	1
@@ -18,21 +16,34 @@ word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/consumer/
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/DiagnosticArchive.kt|configured_mount_points	2
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/hookbridge/MediaProviderHookGateway.kt|configured_mount_points	4
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/hookbridge/MediaProviderHookGateway.kt|ConfiguredMountPoint	1
-word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/observer/FileSystemObserver.kt|denylist	3
+word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/recording/FileSystemObserver.kt|denylist	3
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/orchestrator/DataBusLayerReporter.kt|configured_mount_points	2
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/orchestrator/DataBusLayerReporter.kt|ConfiguredMountPoint	1
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/orchestrator/HookRecoveryCoordinator.kt|ConfiguredMountPoint	1
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/orchestrator/LayerState.kt|configured_mount_points	1
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/orchestrator/NativeHookLayerReporter.kt|ConfiguredMountPoint	3
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/record/FileSystemRecord.kt|denylist	4
-word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/RuntimeRedirectPolicyFactory.kt|denylist	3
+word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/RuntimePolicyProjector.kt|denylist	3
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/SnapshotPublisher.kt|configured_mount_points	6
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/SnapshotPublisher.kt|ConfiguredMountPoint	10
 word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/SnapshotPublisher.kt|denylist	3
-word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/VfsRuntimeConfigStore.kt|denylist	1
-word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/FuseNativePolicyAdapter.kt|configured_mount_points	2
-word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/FuseNativePolicyAdapter.kt|ConfiguredMountPoint	5
-word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/HookPolicyCache.kt|configured_mount_points	8
-word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/HookPolicyCache.kt|ConfiguredMountPoint	11
-word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/HookPolicyCache.kt|denylist	10
-word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/HookPolicyRefreshScheduler.kt|configured_mount_points	1
+word:runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/VfsRuntimePolicy.kt|denylist	1
+word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/fuse/FuseNativePolicyAdapter.kt|configured_mount_points	2
+word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/fuse/FuseNativePolicyAdapter.kt|ConfiguredMountPoint	5
+word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/policy/HookPolicyCache.kt|configured_mount_points	8
+word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/policy/HookPolicyCache.kt|ConfiguredMountPoint	11
+word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/policy/HookPolicyCache.kt|denylist	10
+word:core/storage-redirect-domain/src/test/java/me/gm/cleaner/core/storage/redirect/domain/RedirectDifferentialTest.kt|ConfiguredMountPoint	2
+word:core/storage-redirect-domain/src/main/java/me/gm/cleaner/core/storage/redirect/domain/RuntimeBehaviorPolicy.kt|denylist	1
+word:core/storage-redirect-domain/src/test/java/me/gm/cleaner/core/storage/redirect/domain/RuntimeBehaviorPolicyTest.kt|denylist	1
+word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/bridge/HookPolicyRefreshScheduler.kt|configured_mount_points	1
+
+# 2026-10-10：同步上游 main（32 提交）+ 本适配线的实机诊断/守卫改动后，
+# 这四个文件超过了 G2 的 800 行门槛。**有意接受**：拆文件会改动刚合并完、
+# 单测全绿但尚未上机验证的运行时代码，回归风险大于收益（行数不改变任何运行行为）。
+# 后续拆分（如 DiagnosticArchive 的 summary/redact 分文件）时应当**删除**对应行。
+runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/DiagnosticArchive.kt	935
+runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/policy/NativeHookStatus.kt	858
+core/storage-redirect-databus/src/main/java/me/gm/cleaner/core/storage/redirect/databus/DataBus.kt	846
+runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/fuse/FuseJavaGate.java	841
+runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/vfs/mount/Mounter.kt	809

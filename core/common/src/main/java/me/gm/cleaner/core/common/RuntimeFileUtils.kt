@@ -4,9 +4,11 @@ import android.annotation.SuppressLint
 import android.os.Environment
 import android.util.Log
 import androidx.core.text.isDigitsOnly
+import me.gm.cleaner.core.common.AndroidFilesystemConfig.AID_ISOLATED_START
 import me.gm.cleaner.core.common.AndroidFilesystemConfig.AID_USER_OFFSET
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.file.LinkOption
 import java.nio.file.NoSuchFileException
@@ -20,8 +22,17 @@ import kotlin.io.path.OnErrorResult
 import kotlin.io.path.copyToRecursively
 import kotlin.io.path.createParentDirectories
 import kotlin.io.path.deleteRecursively
+import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.moveTo
 import kotlin.io.path.pathString
+
+@JvmOverloads
+fun Path.listDirectoryEntriesSafe(glob: String = "*"): List<Path> =
+    try {
+        listDirectoryEntries(glob)
+    } catch (e: Exception) {
+        emptyList()
+    }
 
 object RuntimeFileUtils {
     @Volatile
@@ -56,6 +67,14 @@ object RuntimeFileUtils {
 
     val androidSandboxDir: File
         get() = androidDir.resolve("sandbox")
+
+    val defaultExternalNoScan: Array<File>
+        get() = arrayOf(
+            androidDataDir,
+            androidMediaDir,
+            androidObbDir,
+            androidSandboxDir
+        )
 
     fun buildExternalStorageAppDataDirs(packageName: String): File =
         androidDataDir.resolve(packageName)
@@ -169,8 +188,54 @@ object RuntimeFileUtils {
         return !errorOccurred
     }
 
+    @delegate:SuppressLint("SoonBlockedPrivateApi")
+    val standardDirs: Array<String> by lazy {
+        Environment::class.java.getDeclaredField("STANDARD_DIRECTORIES")
+            .apply { isAccessible = true }[null] as Array<String>
+    }
+
+    fun isStandardDirectory(dir: String): Boolean {
+        for (valid in standardDirs) {
+            if (valid.equals(dir, true)) {
+                return true
+            }
+        }
+        return false
+    }
+
     fun Int.toUserId(): Int = this / AID_USER_OFFSET
     fun Int.toAppId(): Int = this % AID_USER_OFFSET
+
+    /**
+     * 隔离进程判定（webview 沙盒等）：朝生暮死且各有独立命名空间，
+     * 选为挂载目标注定撞上 PID 复用门，调用方应直接排除。
+     */
+    fun Int.isIsolatedUid(): Boolean = toAppId() > AID_ISOLATED_START
+
+    @Throws(IOException::class)
+    fun writeTextAtomically(file: File, content: String) {
+        val parent = file.parentFile
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs()
+        }
+        val tmpFile = File(parent, "${file.name}.${System.nanoTime()}.tmp")
+        try {
+            FileOutputStream(tmpFile).use { fos ->
+                fos.write(content.toByteArray(Charsets.UTF_8))
+                fos.flush()
+                fos.fd.sync()
+            }
+            if (!tmpFile.renameTo(file)) {
+                throw IOException("rename failed: ${tmpFile.path} -> ${file.path}")
+            }
+        } catch (e: IOException) {
+            tmpFile.delete()
+            throw e
+        } catch (e: RuntimeException) {
+            tmpFile.delete()
+            throw e
+        }
+    }
 
     private external fun b(dir: String): Int
     fun rm_dir(dir: String): Int = b(dir)

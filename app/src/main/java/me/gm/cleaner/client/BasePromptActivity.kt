@@ -6,6 +6,7 @@ import android.content.pm.PackageInfo
 import android.media.MediaScannerConnection
 import android.os.Bundle
 import android.os.Process
+import android.util.Log
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
@@ -21,14 +22,17 @@ import me.gm.cleaner.R
 import me.gm.cleaner.browser.filepicker.FilePickerDialog
 import me.gm.cleaner.client.ui.storageredirect.MimeUtils
 import me.gm.cleaner.client.ui.storageredirect.MountWizard
-import me.gm.cleaner.core.storage.redirect.domain.MountRules
+import me.gm.cleaner.client.ui.storageredirect.RedirectReachabilityAnalyzer
 import me.gm.cleaner.dao.AppLabelCache
 import me.gm.cleaner.dao.RootPreferences
+import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.config.getPackageSrZipped
+import me.gm.cleaner.core.config.replaceRedirectRules
 import me.gm.cleaner.databinding.PromptDialogBinding
 import me.gm.cleaner.settings.theme.ThemeUtil
-import me.gm.cleaner.util.FileUtils
-import me.gm.cleaner.util.FileUtils.toUserId
+import me.gm.cleaner.core.common.RuntimeFileUtils
+import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.util.getParcelableExtraCompat
 import java.io.File
 import kotlin.io.path.Path
@@ -66,10 +70,10 @@ abstract class BasePromptActivity : AppCompatActivity() {
                 wizard.getRecommendDirs(mediaType)[0].resolve(label).path to Path(path).parent.pathString
 
             NotificationService.ACTION_MEDIA_NOT_FOUND -> {
-                val standardParents = FileUtils.standardDirs
-                    .map { FileUtils.externalStorageDir.resolve(it) }
+                val standardParents = RuntimeFileUtils.standardDirs
+                    .map { RuntimeFileUtils.externalStorageDir.resolve(it) }
                 val recommendAccessibleDir = standardParents.firstOrNull {
-                    FileUtils.startsWith(it, path)
+                    RuntimeFileUtils.startsWith(it, path)
                 }?.path ?: Path(path).parent.pathString
                 recommendAccessibleDir to recommendAccessibleDir
             }
@@ -134,7 +138,7 @@ abstract class BasePromptActivity : AppCompatActivity() {
                     withContext(Dispatchers.IO) {
                         val wizard = MountWizard(packageInfo)
                         val answers = wizard.retrodictAnswers(
-                            ServicePreferences.getPackageSrZipped(packageName)
+                            ConfiguredPolicyStoreProvider.instance.getPackageSrZipped(packageName)
                         )
                         answers.q2 = true
                         answers.updateMountRules {
@@ -154,7 +158,7 @@ abstract class BasePromptActivity : AppCompatActivity() {
                             binding.migrate.isChecked
                         ) {
                             filesToMigrate.forEach { (path, mountedPath) ->
-                                val newPath = MountRules(rules).getMountedPath(path)
+                                val newPath = RedirectReachabilityAnalyzer.mountedPath(rules, path)
                                 CleanerClient.service?.move(mountedPath, newPath)
                                 // Also try move for origin path to support media store insert.
                                 CleanerClient.service?.move(path, newPath)
@@ -169,9 +173,17 @@ abstract class BasePromptActivity : AppCompatActivity() {
 
                         val sharedProcessPackages = getSharedProcessPackages(packageInfo)
                             .map { it.packageName }
-                        ServicePreferences.putStorageRedirect(rules, sharedProcessPackages)
-                        CleanerClient.service?.notifySrChanged()
-                        CleanerClient.service?.remount(sharedProcessPackages.toTypedArray())
+                        val store = ConfiguredPolicyStoreProvider.instance
+                        val writeResult = store
+                            .updateRedirect(store.snapshots.value.redirect.revision) { it.replaceRedirectRules(rules, sharedProcessPackages) }
+                        if (!writeResult.success) {
+                            Log.e("MC/Policy", "put redirect failed: ${writeResult.error}")
+                        } else if (!writeResult.changed) {
+                            Log.i("MC/Policy", "put redirect unchanged, skip notify/remount")
+                        } else {
+                            CleanerClient.service?.notifySrChanged()
+                            CleanerClient.service?.remount(sharedProcessPackages.toTypedArray())
+                        }
                     }
                     finish()
                 }

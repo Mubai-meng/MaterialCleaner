@@ -122,6 +122,12 @@ object ErrorCodes {
     const val HOOK_JAVA_GUARD_SWALLOWED_HOST_EXCEPTION =
         "HOOK.JAVA.GUARD.SWALLOWED_HOST_EXCEPTION"
 
+    /** 受防护 hook（AbstractGuardedHook 子类）handler 抛异常，尚未达到熔断阈值。 */
+    const val HOOK_JAVA_GUARD_HANDLER_FAILED = "HOOK.JAVA.GUARD.HANDLER_FAILED"
+
+    /** FUSE Java 门 handler 抛异常（FuseJavaGate.installHook 包装段）。 */
+    const val HOOK_JAVA_FUSE_HANDLER_FAILED = "HOOK.JAVA.FUSE.HANDLER_FAILED"
+
     /** hook 进程向 DataBus 写事件失败。 */
     const val HOOK_JAVA_BUS_WRITE_FAILED = "HOOK.JAVA.BUS.WRITE_FAILED"
 

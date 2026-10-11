@@ -37,7 +37,9 @@ int get_proc_name(int pid, char *name, size_t _size) {
     snprintf(buf, sizeof(buf), "/proc/%d/cmdline", pid);
     if (access(buf, R_OK) == -1 || (fd = open(buf, O_RDONLY)) == -1)
         return 1;
-    if ((__size = fdgets(buf, sizeof(buf), fd)) == 0) {
+    // P0-2：fdgets 读失败返回 -1。原来只判 == 0，-1 会直接落到下面的 strncpy：
+    // 长度参数被强转成 SIZE_MAX，且写 name[-1] —— 稳定复现的内存破坏。
+    if ((__size = fdgets(buf, sizeof(buf), fd)) <= 0) {
         snprintf(buf, sizeof(buf), "/proc/%d/comm", pid);
         close(fd);
         if (access(buf, R_OK) == -1 || (fd = open(buf, O_RDONLY)) == -1)
@@ -45,6 +47,10 @@ int get_proc_name(int pid, char *name, size_t _size) {
         __size = fdgets(buf, sizeof(buf), fd);
     }
     close(fd);
+    if (__size <= 0) {
+        // 两个来源都读不到 ⇒ 交给调用方按失败处理，绝不能带着 __size<=0 继续走拷贝。
+        return 1;
+    }
 
     if (__size < _size) {
         strncpy(name, buf, static_cast<size_t>(__size));

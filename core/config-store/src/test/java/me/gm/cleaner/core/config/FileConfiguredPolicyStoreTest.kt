@@ -61,7 +61,7 @@ class FileConfiguredPolicyStoreTest {
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
         val before = store.snapshots.value
 
-        val result = store.updateRedirect(null) { it }
+        val result = store.updateRedirect(store.readRedirect().revision) { it }
 
         assertTrue(result.success)
         assertFalse(result.changed)
@@ -243,7 +243,7 @@ class FileConfiguredPolicyStoreTest {
         file.writeText(original, Charsets.UTF_8)
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
 
-        val result = store.updateRedirect(null) { current -> current }
+        val result = store.updateRedirect(store.readRedirect().revision) { current -> current }
 
         assertFalse(result.success)
         assertEquals(PolicyStoreFailureKind.CORRUPT_SOURCE, result.failureKind)
@@ -269,7 +269,7 @@ class FileConfiguredPolicyStoreTest {
     @Test
     fun updateWritesCompatibleLegacyJsonAndReturnsNewRevision() {
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
-        val result = store.updateRedirect(null) {
+        val result = store.updateRedirect(store.readRedirect().revision) {
             StoragePolicyEnvelope(
                 redirectPolicies = listOf(
                     OrderedRedirectPolicy(
@@ -299,7 +299,7 @@ class FileConfiguredPolicyStoreTest {
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
         val initial = store.readSnapshot()
 
-        val redirectResult = store.updateRedirect(null) {
+        val redirectResult = store.updateRedirect(store.readRedirect().revision) {
             StoragePolicyEnvelope(
                 redirectPolicies = listOf(
                     OrderedRedirectPolicy(
@@ -323,7 +323,7 @@ class FileConfiguredPolicyStoreTest {
         assertNotEquals(initial.redirect.revision, afterRedirect.redirect.revision)
         assertEquals(initial.readOnly.revision, afterRedirect.readOnly.revision)
 
-        val readOnlyResult = store.updateReadOnly(null) {
+        val readOnlyResult = store.updateReadOnly(store.readReadOnly().revision) {
             StoragePolicyEnvelope(
                 readOnlyRules = listOf(
                     ReadOnlyRule(
@@ -347,7 +347,7 @@ class FileConfiguredPolicyStoreTest {
         file.writeText("{\"old\":[[\"/a\",\"/b\"]]}", Charsets.UTF_8)
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
 
-        val result = store.updateRedirect(null) { current ->
+        val result = store.updateRedirect(store.readRedirect().revision) { current ->
             current.copy(redirectPolicies = emptyList())
         }
 
@@ -363,7 +363,7 @@ class FileConfiguredPolicyStoreTest {
         val store = FileConfiguredPolicyStore(temporaryFolder.root)
         val before = file.readText(Charsets.UTF_8)
 
-        val result = store.updateRedirect(null) { current ->
+        val result = store.updateRedirect(store.readRedirect().revision) { current ->
             current.copy(
                 readOnlyRules = listOf(
                     ReadOnlyRule(
@@ -385,7 +385,7 @@ class FileConfiguredPolicyStoreTest {
         val base = temporaryFolder.newFile("base-file")
         val store = FileConfiguredPolicyStore(base)
 
-        val result = store.updateRedirect(null) {
+        val result = store.updateRedirect(store.readRedirect().revision) {
             StoragePolicyEnvelope(
                 redirectPolicies = listOf(
                     OrderedRedirectPolicy(

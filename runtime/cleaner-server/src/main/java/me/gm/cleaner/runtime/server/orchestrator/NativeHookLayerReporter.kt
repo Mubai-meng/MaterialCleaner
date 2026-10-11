@@ -4,9 +4,16 @@ import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway
 import org.json.JSONArray
 import org.json.JSONObject
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
 object NativeHookLayerReporter {
     private const val NATIVE_HOOK_STATUS_MAX_AGE_MS = 15_000L
+
+    // ── 指标键契约（DiagnosticArchive 等消费方必须引用此处，不得另写字面量） ──
+    const val KEY_SNAPSHOT_EPOCH = "snapshotPublisherEpoch"
+    const val KEY_APPLIED_EPOCH = "nativeAppliedPublisherEpoch"
+    const val KEY_POLICY_SYNCED = "nativePolicySynced"
+    const val KEY_SYNC_VERDICT = "nativeSyncVerdict"
 
     fun collect(
         generation: Long,
@@ -29,24 +36,37 @@ object NativeHookLayerReporter {
         }
         val nativeStatusAvailable = nativeStatusFromDataBus != null || mediaProviderHookConnected
         val snapshotGen = MediaProviderHookGateway.configuredMountPointsSnapshotGeneration()
+        val snapshotEpoch = MediaProviderHookGateway.mountPointsSnapshotEpoch()
         val nativeGen = nativeStatus.mountPointsGeneration
-        val policySynced = nativeStatus.lastApplySuccess &&
-                (snapshotGen <= 0L || nativeGen >= snapshotGen)
+        // 同步裁决收口到纯策略：每个结论都需要可验证证据（身份 + 终态 + sane 时间），
+        // 不再用单一时间戳冒充进展。
+        val syncVerdict = NativeSyncPolicy.evaluate(
+            NativeSyncPolicy.Input(
+                snapshotEpoch = snapshotEpoch,
+                snapshotGen = snapshotGen,
+                appliedEpoch = nativeStatus.appliedPublisherEpoch,
+                appliedGen = nativeGen,
+                lastApplySuccess = nativeStatus.lastApplySuccess,
+                attemptEpoch = nativeStatus.lastApplyAttemptEpoch,
+                attemptGen = nativeStatus.lastApplyAttemptGeneration,
+                attemptAt = nativeStatus.lastApplyAttemptAt,
+                applicationState = nativeStatus.applicationState,
+                now = now,
+            ),
+        )
+        val epochMismatch = snapshotEpoch.isNotBlank() &&
+                nativeStatus.appliedPublisherEpoch != snapshotEpoch
+        val policySynced = syncVerdict == NativeSyncPolicy.Verdict.SYNCED
         val platformNativeHookMode = readPlatformSupportedNativeHookMode()
         val nativeHookModeMismatch = isHookModeMismatch(platformNativeHookMode, nativeStatus.hookMode)
-        val nativeState = when {
-            !nativeStatusAvailable -> LayerState.UNAVAILABLE
-            nativeStatus.inlineState == "DISABLED" -> LayerState.DISABLED
-            nativeStatus.inlineState == "FUSE_WAITING" ||
-                    nativeStatus.inlineState == "INLINE_LOADED" -> LayerState.RECOVERING
-            nativeStatus.coreAvailable && !policySynced -> LayerState.STALE
-            nativeStatus.inlineState == "HOOK_READY_FULL" && policySynced -> LayerState.HEALTHY
-            nativeStatus.inlineState == "HOOK_READY_CORE" && policySynced -> LayerState.HEALTHY
-            nativeStatus.inlineState == "HOOK_DEGRADED" && policySynced -> LayerState.DEGRADED
-            nativeStatus.coreAvailable && policySynced -> LayerState.DEGRADED
-            nativeStatus.fuseLibraryLoaded -> LayerState.UNAVAILABLE
-            else -> LayerState.UNAVAILABLE
-        }
+        val nativeState = NativeHookStateMapper.map(
+            available = nativeStatusAvailable,
+            coreAvailable = nativeStatus.coreAvailable,
+            inlineState = nativeStatus.inlineState,
+            syncVerdict = syncVerdict,
+            policySynced = policySynced,
+            fuseLibraryLoaded = nativeStatus.fuseLibraryLoaded,
+        )
         val nativeError = when {
             nativeState == LayerState.HEALTHY -> null
             nativeStatus.lastApplyError.isNotBlank() -> nativeStatus.lastApplyError
@@ -54,7 +74,12 @@ object NativeHookLayerReporter {
             nativeStatus.nativeLastError.isNotBlank() -> nativeStatus.nativeLastError
             nativeStatus.lastError.isNotBlank() -> nativeStatus.lastError
             !nativeStatusAvailable -> "MediaProvider Hook unavailable"
+            nativeState == LayerState.DEGRADED &&
+                    syncVerdict == NativeSyncPolicy.Verdict.UNSUPPORTED ->
+                "Native hook unsupported by platform"
             nativeState == LayerState.STALE -> "Native mount points stale"
+            nativeState == LayerState.RECOVERING && epochMismatch ->
+                "Native policy sync pending (epoch change)"
             nativeState == LayerState.RECOVERING -> "Native hook initialization pending"
             nativeState == LayerState.DISABLED -> "Native hook disabled"
             !nativeStatus.coreAvailable -> "Native core symbol containsMount unavailable"
@@ -72,13 +97,16 @@ object NativeHookLayerReporter {
             lastError = nativeError,
             metrics = linkedMapOf(
                 "nativeHookState" to nativeStatus.inlineState,
+                "hookVersionCode" to nativeStatus.hookVersionCode.toString(),
                 "nativeCapabilityLevel" to nativeStatus.capabilityLevel,
                 "nativeCoreAvailable" to nativeStatus.coreAvailable.toString(),
                 "nativeMissingSymbols" to nativeStatus.missingSymbols,
                 "configuredMountPointsGeneration" to nativeGen.toString(),
                 "snapshotConfiguredMountPointsGeneration" to snapshotGen.toString(),
-                "nativePolicySynced" to policySynced.toString(),
-                "nativePolicyApplicationState" to nativeStatus.applicationState,
+                KEY_SNAPSHOT_EPOCH to snapshotEpoch,
+                KEY_APPLIED_EPOCH to nativeStatus.appliedPublisherEpoch,
+                KEY_POLICY_SYNCED to policySynced.toString(),
+                KEY_SYNC_VERDICT to syncVerdict.name,                "nativePolicyApplicationState" to nativeStatus.applicationState,
                 "nativeRedirectPolicyState" to nativeStatus.redirectPolicyState,
                 "nativeReadOnlyPolicyState" to nativeStatus.readOnlyPolicyState,
                 "nativeAppliedRedirectRevision" to nativeStatus.appliedRedirectRevision,
@@ -104,7 +132,9 @@ object NativeHookLayerReporter {
                 "startsWithHooked" to nativeStatus.startsWithHooked.toString(),
                 "isFuseBpfEnabledHooked" to nativeStatus.isFuseBpfEnabledHooked.toString(),
                 "fuseReqUserdataHooked" to nativeStatus.fuseReqUserdataHooked.toString(),
-                "fuseBpfInstallHooked" to nativeStatus.fuseBpfInstallHooked.toString(),
+                "fuseBpfFillEntriesHooked" to nativeStatus.fillEntriesHooked.toString(),
+                "fuseBpfInstallHooked" to nativeStatus.installHooked.toString(),
+                "fuseBpfEffectiveHooked" to nativeStatus.effectiveHooked.toString(),
                 "lastMountPointsApplySuccess" to nativeStatus.lastApplySuccess.toString(),
                 "nativePolicyAppliedToExecutor" to nativeStatus.lastApplySuccess.toString(),
                 "lastMountPointsApplyGeneration" to nativeStatus.lastApplyGeneration.toString(),
@@ -118,7 +148,7 @@ object NativeHookLayerReporter {
     }
 
     private fun readPlatformSupportedNativeHookMode(): String {
-        val json = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_PLATFORM_CAPABILITIES)
+        val json = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES)
             ?: return "UNKNOWN"
         return runCatching {
             JSONObject(json).optString("supportedNativeHookMode", "UNKNOWN")
@@ -135,7 +165,7 @@ object NativeHookLayerReporter {
     }
 
     private fun readNativeHookStatusFromDataBus(now: Long): NativeHookRuntimeStatus? {
-        val json = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_NATIVE_HOOK_STATUS) ?: return null
+        val json = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS) ?: return null
         val createdAt = runCatching {
             JSONObject(json).optLong("createdAt", 0L)
         }.getOrDefault(0L)
@@ -173,6 +203,7 @@ object NativeHookLayerReporter {
             val policy = root.optJSONObject("policy")
             val fuseJavaGate = root.optJSONObject("fuseJavaGate")
             NativeHookRuntimeStatus(
+                hookVersionCode = root.optInt("hookVersionCode", 0),
                 mediaProviderLoaded = mediaProvider?.optBoolean("loaded", false) ?: false,
                 policyCacheInitialized = policyCache?.optBoolean("initialized", false) ?: false,
                 inlineState = inline?.optString("state", "NOT_LOADED") ?: "NOT_LOADED",
@@ -185,7 +216,12 @@ object NativeHookLayerReporter {
                     inline?.optBoolean("disabledByPlatform", false) ?: false,
                 inlineLastError = inline?.optString("lastError", "") ?: "",
                 mountPointsGeneration = policy?.optLong("mountPointsGeneration", 0L) ?: 0L,
+                appliedPublisherEpoch = policy?.optString("appliedPublisherEpoch", "") ?: "",
                 lastApplySuccess = policy?.optBoolean("lastApplySuccess", false) ?: false,
+                lastApplyAt = policy?.optLong("lastApplyAt", 0L) ?: 0L,
+                lastApplyAttemptAt = policy?.optLong("lastAttemptAt", 0L) ?: 0L,
+                lastApplyAttemptEpoch = policy?.optString("lastAttemptEpoch", "") ?: "",
+                lastApplyAttemptGeneration = policy?.optLong("lastAttemptGeneration", 0L) ?: 0L,
                 lastApplyGeneration = policy?.optLong("lastApplyGeneration", 0L) ?: 0L,
                 lastApplyCount = policy?.optInt("lastApplyCount", 0) ?: 0,
                 lastApplyError = policy?.optString("lastApplyError", "") ?: "",
@@ -208,7 +244,13 @@ object NativeHookLayerReporter {
                 startsWithHooked = symbols?.optBoolean("startsWith", false) ?: false,
                 isFuseBpfEnabledHooked = symbols?.optBoolean("isFuseBpfEnabled", false) ?: false,
                 fuseReqUserdataHooked = symbols?.optBoolean("fuseReqUserdata", false) ?: false,
-                fuseBpfInstallHooked = symbols?.optBoolean("fuseBpfInstall", false) ?: false,
+                fillEntriesHooked = symbols?.optBoolean("fillEntries", false) ?: false,
+                installHooked = symbols?.optBoolean("install", false) ?: false,
+                effectiveHooked = run {
+                    val f = symbols?.optBoolean("fillEntries", false) ?: false
+                    val i = symbols?.optBoolean("install", false) ?: false
+                    symbols?.optBoolean("effective", f || i) ?: (f || i)
+                },
                 missingSymbols = native?.optJSONArray("missingSymbols").toCsv(),
                 nativeLastError = native?.optString("lastError", "") ?: "",
                 fuseJavaGateDiscoveredCount =
@@ -241,6 +283,7 @@ object NativeHookLayerReporter {
     }
 
     private data class NativeHookRuntimeStatus(
+        val hookVersionCode: Int = 0,
         val mediaProviderLoaded: Boolean = false,
         val policyCacheInitialized: Boolean = false,
         val inlineState: String = "NOT_LOADED",
@@ -252,7 +295,12 @@ object NativeHookLayerReporter {
         val inlineDisabledByPlatform: Boolean = false,
         val inlineLastError: String = "",
         val mountPointsGeneration: Long = 0L,
+        val appliedPublisherEpoch: String = "",
         val lastApplySuccess: Boolean = false,
+        val lastApplyAt: Long = 0L,
+        val lastApplyAttemptAt: Long = 0L,
+        val lastApplyAttemptEpoch: String = "",
+        val lastApplyAttemptGeneration: Long = 0L,
         val lastApplyGeneration: Long = 0L,
         val lastApplyCount: Int = 0,
         val lastApplyError: String = "",
@@ -270,7 +318,9 @@ object NativeHookLayerReporter {
         val startsWithHooked: Boolean = false,
         val isFuseBpfEnabledHooked: Boolean = false,
         val fuseReqUserdataHooked: Boolean = false,
-        val fuseBpfInstallHooked: Boolean = false,
+        val fillEntriesHooked: Boolean = false,
+        val installHooked: Boolean = false,
+        val effectiveHooked: Boolean = false,
         val missingSymbols: String = "",
         val nativeLastError: String = "",
         val fuseJavaGateDiscoveredCount: Int = 0,
@@ -290,7 +340,7 @@ object NativeHookLayerReporter {
                         startsWithHooked &&
                         isFuseBpfEnabledHooked &&
                         fuseReqUserdataHooked &&
-                        fuseBpfInstallHooked -> "FULL"
+                        effectiveHooked -> "FULL"
                 containsMountHooked && startsWithHooked -> "CORE"
                 containsMountHooked -> "DEGRADED"
                 else -> "UNAVAILABLE"

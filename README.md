@@ -67,9 +67,8 @@ MaterialCleaner/
 ├── platform/
 │   └── hidden-api/              # Android hidden API 桥接与 SystemService 封装
 ├── app/src/main/cpp/            # native：libcleaner（VFS/mount）、libinline（FUSE Hook + xhook）、starter
-├── app/src/main/assets/         # xposed_init + main.jar（buildXposedMainJar 生成）
-├── shared/                      # 历史兼容公共库，迁移中逐步瘦身
-├── docs/adr/                    # 架构决策记录（10 篇）
+├── app/src/main/assets/         # main.jar（buildXposedMainJar 生成；模块元数据在 resources/META-INF/xposed）
+├── docs/adr/                    # 架构决策记录（14 篇，状态见 docs/architecture/adr-status.md）
 ├── scripts/gates/               # 门禁检查脚本
 └── MaterialCleaner.wiki/        # GitHub Wiki（中文文档主页）
 ```
@@ -135,7 +134,7 @@ adb shell am start -n me.gm.cleaner/.client.ui.ServiceSettingsActivity
 | UI | Kotlin + Material Design 3 + DataBinding + Navigation |
 | 架构 | ViewModel + LiveData + Flow + Coroutines |
 | 进程通信 | Binder AIDL + ContentProvider + DataBus 文件系统数据面 |
-| Xposed | LSPosed + Xposed Framework API 82 |
+| Xposed | LSPosed + libxposed API 102（本地 jar 依赖） |
 | 本地代码 | C++（xhook / embedded GOT patch、mount namespace 操作） |
 | 数据库 | Room + SQLite |
 | Root | libsu（topjohnwu） |
@@ -173,4 +172,35 @@ App → Shell.cmd(Starter.command) → start.sh → starter (ELF 二进制)
 - **定制 ROM 兼容性**：部分定制系统（MIUI/HyperOS）可能因 SELinux 策略导致 bind mount 失败
 - **FUSE Native Hook 依赖平台形态**：Android 版本、APEX MediaProvider 与 libfuse_jni.so 加载方式会影响可用 Hook 模式
 - **main.jar 需随代码更新**：修改 `runtime/media-provider-hook` 后需重新构建，Gradle task 会自动处理
+
+## 适配说明（ColorOS 17 / Android 17 / OnePlus 15）
+
+本仓库为 MaterialCleaner 的适配分支，目标运行环境：
+
+- **设备 / ROM**：OnePlus 15（PLK110）/ ColorOS 17
+- **Android 版本**：Android 17（API 37）
+- **Root 方案**：KernelSU（国行）
+- **Xposed 框架**：libxposed API 102（本地 `app/libs/libxposed-api-102.jar`）
+- **构建产物**：`versionCode=500` / `versionName=5.0.0`，单 `arm64-v8a` ABI，未签名 release
+
+相对上游的主要改动方向（非侵入式，优先新增文件/类）：
+
+- 不可访问路径链路：反解派生、规则下发、FUSE Java Gate 先于重定向拒绝、MediaProvider query SQL 下推与结果集兜底
+- 只读规则递归覆盖与判定修正
+- 事件死信隔离、挂载状态判定、规则无意义判据后置、应用列表全序排序
+- 模块侧错误可见化（诊断归档中的 `errors/` 与 `hookErrors` 段）
+- FUSE 热路径性能：进程内有界 UID→包名缓存（LRU + TTL），减少 PackageManager Binder 查询
+- 应用列表图标 `LruCache`，避免主线程反复 `loadIcon`
+- 若干 native 健壮性修复与日志流关闭加固
+
+> 说明：以上为适配目标的工程改动，实机稳定性请以设备在 ColorOS 17 / Android 17 上的长期观察与诊断归档为准。
+
+## 赞助
+
+vibe coding的价格有些超出预期🫠，如果觉得软件好用可以赞助作者。
+
+[![爱发电赞助作者](Donate.jpg)](https://www.ifdian.net/a/firesahc)
+
+> 图片加载失败？请直接访问 [https://www.ifdian.net/a/firesahc](https://www.ifdian.net/a/firesahc)
+
 

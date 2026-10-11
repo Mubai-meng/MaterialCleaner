@@ -67,7 +67,9 @@ data class PolicyStoreResult(
 /**
  * 配置策略的唯一读写门面。
  *
- * `expectedRevision` 非空时执行内容级 CAS；传 null 表示由调用方承担并发协调。
+ * 所有生产写入必须传入读取时刻的 revision 做内容级 CAS；
+ * 与当前不一致时返回 REVISION_CONFLICT，由调用方决定重试或放弃，
+ * 不得静默覆盖。空配置的 revision 同样参与比较。
  * 读取结果始终携带健康状态，调用方不得把 CORRUPT 当作空策略继续发布。
  */
 interface ConfiguredPolicyStore {
@@ -80,13 +82,19 @@ interface ConfiguredPolicyStore {
 
     fun readSnapshot(): ConfiguredPolicySnapshot
 
+    /** 分享导出读原始文件；内容即兼容 JSON。 */
+    fun readRawRedirect(): String
+
+    /** 分享导出读原始文件；内容即兼容 JSON。 */
+    fun readRawReadOnly(): String
+
     fun updateRedirect(
-        expectedRevision: String?,
+        expectedRevision: String,
         mutation: (StoragePolicyEnvelope) -> StoragePolicyEnvelope,
     ): PolicyStoreResult
 
     fun updateReadOnly(
-        expectedRevision: String?,
+        expectedRevision: String,
         mutation: (StoragePolicyEnvelope) -> StoragePolicyEnvelope,
     ): PolicyStoreResult
 }
@@ -102,7 +110,7 @@ object ConfiguredPolicyStoreProvider {
     }
 }
 
-/** 旧 JSON 文件的兼容适配器。它不读取 deny_list，也不改变旧文件格式。 */
+/** 规范持久化实现（兼容表示）。它不读取 deny_list，也不改变旧文件格式。 */
 class FileConfiguredPolicyStore(
     private val baseDir: File,
 ) : ConfiguredPolicyStore {
@@ -117,10 +125,16 @@ class FileConfiguredPolicyStore(
         return readRedirectLocked()
     }
 
+    /** 分享导出读原始文件；内容即兼容 JSON，Store 读写同一文件。 */
+    override fun readRawRedirect(): String = redirectFile.readText(Charsets.UTF_8)
+
     @Synchronized
     override fun readReadOnly(): VersionedReadOnlyPolicy {
         return readReadOnlyLocked()
     }
+
+    /** 分享导出读原始文件；内容即兼容 JSON，Store 读写同一文件。 */
+    override fun readRawReadOnly(): String = readOnlyFile.readText(Charsets.UTF_8)
 
     /** redirect/read-only 必须在同一锁区间读取，避免快照混合两个文件的时刻。 */
     @Synchronized
@@ -183,7 +197,7 @@ class FileConfiguredPolicyStore(
 
     @Synchronized
     override fun updateRedirect(
-        expectedRevision: String?,
+        expectedRevision: String,
         mutation: (StoragePolicyEnvelope) -> StoragePolicyEnvelope,
     ): PolicyStoreResult {
         val current = readRedirectLocked()
@@ -194,7 +208,7 @@ class FileConfiguredPolicyStore(
                 message = "配置源损坏: 无法更新",
             )
         }
-        if (expectedRevision != null && expectedRevision != current.revision) {
+        if (expectedRevision != current.revision) {
             return failure(
                 currentRevision = current.revision,
                 kind = PolicyStoreFailureKind.REVISION_CONFLICT,
@@ -244,7 +258,7 @@ class FileConfiguredPolicyStore(
 
     @Synchronized
     override fun updateReadOnly(
-        expectedRevision: String?,
+        expectedRevision: String,
         mutation: (StoragePolicyEnvelope) -> StoragePolicyEnvelope,
     ): PolicyStoreResult {
         val current = readReadOnlyLocked()
@@ -255,7 +269,7 @@ class FileConfiguredPolicyStore(
                 message = "配置源损坏: 无法更新",
             )
         }
-        if (expectedRevision != null && expectedRevision != current.revision) {
+        if (expectedRevision != current.revision) {
             return failure(
                 currentRevision = current.revision,
                 kind = PolicyStoreFailureKind.REVISION_CONFLICT,
@@ -516,30 +530,10 @@ class FileConfiguredPolicyStore(
 
     private fun requireRedirectOnly(envelope: StoragePolicyEnvelope) {
         require(envelope.readOnlyRules.isEmpty()) { "redirect 更新不能包含 readOnlyRules" }
-        require(envelope.denyAllRules.isEmpty()) { "本阶段不支持写入 denyAllRules" }
-        require(envelope.promptSuppressions.isEmpty() && envelope.packageExclusions.isEmpty()) {
-            "本阶段不支持写入其他策略类型"
-        }
-        require(envelope.legacyWizardDrafts.isEmpty() && envelope.legacyWizardTemplate == null) {
-            "本阶段不支持写入 Wizard 数据"
-        }
-        require(envelope.legacyQuarantines.isEmpty() && envelope.migrationMetadata == null) {
-            "本阶段不支持写入迁移元数据"
-        }
     }
 
     private fun requireReadOnlyOnly(envelope: StoragePolicyEnvelope) {
         require(envelope.redirectPolicies.isEmpty()) { "read-only 更新不能包含 redirectPolicies" }
-        require(envelope.denyAllRules.isEmpty()) { "本阶段不支持写入 denyAllRules" }
-        require(envelope.promptSuppressions.isEmpty() && envelope.packageExclusions.isEmpty()) {
-            "本阶段不支持写入其他策略类型"
-        }
-        require(envelope.legacyWizardDrafts.isEmpty() && envelope.legacyWizardTemplate == null) {
-            "本阶段不支持写入 Wizard 数据"
-        }
-        require(envelope.legacyQuarantines.isEmpty() && envelope.migrationMetadata == null) {
-            "本阶段不支持写入迁移元数据"
-        }
     }
 
     private fun revisionOfRedirect(envelope: StoragePolicyEnvelope): String {
@@ -588,7 +582,6 @@ class FileConfiguredPolicyStore(
 
     private fun StorageUserScope.canonicalName(): String = when (this) {
         StorageUserScope.AllUsers -> "all"
-        is StorageUserScope.SpecificUser -> "user:$userId"
     }
 
     /** 在旧格式进入领域正文时做一次稳定的 POSIX 词法规范化。 */

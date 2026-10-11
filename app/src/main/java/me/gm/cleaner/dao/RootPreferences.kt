@@ -9,6 +9,8 @@ import me.gm.cleaner.R
 import java.util.Locale
 
 object RootPreferences {
+    private const val LAST_NOTIFIED_UPDATE_VERSION_KEY = "last_notified_update_version"
+
     // THEME
     lateinit var preferences: SharedPreferences
         private set
@@ -24,6 +26,11 @@ object RootPreferences {
         get() = preferences.getBoolean(res.getString(R.string.start_on_boot_key), false)
     val isPostNotification: Boolean
         get() = preferences.getBoolean(res.getString(R.string.post_notification_key), true)
+
+    // UPDATE NOTIFICATION
+    var lastNotifiedUpdateVersion: String?
+        get() = preferences.getString(LAST_NOTIFIED_UPDATE_VERSION_KEY, null)
+        set(value) = preferences.edit { putString(LAST_NOTIFIED_UPDATE_VERSION_KEY, value) }
 
     // LANGUAGE
     val locale: Locale

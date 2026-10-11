@@ -1,5 +1,7 @@
 package me.gm.cleaner.client.ui
 
+import android.graphics.drawable.Drawable
+import android.util.LruCache
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.MenuItem
@@ -20,7 +22,9 @@ import me.gm.cleaner.R
 import me.gm.cleaner.client.CleanerClient
 import me.gm.cleaner.client.getSharedProcessPackages
 import me.gm.cleaner.client.getSharedUserIdPackages
-import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
+import me.gm.cleaner.core.config.removeReadOnlyRules
+import me.gm.cleaner.core.config.removeRedirectRules
 import me.gm.cleaner.databinding.ApplistItemBinding
 import me.gm.cleaner.util.buildStyledTitle
 
@@ -41,7 +45,18 @@ class AppListAdapter(
         if (BuildConfig.DEBUG) {
             Log.i("MC/Test", "onBindViewHolder: position=$position, package=${model.packageInfo.packageName}")
         }
-        binding.icon.setImageDrawable(model.packageInfo.applicationInfo.loadIcon(fragment.requireContext().packageManager))
+        val packageInfo = model.packageInfo
+        val packageName = packageInfo.packageName
+        val resources = fragment.resources
+        val cached = ICON_CACHE.get(packageName)?.takeIf {
+            it.lastUpdateTime == packageInfo.lastUpdateTime
+        }
+        val icon = cached?.constantState?.newDrawable(resources) ?: run {
+            val loaded = packageInfo.applicationInfo.loadIcon(fragment.requireContext().packageManager)
+            loaded.constantState?.let { ICON_CACHE.put(packageName, CachedIcon(packageInfo.lastUpdateTime, it)) }
+            loaded
+        }
+        binding.icon.setImageDrawable(icon)
         binding.title.text = model.label
         binding.summary.text = run {
             val summary = mutableListOf<CharSequence>()
@@ -115,7 +130,16 @@ class AppListAdapter(
                 fragment.lifecycleScope.launch(Dispatchers.IO) {
                     val sharedProcessPackages = getSharedProcessPackages(model.packageInfo)
                         .map { it.packageName }
-                    ServicePreferences.removeStorageRedirect(sharedProcessPackages)
+                    val store = ConfiguredPolicyStoreProvider.instance
+                    val result = store
+                        .updateRedirect(store.snapshots.value.redirect.revision) { it.removeRedirectRules(sharedProcessPackages) }
+                    if (!result.success) {
+                        Log.e("MC/Policy", "remove redirect failed: ${result.error}")
+                        return@launch
+                    }
+                    if (!result.changed) {
+                        return@launch
+                    }
                     CleanerClient.service?.notifySrChanged()
                     if (model.mountState != AppListModel.STATE_UNMOUNTED) {
                         CleanerClient.service?.remount(sharedProcessPackages.toTypedArray())
@@ -129,7 +153,16 @@ class AppListAdapter(
                 fragment.lifecycleScope.launch(Dispatchers.IO) {
                     val sharedUserIdPackages = getSharedUserIdPackages(model.packageInfo)
                         .map { it.packageName }
-                    ServicePreferences.removeReadOnly(sharedUserIdPackages)
+                    val store = ConfiguredPolicyStoreProvider.instance
+                    val result = store
+                        .updateReadOnly(store.snapshots.value.readOnly.revision) { it.removeReadOnlyRules(sharedUserIdPackages) }
+                    if (!result.success) {
+                        Log.e("MC/Policy", "remove read-only failed: ${result.error}")
+                        return@launch
+                    }
+                    if (!result.changed) {
+                        return@launch
+                    }
                     CleanerClient.service?.notifyReadOnlyChanged()
                 }
                 true
@@ -141,7 +174,14 @@ class AppListAdapter(
 
     class ViewHolder(val binding: ApplistItemBinding) : RecyclerView.ViewHolder(binding.root)
 
+    private data class CachedIcon(
+        val lastUpdateTime: Long,
+        val constantState: Drawable.ConstantState,
+    )
+
     companion object {
+        private val ICON_CACHE = object : LruCache<String, CachedIcon>(48) {}
+
         private val CALLBACK = object : DiffUtil.ItemCallback<AppListModel>() {
             override fun areItemsTheSame(
                 oldItem: AppListModel, newItem: AppListModel

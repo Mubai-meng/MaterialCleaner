@@ -3,8 +3,9 @@ package me.gm.cleaner.runtime.server
 import android.util.Log
 import me.gm.cleaner.core.config.ServicePreferences
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway
-import me.gm.cleaner.runtime.server.observer.ObserverManager
-import me.gm.cleaner.runtime.server.observer.StorageMountObserver
+import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
+import me.gm.cleaner.runtime.server.process.BaseProcessObserver
+import me.gm.cleaner.runtime.server.storage.StorageMountObserver
 import me.gm.cleaner.runtime.server.orchestrator.EventConsumerScheduler
 import me.gm.cleaner.runtime.server.orchestrator.HookRecoveryCoordinator
 import me.gm.cleaner.runtime.server.orchestrator.MediaProviderRecoveryStrategy
@@ -46,6 +47,12 @@ class LayerOrchestrator(
     init {
         eventConsumerScheduler.onHeartbeat = {
             hookRecoveryCoordinator.nativeHookHealthCheck()
+            // 失败挂载重收敛：复用既有 2s 心跳，不另起线程；
+            // 冷却/永久分类由 Mounter 内聚，出错不影响后继发布。
+            runCatching {
+                ObserverManager.getObserver(BaseProcessObserver::class.java)
+                    ?.requeueFailedMounts()
+            }
             statusAggregator.publishStatusSnapshot()
         }
     }
@@ -67,6 +74,11 @@ class LayerOrchestrator(
         }
 
         val dataBusReady = SnapshotPublisher.publishAll()
+
+        // 启动即收敛：publish 只更新快照，不管存量进程命名空间；
+        // 不在这里 remountAll 的话，重启前挂上的进程将永久失 cover，
+        // 直到下一次规则变更（挂载 decay 的根因之一）。
+        ObserverManager.getObserver(BaseProcessObserver::class.java)?.remountAll()
 
         MediaProviderHookGateway.registerAndRefreshFromDataBus(server)
         if (!dataBusReady) {

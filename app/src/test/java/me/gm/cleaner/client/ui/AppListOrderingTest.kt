@@ -1,147 +1,162 @@
 package me.gm.cleaner.client.ui
 
-import kotlin.random.Random
+import android.content.pm.PackageInfo
+import me.gm.cleaner.core.config.ServicePreferences
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import java.util.Random
 
 /**
- * [AppListOrdering] 的口径锁。
+ * AppListOrdering 纯 JVM 单测：只测比较器，不依赖 Android 运行时。
  *
- * 核心断言是**全序**：同一组数据无论以什么顺序喂进来，输出都必须逐项一致。
- * 旧实现（三层独立的稳定排序）做不到这一点 —— 挂载状态只有 4 档、规则桶只有 3 档、
- * 更新时间大量并列，残余并列会一路漏到 `PackageManager` 的返回顺序上，
- * 而那正是主界面「已挂载应用顺序总是变」的根因。
+ * ServicePreferences.SORT_BY_* 为 const，会内联为 Int 常量，
+ * 单测运行时不会加载 ServicePreferences 类。
  */
 class AppListOrderingTest {
 
-    /** 纯 Kotlin 假实现：不碰 Android 框架，测试可在 JVM 上直接跑。 */
-    private data class App(
-        override val sortLabel: String,
-        override val sortPackageName: String,
-        override val sortLastUpdateTime: Long = 0L,
-        override val sortMountState: Int = 0,
-        override val sortMountRulesCount: Int = 0,
-        override val sortReadOnlyCount: Int = 0,
-    ) : AppListSortable
-
-    private fun comparator(
-        mountStateFirst: Boolean = true,
-        ruleCountFirst: Boolean = true,
-        byUpdateTime: Boolean = false,
-    ): Comparator<App> = AppListOrdering.comparator(
-        mountStateFirst = mountStateFirst,
-        ruleCountFirst = ruleCountFirst,
-        byUpdateTime = byUpdateTime,
-        compareLabel = { o1, o2 -> o1.compareTo(o2) },
+    private fun modelOf(
+        packageName: String,
+        label: String = packageName,
+        lastUpdateTime: Long = 0L,
+        mountRulesCount: Int = 0,
+        readOnlyCount: Int = 0,
+        mountState: Int = AppListModel.STATE_UNMOUNTED
+    ): AppListModel = AppListModel(
+        packageInfo = packageInfoOf(packageName, lastUpdateTime),
+        label = label,
+        mountRulesCount = mountRulesCount,
+        readOnlyCount = readOnlyCount,
+        mountState = mountState
     )
 
-    private fun packages(list: List<App>) = list.map { it.sortPackageName }
-
-    @Test
-    fun `比较器构成全序_任意输入顺序结果一致`() {
-        val comparator = comparator()
-        val base = listOf(
-            App("微信", "com.tencent.mm", 100L, 1, 3, 0),
-            App("支付宝", "com.eg.android.AlipayGphone", 100L, 1, 3, 1),
-            App("淘宝", "com.taobao.taobao", 90L, 1, 2, 0),
-            App("知乎", "com.zhihu.android", 90L, 0, 2, 0),
-            App("微博", "com.sina.weibo", 80L, 1, 0, 1),
-            App("什么值得买", "com.smzdm.client.android", 80L, 0, 0, 1),
-        )
-        val expected = packages(base.sortedWith(comparator))
-
-        assertEquals(expected, packages(base.reversed().sortedWith(comparator)))
-        for (seed in 0 until 50) {
-            val shuffled = base.shuffled(Random(seed))
-            assertEquals("seed=$seed", expected, packages(shuffled.sortedWith(comparator)))
+    private fun packageInfoOf(packageName: String, lastUpdateTime: Long): PackageInfo {
+        val info = try {
+            PackageInfo()
+        } catch (e: RuntimeException) {
+            // 纯 JVM 单测下 android.jar 为 stub，直接构造抛 "Stub!"，用 Unsafe 绕过构造器。
+            // 全反射写法：避免编译期引用 sun.misc，保证各 JDK 下编译通过。
+            val unsafeClass = Class.forName("sun.misc.Unsafe")
+            val unsafeField = unsafeClass.getDeclaredField("theUnsafe")
+            unsafeField.isAccessible = true
+            val unsafe = unsafeField.get(null)
+            val allocateInstance =
+                unsafeClass.getMethod("allocateInstance", Class::class.java)
+            allocateInstance.invoke(unsafe, PackageInfo::class.java) as PackageInfo
         }
+        info.packageName = packageName
+        info.lastUpdateTime = lastUpdateTime
+        return info
+    }
+
+    private fun List<AppListModel>.names(): List<String> =
+        map { it.packageInfo.packageName }
+
+    @Test
+    fun `同label时间规则状态下packageName决定顺序`() {
+        val models = listOf("com.c", "com.a", "com.b")
+            .map { modelOf(it, label = "Same", lastUpdateTime = 1000L) }
+        val byName = buildAppListComparator(
+            ServicePreferences.SORT_BY_NAME, ruleCountEnabled = true, mountStateEnabled = true
+        )
+        assertEquals(listOf("com.a", "com.b", "com.c"), models.sortedWith(byName).names())
+        val byTime = buildAppListComparator(
+            ServicePreferences.SORT_BY_UPDATE_TIME, ruleCountEnabled = true, mountStateEnabled = true
+        )
+        assertEquals(listOf("com.a", "com.b", "com.c"), models.sortedWith(byTime).names())
     }
 
     @Test
-    fun `应用名并列时由包名兜底`() {
-        // 两个应用标签完全相同（Collator 判等，旧实现会漏到输入顺序上）
-        val comparator = comparator(mountStateFirst = false, ruleCountFirst = false)
-        val aaa = App("同名应用", "com.aaa.first")
-        val zzz = App("同名应用", "com.zzz.second")
-
-        assertEquals(
-            listOf("com.aaa.first", "com.zzz.second"),
-            packages(listOf(zzz, aaa).sortedWith(comparator))
+    fun `业务优先级不变_mountState与ruleScore高优且可开关`() {
+        // mountState 高优：label 更靠后但状态更高 → 排前面。
+        val mounted = modelOf("com.high", label = "zzz", mountState = AppListModel.STATE_MOUNTED)
+        val unmounted = modelOf("com.low", label = "aaa", mountState = AppListModel.STATE_UNMOUNTED)
+        val withState = buildAppListComparator(
+            ServicePreferences.SORT_BY_NAME, ruleCountEnabled = true, mountStateEnabled = true
         )
-    }
-
-    @Test
-    fun `挂载状态优先于规则数与应用名`() {
-        val comparator = comparator()
-        // 未挂载但应用名靠前、规则最多
-        val unmounted = App("A", "com.a", 999L, AppListModel.STATE_UNMOUNTED, 9, 9)
-        // 已挂载但应用名靠后、没有任何规则
-        val mounted = App("Z", "com.z", 0L, AppListModel.STATE_MOUNTED, 0, 0)
-
         assertEquals(
-            listOf("com.z", "com.a"),
-            packages(listOf(unmounted, mounted).sortedWith(comparator))
+            listOf("com.high", "com.low"),
+            listOf(unmounted, mounted).sortedWith(withState).names()
         )
-    }
-
-    @Test
-    fun `规则桶降序_组内按应用名升序`() {
-        val comparator = comparator(mountStateFirst = false)
-        val both = App("B", "com.b", 0L, 0, 1, 1) // 桶 = 3
-        val mountOnly = App("C", "com.c", 0L, 0, 1, 0) // 桶 = 2
-        val readOnly = App("A", "com.a", 0L, 0, 0, 1) // 桶 = 1
-
+        // 关闭 mountState → 回到 label 顺序。
+        val withoutState = buildAppListComparator(
+            ServicePreferences.SORT_BY_NAME, ruleCountEnabled = false, mountStateEnabled = false
+        )
         assertEquals(
-            listOf("com.b", "com.c", "com.a"),
-            packages(listOf(readOnly, mountOnly, both).sortedWith(comparator))
-        )
-    }
-
-    @Test
-    fun `mounted_保留只读规则应用并按统一口径排序`() {
-        val comparator = comparator(mountStateFirst = false)
-        val list = listOf(
-            App("零规则", "com.none", 0L, 0, 0, 0), // 无任何规则 → 必须被过滤掉
-            App("C应用", "com.c", 0L, 0, 2, 0), // 桶 = 2
-            App("B应用", "com.b", 0L, 0, 0, 1), // 桶 = 1，只有只读规则
+            listOf("com.low", "com.high"),
+            listOf(mounted, unmounted).sortedWith(withoutState).names()
         )
 
-        assertEquals(
-            listOf("com.c", "com.b"),
-            packages(AppListOrdering.mounted(comparator, list))
+        // ruleScore 高优 + 权重：挂载规则(+2) > 只读规则(+1) > 无规则。
+        val mountRule = modelOf("com.m", label = "zzz", mountRulesCount = 1)
+        val readOnlyRule = modelOf("com.r", label = "mmm", readOnlyCount = 5)
+        val noRule = modelOf("com.n", label = "aaa")
+        val withRule = buildAppListComparator(
+            ServicePreferences.SORT_BY_NAME, ruleCountEnabled = true, mountStateEnabled = false
         )
-
-        // 同一份数据换个输入顺序，结果必须一致
         assertEquals(
-            listOf("com.c", "com.b"),
-            packages(AppListOrdering.mounted(comparator, list.reversed()))
+            listOf("com.m", "com.r", "com.n"),
+            listOf(noRule, readOnlyRule, mountRule).sortedWith(withRule).names()
         )
-    }
-
-    @Test
-    fun `按更新时间排序时应用名仍作最终兜底`() {
-        val comparator = comparator(byUpdateTime = true)
-        val older = App("Z", "com.z", 1L)
-        val newer = App("A", "com.a", 2L)
+        // 关闭 ruleCount → 回到 label 顺序。
         assertEquals(
-            listOf("com.a", "com.z"),
-            packages(listOf(older, newer).sortedWith(comparator))
-        )
-
-        // 时间戳并列（同一批安装/系统应用）→ 回落应用名，而不是包管理器返回序
-        val sameA = App("A", "com.same.a", 5L)
-        val sameZ = App("Z", "com.same.z", 5L)
-        assertEquals(
-            listOf("com.same.a", "com.same.z"),
-            packages(listOf(sameZ, sameA).sortedWith(comparator))
+            listOf("com.n", "com.r", "com.m"),
+            listOf(mountRule, readOnlyRule, noRule).sortedWith(withoutState).names()
         )
     }
 
     @Test
-    fun `ruleBucket 取值`() {
-        assertEquals(3, AppListOrdering.ruleBucket(1, 1))
-        assertEquals(2, AppListOrdering.ruleBucket(3, 0))
-        assertEquals(1, AppListOrdering.ruleBucket(0, 2))
-        assertEquals(0, AppListOrdering.ruleBucket(0, 0))
+    fun `updateTime倒序且tie走label兜底`() {
+        val old = modelOf("com.old", label = "bbb", lastUpdateTime = 1000L)
+        val new = modelOf("com.new", label = "aaa", lastUpdateTime = 2000L)
+        val tieA = modelOf("com.tie.b", label = "bbb", lastUpdateTime = 3000L)
+        val tieB = modelOf("com.tie.a", label = "aaa", lastUpdateTime = 3000L)
+        val byTime = buildAppListComparator(
+            ServicePreferences.SORT_BY_UPDATE_TIME, ruleCountEnabled = false, mountStateEnabled = false
+        )
+        assertEquals(
+            listOf("com.tie.a", "com.tie.b", "com.new", "com.old"),
+            listOf(old, tieA, new, tieB).sortedWith(byTime).names()
+        )
+    }
+
+    @Test
+    fun `输入乱序输出一致`() {
+        val base = listOf(
+            modelOf("com.p1", label = "Alpha", lastUpdateTime = 3000L),
+            modelOf("com.p2", label = "", lastUpdateTime = 1000L),
+            modelOf("com.p3", label = "Alpha", lastUpdateTime = 3000L, mountRulesCount = 2),
+            modelOf("com.p4", label = "beta", lastUpdateTime = 2000L, readOnlyCount = 1),
+            modelOf("com.p5", label = "Alpha", lastUpdateTime = 3000L, mountRulesCount = 1,
+                mountState = AppListModel.STATE_MOUNTED),
+            modelOf("com.p6", label = "Gamma", lastUpdateTime = 3000L,
+                mountState = AppListModel.STATE_MOUNT_EXCEPTION),
+            modelOf("com.p7", label = "", lastUpdateTime = 3000L, readOnlyCount = 3),
+            modelOf("com.p8", label = "beta", lastUpdateTime = 2000L,
+                mountState = AppListModel.STATE_UNKNOWN)
+        )
+        val comparators = listOf(
+            buildAppListComparator(
+                ServicePreferences.SORT_BY_NAME, ruleCountEnabled = true, mountStateEnabled = true
+            ),
+            buildAppListComparator(
+                ServicePreferences.SORT_BY_UPDATE_TIME, ruleCountEnabled = true, mountStateEnabled = true
+            ),
+            buildAppListComparator(
+                ServicePreferences.SORT_BY_NAME, ruleCountEnabled = false, mountStateEnabled = false
+            )
+        )
+        val permutations = listOf(
+            base.reversed(),
+            base.drop(3) + base.take(3),
+            base.shuffled(Random(0)),
+            base.shuffled(Random(1)),
+            base.shuffled(Random(42))
+        )
+        for (comparator in comparators) {
+            val expected = base.sortedWith(comparator).names()
+            for (input in permutations) {
+                assertEquals(expected, input.sortedWith(comparator).names())
+            }
+        }
     }
 }

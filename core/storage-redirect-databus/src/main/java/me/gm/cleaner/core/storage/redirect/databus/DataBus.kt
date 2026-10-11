@@ -22,20 +22,22 @@ import java.util.concurrent.atomic.AtomicLong
  *   snapshots/
  *     redirect_policy.json
  *     read_only.json
- *     configured_mount_points.json
  *   signals/
  *     redirect_policy_changed
  *     read_only_changed
- *     configured_mount_points_changed
  *     platform_capabilities_changed
  *     filesystem_events_changed
  *   events/
  *     filesystem/     ← MediaProvider 进程写入，server 进程读取
  *     redirect_notice/ ← MediaProvider 进程写入，server 进程读取
+ *     filesystem.quarantine/ ← 毒丸隔离（server 写，原文保留、游标推进）
+ *     redirect_notice.quarantine/ ← 毒丸隔离（server 写，原文保留、游标推进）
  *     consumed/       ← 已消费事件归档
  *   leases/
  *     query_sessions/ ← MediaProvider 写入，server 按 TTL 维护临时目录
  *   cursors/          ← 消费者游标持久化
+ *     filesystem.attempts/ ← 按事件名的处理重试计数（server 写）
+ *     redirect_notice.attempts/ ← 按事件名的处理重试计数（server 写）
  *   counters/         ← 事件队列持久化序号
  *   tmp/
  * ```
@@ -70,63 +72,15 @@ object DataBus {
 
     private const val DIR_SNAPSHOTS = "snapshots"
     private const val DIR_SIGNALS = "signals"
-    private const val DIR_EVENTS = "events"
-    private const val DIR_LEASES = "leases"
-    private const val DIR_CURSORS = "cursors"
-    private const val DIR_COUNTERS = "counters"
+    // 以下原语与目录常量对模块内可见：DataBusEventQuarantine /
+    // DataBusRecoveryLedger 复用同一套原子写实现，避免跨文件复制。
+    internal const val DIR_EVENTS = "events"
+    internal const val DIR_CURSORS = "cursors"
+    internal const val DIR_LEASES = "leases"
+
+    internal const val DIR_COUNTERS = "counters"
     private const val DIR_CONSUMED = "consumed"
     private const val DIR_TMP = "tmp"
-
-    // ── 快照文件名 ──
-    const val SNAPSHOT_REDIRECT_POLICY = "redirect_policy.json"
-    const val SNAPSHOT_READ_ONLY = "read_only.json"
-    const val SNAPSHOT_CONFIGURED_MOUNT_POINTS = "configured_mount_points.json"
-    const val SNAPSHOT_PLATFORM_CAPABILITIES = "platform_capabilities.json"
-    const val SNAPSHOT_ORCHESTRATED_STATUS = "orchestrated_status.json"
-    const val SNAPSHOT_NATIVE_HOOK_STATUS = "native_hook_status.json"
-
-    // ── 信号文件名 ──
-    const val SIGNAL_REDIRECT_POLICY_CHANGED = "redirect_policy_changed"
-    const val SIGNAL_READ_ONLY_CHANGED = "read_only_changed"
-    const val SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED = "configured_mount_points_changed"
-    const val SIGNAL_PLATFORM_CAPABILITIES_CHANGED = "platform_capabilities_changed"
-    const val SIGNAL_NATIVE_HOOK_STATUS_CHANGED = "native_hook_status_changed"
-    const val SIGNAL_FILESYSTEM_EVENTS_CHANGED = "filesystem_events_changed"
-    const val SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED = "redirect_notice_events_changed"
-    const val SIGNAL_QUERY_SESSION_LEASES_CHANGED = "query_session_leases_changed"
-
-    // ── 事件子目录 ──
-    const val EVENT_FILESYSTEM = "filesystem"
-    const val EVENT_REDIRECT_NOTICE = "redirect_notice"
-
-    // ── Lease 子目录 ──
-    const val LEASE_QUERY_SESSIONS = "query_sessions"
-
-    private val validSnapshotNames = setOf(
-        SNAPSHOT_REDIRECT_POLICY,
-        SNAPSHOT_READ_ONLY,
-        SNAPSHOT_CONFIGURED_MOUNT_POINTS,
-        SNAPSHOT_PLATFORM_CAPABILITIES,
-        SNAPSHOT_ORCHESTRATED_STATUS,
-        SNAPSHOT_NATIVE_HOOK_STATUS,
-    )
-    private val validSignalNames = setOf(
-        SIGNAL_REDIRECT_POLICY_CHANGED,
-        SIGNAL_READ_ONLY_CHANGED,
-        SIGNAL_CONFIGURED_MOUNT_POINTS_CHANGED,
-        SIGNAL_PLATFORM_CAPABILITIES_CHANGED,
-        SIGNAL_NATIVE_HOOK_STATUS_CHANGED,
-        SIGNAL_FILESYSTEM_EVENTS_CHANGED,
-        SIGNAL_REDIRECT_NOTICE_EVENTS_CHANGED,
-        SIGNAL_QUERY_SESSION_LEASES_CHANGED,
-    )
-    private val validEventQueues = setOf(
-        EVENT_FILESYSTEM,
-        EVENT_REDIRECT_NOTICE,
-    )
-    private val validLeaseCategories = setOf(
-        LEASE_QUERY_SESSIONS,
-    )
 
     @Volatile
     private var initialized = false
@@ -134,79 +88,36 @@ object DataBus {
     /**
      * 本进程内已经报告过目录准备失败的路径。
      *
-     * MediaProvider 等非 root 进程对 /data/local/tmp 没有写权限（也不一定有权 stat），
-     * `Files.createDirectories("/data/local/tmp/cleaner")` 必然抛 AccessDeniedException。
-     * 这是**预期情形**（该进程的正路是 Binder bridge，见 HookDataBusBridge），
-     * 但历史实现每次调用都 `Log.e(..., e)`，一个进程启动就打出两条 40+ 行的完整堆栈，
-     * 反而把 native hook 的真实 lastError 淹没了。这里按路径去重，每个进程最多报一次。
+     * MediaProvider 等非 root 进程对 `/data/local/tmp` 没有写权限（也不一定有权 stat），
+     * `Files.createDirectories("/data/local/tmp/cleaner")` 必然抛 `AccessDeniedException`。
+     * 这是**预期情形**（该进程的正路是 Binder bridge，见 `HookDataBusBridge`），
+     * 但早期实现每次调用都 `Log.e(..., e)`，一个进程启动就打出一条 40+ 行的完整堆栈
+     * ——真机实测一次 80s 会话里光这一条就占 38 行、且以 E 级出现，让现场看起来在报错。
+     * 按路径去重后只报一条 W（不带堆栈，类名 + 消息已足够定位）。
+     *
+     * ⚠️ 该去重**只在进程内有效**：进程重启后会重新报一次，这是刻意的——
+     * "本进程无权写 bus 根"是需要每个进程各自知道一次的信息。
      */
     private val reportedPrepareFailures =
-        java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
-
-    /** 最近一次目录准备失败的精简描述，供诊断归档读取；成功后清空。 */
-    @Volatile
-    private var lastInitFailure: String? = null
-
-    /** 最近一次目录准备失败的描述（`路径: 异常类: 消息`），从未失败过则为 null。 */
-    fun lastInitFailureOrNull(): String? = lastInitFailure
-
-    // 事件文件名固定前缀：20 位十进制序号 + '-' + 时间戳 + pid + 4 位随机十六进制 + ".json"
-    private const val EVENT_SEQ_DIGITS = 20
+        java.util.Collections.newSetFromMap(
+            java.util.concurrent.ConcurrentHashMap<String, Boolean>(),
+        )
 
     /**
-     * 文件名安全化用的正则。
-     *
-     * 提到文件级常量：原先写在 `createTempFileIn` 内部，每次调用都要
-     * `Pattern.compile` 一次；该函数在每次事件写入路径上会被调用（写事件文件、写游标）。
+     * 文件名消毒用的正则。`Pattern.compile` 只做一次：
+     * `sanitizeFileName` / `createTempFileIn` 都在**每次事件写入路径**上被调用
+     * （事件文件、计数器文件、游标、隔离证据），逐次编译正则是纯浪费。
      */
     private val UNSAFE_FILENAME_CHARS = Regex("[^A-Za-z0-9._-]")
 
-    // 进程内序号下界；真实事件序号会通过 counters/ 持久化分配。
-    private val eventSeqCounter = AtomicLong(0)
-
     /**
-     * 每个队列已分配到的最大序号（含本进程分配）。
+     * 最近一次目录准备失败的原因（`"<path>: <ExceptionClass>: <message>"`）。
      *
-     * 用于在 `counters/<queue>.seq` 被外部清除或出现回退时判定"需要重建下界"，
-     * 从而让正常写入路径**不必**再读游标、更不必 `listFiles()` 扫描整个事件目录。
+     * 与 [reportedPrepareFailures] 配套：日志只报一行（不带堆栈），
+     * 完整成因留在这里，供状态快照 / 诊断读取，做到"日志不刷屏但不丢证据"。
      */
-    private val queueSeqFloor =
-        java.util.concurrent.ConcurrentHashMap<String, AtomicLong>()
-
-    data class SnapshotHealth(
-        val name: String,
-        val exists: Boolean,
-        val validJson: Boolean,
-        val error: String? = null,
-    )
-
-    data class HealthReport(
-        val initialized: Boolean,
-        val missingDirectories: List<String>,
-        val permissionIssues: List<String>,
-        val snapshots: List<SnapshotHealth>,
-        val eventQueueCounts: Map<String, Int>,
-        val leaseCounts: Map<String, Int>,
-    ) {
-        fun hasSnapshot(name: String): Boolean =
-            snapshots.any { it.name == name && it.exists && it.validJson }
-
-        val criticalSnapshotsReady: Boolean
-            get() = hasSnapshot(SNAPSHOT_REDIRECT_POLICY) &&
-                    hasSnapshot(SNAPSHOT_READ_ONLY) &&
-                    hasSnapshot(SNAPSHOT_CONFIGURED_MOUNT_POINTS)
-
-        val healthy: Boolean
-            get() = initialized &&
-                    missingDirectories.isEmpty() &&
-                    permissionIssues.isEmpty() &&
-                    criticalSnapshotsReady
-    }
-
-    data class EventFile(
-        val name: String,
-        val content: String,
-    )
+    @Volatile
+    private var lastInitFailure: String? = null
 
     /**
      * 确保总线目录结构存在，设置跨进程可访问权限。
@@ -223,7 +134,6 @@ object DataBus {
                 }
             }
             initialized = true
-            lastInitFailure = null
             Log.i(TAG, "DataBus initialized at $BUS_ROOT")
             return true
         } catch (e: Exception) {
@@ -372,7 +282,8 @@ object DataBus {
             return -1L
         }
 
-        return writeEventLocked(queue, eventDir, content)
+        // 序号分配与原子落盘见 DataBusEventWriter（实现），此处仅保留公开 API 面。
+        return DataBusEventWriter.writeEventLocked(queue, eventDir, content)
     }
 
     /**
@@ -389,7 +300,7 @@ object DataBus {
     /**
      * 读取游标之后的所有事件，并保留文件名供消费者精确推进游标。
      */
-    fun readEventFiles(queue: String, afterCursor: String): List<EventFile> {
+    fun readEventFiles(queue: String, afterCursor: String): List<DataBusProtocol.EventFile> {
         if (!isValidEventQueue(queue)) return emptyList()
         val eventDir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
         if (!eventDir.exists()) return emptyList()
@@ -397,13 +308,12 @@ object DataBus {
         return try {
             eventDir.listFiles()
                 ?.filter {
-                    isRegularFileNoFollow(it) && it.name.endsWith(".json") &&
-                            it.name > afterCursor
+                    isEventFile(it) && it.name > afterCursor
                 }
                 ?.sortedBy { it.name }
                 ?.mapNotNull { file ->
                     readRegularText(file, "events/$queue/${file.name}")?.let {
-                        EventFile(file.name, it)
+                        DataBusProtocol.EventFile(file.name, it)
                     }
                 }
                 ?: emptyList()
@@ -415,14 +325,21 @@ object DataBus {
 
     /**
      * 获取事件队列中最后一个事件的文件名（用作游标）。
+     *
+     * 返回契约：
+     * - 非法队列 / 目录不存在 / 空队列 → ""（保持既有语义）；
+     * - `listFiles() == null`（目录枚举失败）→ null（哨兵，**不得**当空队列）。
+     * 调用方必须把 null 按失败处理，不得继续把游标当作可信水位。
      */
-    fun getLastEventFilename(queue: String): String {
+    fun getLastEventFilename(queue: String): String? {
         if (!isValidEventQueue(queue)) return ""
         val eventDir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
         if (!eventDir.exists()) return ""
-        return eventDir.listFiles()
-            ?.filter { isRegularFileNoFollow(it) && it.name.endsWith(".json") }
-            ?.maxByOrNull { it.name }
+        // 枚举失败返回 null 哨兵：调用方按失败处理，不得当空队列。
+        val entries = eventDir.listFiles() ?: return null
+        return entries
+            .filter { isRegularFileNoFollow(it) && it.name.endsWith(".json") }
+            .maxByOrNull { it.name }
             ?.name ?: ""
     }
 
@@ -468,56 +385,129 @@ object DataBus {
         }
     }
 
-    fun writeCursorToEvent(queue: String, event: EventFile): Boolean =
+    fun writeCursorToEvent(queue: String, event: DataBusProtocol.EventFile): Boolean =
         writeCursor(queue, event.name)
+
+    // ── 恢复熔断总账（Fix 2：破坏轮次跨 server 重启延续） ──
+    // 实现见 [DataBusRecoveryLedger]；此处仅保留跨模块公开 API 面。
+
+    /** 读取恢复总账 JSON，缺失/非法返回 null（调用方视为全新 episode）。 */
+    fun readRecoveryLedger(): String? = DataBusRecoveryLedger.read()
+
+    /**
+     * 区分式读取恢复总账：Absent 可按全新处理，Corrupted 必须保守。
+     * 返回公开契约类型，跨模块可见。
+     */
+    fun readRecoveryLedgerDetailed(): DataBusProtocol.RecoveryLedgerRead =
+        DataBusRecoveryLedger.readDetailed()
+
+    /** 原子持久化恢复总账 JSON。 */
+    fun writeRecoveryLedger(content: String): Boolean = DataBusRecoveryLedger.write(content)
+
+    /** 清除恢复总账（Hook 确认恢复后调用）。缺失视为成功。 */
+    fun clearRecoveryLedger(): Boolean = DataBusRecoveryLedger.clear()
+
+    // ── 毒丸隔离与重试计数（P0-B：Poison/Transient 分离） ──
+    // 实现见 [DataBusEventQuarantine]；此处仅保留跨模块公开 API 面。
+
+    /**
+     * 隔离毒丸事件：原文保留在队列目录，仅推进游标跳过。
+     * 信封内含原文、原因、阶段、次数，便于排障；原子写 tmp→fsync→rename。
+     */
+    fun quarantineEvent(
+        queue: String,
+        event: DataBusProtocol.EventFile,
+        reason: String,
+        stage: String,
+        attempts: Int,
+    ): Boolean = DataBusEventQuarantine.quarantine(queue, event, reason, stage, attempts)
+
+    /** 读取指定事件的处理重试计数，缺失/非法视为 0。 */
+    fun readEventAttempt(queue: String, eventName: String): Int =
+        DataBusEventQuarantine.readAttempt(queue, eventName)
+
+    /** 持久化指定事件的处理重试计数。 */
+    fun writeEventAttempt(queue: String, eventName: String, count: Int): Boolean =
+        DataBusEventQuarantine.writeAttempt(queue, eventName, count)
+
+    /** 清除指定事件的重试计数（消费成功或已隔离后调用）。缺失视为成功。 */
+    fun clearEventAttempt(queue: String, eventName: String): Boolean =
+        DataBusEventQuarantine.clearAttempt(queue, eventName)
+
+    // ── 事件保留与清理（有界生命周期） ──
+    // 实现见 [DataBusPrune]；此处仅保留跨模块公开 API 面。
+
+    /**
+     * 清理队列中「已消费且超过保留期」的源事件文件。
+     *
+     * 安全前提见 [DataBusPrune.pruneQueueEvents]。
+     *
+     * @param retentionMs 保留期；0 表示仅受游标约束、不受时间约束（测试用）
+     * @param maxDeletePerRun 限制单轮**成功删除**数量（删除失败不阻断后续）。
+     *   注意：目录枚举本身是全量的（`java.io.File` 无流式 API），本参数约束的是
+     *   删除动作数而非扫描量；千级文件枚举成本可忽略，不伪装成扫描上限。
+     */
+    fun pruneQueueEvents(
+        queue: String,
+        retentionMs: Long,
+        maxDeletePerRun: Int = 500,
+    ): DataBusProtocol.PruneResult =
+        DataBusPrune.pruneQueueEvents(queue, retentionMs, maxDeletePerRun)
+
+    /**
+     * 清理隔离目录中超过保留期的毒丸证据文件。
+     *
+     * 与源事件清理不同：隔离证据不依赖消费游标，只受保留期与文件规则约束，
+     * 因此结果中的 cursorRead 恒为 null。
+     */
+    fun pruneQuarantine(
+        queue: String,
+        retentionMs: Long,
+        maxDeletePerRun: Int = 500,
+    ): DataBusProtocol.PruneResult =
+        DataBusPrune.pruneQuarantine(queue, retentionMs, maxDeletePerRun)
+
+    /**
+     * 清理孤儿重试计数：计数对应事件文件已不在源队列时删除。
+     *
+     * 不依赖消费游标（计数清理只与事件存量有关），结果 cursorRead 恒为 null。
+     * 实现见 [DataBusEventQuarantine.pruneOrphanAttempts]。
+     */
+    fun pruneOrphanAttempts(
+        queue: String,
+        maxDeletePerRun: Int = 500,
+    ): DataBusProtocol.PruneResult =
+        DataBusEventQuarantine.pruneOrphanAttempts(queue, maxDeletePerRun)
+
+    /**
+     * 源事件删除判定（纯函数，安全契约的可测载体）。
+     *
+     * 规则：
+     * 1. `name > cursor` 一律不删——未越过提交点，即使超过保留期也不行；
+     * 2. `name <= cursor` 才可能删除；游标为空（""）时任何非空文件名都 `> ""`，
+     *    因此空游标天然删 0 条；
+     * 3. `retentionMs == 0` 走显式特殊分支：仅受游标约束，不做时间比较。
+     */
+    internal fun shouldPruneEvent(
+        name: String,
+        cursor: String,
+        lastModified: Long,
+        now: Long,
+        retentionMs: Long,
+    ): Boolean = DataBusPrune.shouldPruneEvent(name, cursor, lastModified, now, retentionMs)
 
     // ── Lease（短期会话） ──
 
     /**
-     * 原子写入一个短期 lease。
+     * 原子写入一个短期 lease。实现见 [DataBusLease]。
      *
      * Lease 表示短期有效状态，命名由调用方提供但会被规整为文件安全形式。
      * 内容仍由调用方使用 JSON 表达，并在 payload 中包含 expiresAt。
      */
-    fun writeLease(category: String, key: String, content: String): Boolean {
-        if (!isValidLeaseCategory(category)) return false
-        if (!ensureInitialized()) return false
-        val leaseDir = File("$BUS_ROOT/$DIR_LEASES/$category")
-        if (!prepareDirectory(leaseDir)) {
-            return false
-        }
+    fun writeLease(category: String, key: String, content: String): Boolean =
+        DataBusLease.writeLease(category, key, content)
 
-        val filename = "${sanitizeFileName(key)}.json"
-        val tmpFile = try {
-            createTempFileIn(leaseDir, "$filename-", ".tmp")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create lease temp file: $category/$filename", e)
-            return false
-        }
-        val targetFile = File(leaseDir, filename)
-
-        return try {
-            FileOutputStream(tmpFile).use { fos ->
-                fos.write(content.toByteArray(Charsets.UTF_8))
-                fos.flush()
-                fos.fd.sync()
-            }
-            if (!tmpFile.renameTo(targetFile)) {
-                Log.e(TAG, "Lease rename failed: $category/$filename")
-                tmpFile.delete()
-                return false
-            }
-            makeWorldAccessible(targetFile, executable = false, writable = false)
-            Log.d(TAG, "Lease written: $category/$filename")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to write lease: $category/$filename", e)
-            tmpFile.delete()
-            false
-        }
-    }
-
-    private fun prepareDirectory(dir: File): Boolean = try {
+    internal fun prepareDirectory(dir: File): Boolean = try {
         val path = dir.toPath()
         if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) &&
             (Files.isSymbolicLink(path) || !Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
@@ -528,21 +518,21 @@ object DataBus {
         makeWorldAccessible(dir, executable = true)
         true
     } catch (e: Exception) {
+        // 设计内的降级：非 root 进程建不了 /data/local/tmp 下的目录 ⇒ 回退 Binder bridge。
+        // 按路径去重 + 不带堆栈（见 reportedPrepareFailures 的 KDoc）。
         lastInitFailure = "${dir.path}: ${e.javaClass.simpleName}: ${e.message}"
         if (reportedPrepareFailures.add(dir.path)) {
-            // 每个进程、每个路径只报一次完整堆栈：保持异常原文可查，
-            // 又不让"非 root 进程无权建 /data/local/tmp 目录"这一预期失败刷屏。
             Log.w(
                 TAG,
                 "DataBus directory not writable from this process (uid=${Process.myUid()}), " +
-                        "falling back to Binder bridge: ${dir.path}",
-                e,
+                        "falling back to Binder bridge: ${dir.path}" +
+                        " (${e.javaClass.simpleName}: ${e.message})",
             )
         }
         false
     }
 
-    private fun createTempFileIn(dir: File, prefix: String, suffix: String): File {
+    internal fun createTempFileIn(dir: File, prefix: String, suffix: String): File {
         val safePrefix = prefix
             .replace(UNSAFE_FILENAME_CHARS, "_")
             .take(120)
@@ -550,10 +540,31 @@ object DataBus {
         return Files.createTempFile(dir.toPath(), safePrefix, suffix).toFile()
     }
 
-    private fun isRegularFileNoFollow(file: File): Boolean =
+    /**
+     * 事件文件判定：**消费与清理共用的唯一口径**。
+     *
+     * 实现见 [DataBusPrune.isEventFile]。规则为「常规文件（不跟随软链）+ `.json` 后缀」。
+     * `readEventFiles`（消费）、清理与 pending 统计都必须通过本函数判定，
+     * 不得各自实现近似规则——否则清理会漏掉消费端能读到的文件，
+     * 导致无界增长换个形式复发。
+     *
+     * `.tmp` 临时文件、游标文件、子目录均不满足本判定，因此不会被清理触及。
+     */
+    internal fun isEventFile(file: File): Boolean =
+        DataBusPrune.isEventFile(file)
+
+    /**
+     * 隔离证据文件判定：与源事件是两种东西，分开表达。
+     *
+     * 实现见 [DataBusPrune.isQuarantineEvidenceFile]。
+     */
+    internal fun isQuarantineEvidenceFile(file: File): Boolean =
+        DataBusPrune.isQuarantineEvidenceFile(file)
+
+    internal fun isRegularFileNoFollow(file: File): Boolean =
         Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS)
 
-    private fun readRegularText(file: File, label: String): String? {
+    internal fun readRegularText(file: File, label: String): String? {
         if (!isRegularFileNoFollow(file)) {
             if (Files.exists(file.toPath(), LinkOption.NOFOLLOW_LINKS)) {
                 Log.w(TAG, "Rejected non-regular DataBus file: $label")
@@ -563,299 +574,60 @@ object DataBus {
         return file.readText(Charsets.UTF_8)
     }
 
-    fun readLeaseFiles(category: String): List<EventFile> {
-        if (!isValidLeaseCategory(category)) return emptyList()
-        val leaseDir = File("$BUS_ROOT/$DIR_LEASES/$category")
-        if (!leaseDir.exists()) return emptyList()
+    fun readLeaseFiles(category: String): List<DataBusProtocol.EventFile> =
+        DataBusLease.readLeaseFiles(category)
 
-        return try {
-            leaseDir.listFiles()
-                ?.filter { isRegularFileNoFollow(it) && it.name.endsWith(".json") }
-                ?.sortedBy { it.name }
-                ?.mapNotNull { file ->
-                    readRegularText(file, "leases/$category/${file.name}")?.let {
-                        EventFile(file.name, it)
-                    }
-                }
-                ?: emptyList()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read leases from $category", e)
-            emptyList()
-        }
-    }
+    // 事件序号分配与原子落盘见 DataBusEventWriter（实现，含序号水位观测）。
 
-    @Synchronized
-    private fun writeEventLocked(queue: String, eventDir: File, content: String): Long {
-        val counterDir = File("$BUS_ROOT/$DIR_COUNTERS")
-        if (!prepareDirectory(counterDir)) return -1L
-
-        val counterFile = File(counterDir, "$queue.seq")
-        val counterPath = counterFile.toPath()
-        return try {
-            if (Files.exists(counterPath, LinkOption.NOFOLLOW_LINKS) &&
-                (Files.isSymbolicLink(counterPath) ||
-                        !Files.isRegularFile(counterPath, LinkOption.NOFOLLOW_LINKS))
-            ) {
-                Files.delete(counterPath)
-            }
-
-            RandomAccessFile(counterFile, "rw").use { raf ->
-                raf.channel.use { channel ->
-                    channel.lock().use {
-                        val next = nextEventSequence(queue, raf)
-                        writeCounterValue(raf, next)
-                        makeWorldAccessible(counterFile, executable = false, writable = true)
-                        if (writeEventFile(queue, eventDir, content, next)) {
-                            eventSeqCounter.updateAndGet { current -> maxOf(current, next) }
-                            next
-                        } else {
-                            -1L
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to write event with locked sequence for $queue", e)
-            -1L
-        }
-    }
+    fun deleteLeaseFile(category: String, name: String): Boolean =
+        DataBusLease.deleteLeaseFile(category, name)
 
     /**
-     * 分配下一个事件序号。
+     * 读取持久化消费游标的可信状态与值。
      *
-     * ## 不变式（快路径的依据）
-     * 调用方在持有 `counters/<queue>.seq` 文件锁的前提下，**先写计数器、再写事件文件**。
-     * 因此计数器里的值永远 ≥ 目录中任何已存在事件文件的序号 —— 只要它是单调不减的，
-     * 新序号就一定不会与既有文件冲突，也不会落在游标之前。
+     * 实现见 [DataBusPrune.readCursorDetailed]。不复用 `readRegularText`：
+     * 该函数把「路径不存在」「路径存在但非常规文件」「读取抛异常」三种情况
+     * 全部塌缩为 null，使 ABSENT 与 UNREADABLE 无法区分。
      *
-     * ## 快路径（绝大多数情况）
-     * 直接信任计数器文件。**不读游标、不 `listFiles()`**。原实现每写一个事件都要
-     * 读一次游标文件、并对整个事件目录做 `listFiles()` + 逐文件 stat + 正则解析
-     * （稳态上限 2000 个文件），是本项目最重的热路径开销。
-     *
-     * ## 慢路径（罕见）
-     * 仅在计数器文件尚未建立（首次写入）、被外部清除，或出现回退时进入：
-     * 用游标 + 一次目录扫描重建下界，保证不漏读也不错序。
-     * 触发时会打一条 WARN，便于在日志中确认这是异常而非常态。
+     * 空白内容与格式非法一律判 UNREADABLE，见
+     * [DataBusPrune.isCredibleCursorContent]。
      */
-    private fun nextEventSequence(queue: String, raf: RandomAccessFile): Long {
-        val storedSeq = readCounterValue(raf)
-        val processSeq = eventSeqCounter.incrementAndGet()
-        val floor = queueSeqFloor.getOrPut(queue) { AtomicLong(0L) }
-
-        if (storedSeq > 0L && storedSeq >= floor.get()) {
-            floor.set(storedSeq)
-            return maxOf(storedSeq + 1, processSeq)
-        }
-
-        val cursorSeq = parseEventSequence(readCursor(queue)) ?: 0L
-        val queuedSeq = maxEventSequence(queue)
-        val next = maxOf(storedSeq + 1, cursorSeq + 1, queuedSeq + 1, processSeq)
-        floor.set(next)
-        Log.w(TAG, "event sequence floor rebuilt for $queue: stored=$storedSeq " +
-                "cursor=$cursorSeq queued=$queuedSeq -> next=$next")
-        return next
-    }
-
-    private fun readCounterValue(raf: RandomAccessFile): Long {
-        raf.seek(0)
-        val content = ByteArray(raf.length().coerceAtMost(64L).toInt())
-        if (content.isEmpty()) return 0L
-        raf.readFully(content)
-        return content.toString(Charsets.UTF_8).trim().toLongOrNull()?.coerceAtLeast(0L) ?: 0L
-    }
-
-    private fun writeCounterValue(raf: RandomAccessFile, value: Long) {
-        raf.setLength(0)
-        raf.seek(0)
-        raf.write(value.toString().toByteArray(Charsets.UTF_8))
-        raf.fd.sync()
-    }
-
-    private fun writeEventFile(queue: String, eventDir: File, content: String, seq: Long): Boolean {
-        val now = System.currentTimeMillis()
-        val pid = Process.myPid()
-        val rand = ((Math.random() * 0xFFFF).toInt() and 0xFFFF)
-        val filename = String.format("%020d-%d-%d-%04x.json", seq, now, pid, rand)
-
-        val tmpFile = try {
-            createTempFileIn(eventDir, "$filename-", ".tmp")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create event temp file: $queue/$filename", e)
-            return false
-        }
-        val targetFile = File(eventDir, filename)
-
-        return try {
-            FileOutputStream(tmpFile).use { fos ->
-                fos.write(content.toByteArray(Charsets.UTF_8))
-                fos.flush()
-                fos.fd.sync()
-            }
-            if (!tmpFile.renameTo(targetFile)) {
-                Log.e(TAG, "Event rename failed: $filename")
-                tmpFile.delete()
-                return false
-            }
-            makeWorldAccessible(targetFile, executable = false, writable = false)
-            Log.d(TAG, "Event written: $queue/$filename")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to write event to $queue", e)
-            tmpFile.delete()
-            false
-        }
-    }
+    fun readCursorDetailed(queue: String): Pair<DataBusProtocol.CursorRead, String> =
+        DataBusPrune.readCursorDetailed(queue)
 
     /**
-     * 事件目录中已存在的最大序号 —— **O(n)**，仅供序号下界重建的慢路径使用。
+     * 游标内容可信判定（纯函数）。实现见 [DataBusPrune.isCredibleCursorContent]。
      *
-     * 不要把它放回常规写入路径：它要对目录里每个文件做一次 `stat` 并解析文件名，
-     * 实测稳态目录规模上限为 `EVENT_QUEUE_MAX_FILES`，即每写一个事件就要扫描上千个文件。
-     * 常规路径见 [nextEventSequence] 的快路径。
+     * 规则：非空 **且** 完整匹配事件文件名格式。抽取为纯函数的原因：
+     * 文件存在性/常规性判定依赖真实文件系统，JVM 单测无法隔离；
+     * 内容判定是纯字符串逻辑，必须可测。
      */
-    private fun maxEventSequence(queue: String): Long {
-        val eventDir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
-        if (!eventDir.exists()) return 0L
-        return eventDir.listFiles()
-            ?.asSequence()
-            ?.filter { isRegularFileNoFollow(it) && it.name.endsWith(".json") }
-            ?.mapNotNull { parseEventSequence(it.name) }
-            ?.maxOrNull()
-            ?: 0L
-    }
-
-    /**
-     * 解析事件文件名前 20 位的十进制序号。
-     *
-     * 原实现用 `Regex("^(\\d{20})-...")` + `matchEntire`，而 `maxEventSequence()`
-     * 会对目录里**每个**文件调用一次 —— 稳态下即每写一个事件触发上千次正则匹配。
-     * 序号是固定长度的十进制前缀，直接按下标校验并 `toLongOrNull()` 等价且快一个数量级。
-     *
-     * 尾部（时间戳/pid/随机十六进制）不做严格校验：调用方只会把它用于
-     * 已由本类写出的事件文件名，以及游标值；宽松解析不会放宽任何安全边界。
-     */
-    private fun parseEventSequence(name: String): Long? {
-        if (name.length < EVENT_SEQ_DIGITS + 1) return null
-        if (name[EVENT_SEQ_DIGITS] != '-') return null
-        for (i in 0 until EVENT_SEQ_DIGITS) {
-            val c = name[i]
-            if (c < '0' || c > '9') return null
-        }
-        return name.substring(0, EVENT_SEQ_DIGITS).toLongOrNull()
-    }
-
-    fun deleteLeaseFile(category: String, name: String): Boolean {
-        if (!isValidLeaseCategory(category)) return false
-        val file = File("$BUS_ROOT/$DIR_LEASES/$category/${sanitizeFileName(name)}")
-        return try {
-            !file.exists() || file.delete()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to delete lease: $category/$name", e)
-            false
-        }
-    }
+    internal fun isCredibleCursorContent(content: String): Boolean =
+        DataBusPrune.isCredibleCursorContent(content)
 
     /**
      * 读取持久化消费游标。
-     * @return 游标值（上次消费的最后文件名），"" 表示未消费过
-     */
-    fun readCursor(queue: String): String {
-        if (!isValidEventQueue(queue)) return ""
-        val cursorFile = File("$BUS_ROOT/$DIR_CURSORS/$queue.cursor")
-        return try {
-            readRegularText(cursorFile, "cursors/$queue.cursor")?.trim() ?: ""
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read cursor: $queue", e)
-            ""
-        }
-    }
-
-    /**
-     * 队列的**真实待消费深度**：文件名严格大于持久化游标的事件数。
      *
-     * `events/<queue>/` 目录里的文件只被游标越过、**从不删除**，所以目录文件数是
-     * “累计写入量”，不是积压量。直接拿它当积压量会产生永远为真的告警：
-     * 实测 `filesystem=561 / consumed=561` 且 `cursors/filesystem.cursor` 正好等于
-     * 目录里最新的 `...000561-*.json`，队列其实已经清空，却每 60s 报一次 backlog。
+     * 既有签名与语义保持不变：ABSENT 与 UNREADABLE 都返回 ""。
+     * 需要区分二者时使用 [readCursorDetailed]。
      */
-    fun pendingEventCount(queue: String): Int {
-        if (!isValidEventQueue(queue)) return 0
-        val eventDir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
-        if (!Files.isDirectory(eventDir.toPath(), LinkOption.NOFOLLOW_LINKS)) return 0
-        val cursor = readCursor(queue)
-        return eventDir.listFiles()
-            ?.count {
-                isRegularFileNoFollow(it) && it.name.endsWith(".json") && it.name > cursor
-            }
-            ?: 0
-    }
+    fun readCursor(queue: String): String =
+        DataBusPrune.readCursor(queue)
 
-    /**
-     * 队列目录累计文件数（含已消费，仅用于诊断展示，不等于积压）。
-     */
-    fun archivedEventCount(queue: String): Int {
-        if (!isValidEventQueue(queue)) return 0
-        return countJsonFiles("$BUS_ROOT/$DIR_EVENTS/$queue")
-    }
-
-    /**
-     * 清理队列目录中**游标及之前**的已消费事件文件。
-     *
-     * 为什么需要：游标机制让文件永不删除，`events/<queue>/` 会随运行时间无界增长
-     * （实测 10:52~11:03 的 11 分钟内该目录已有 561 个文件）。每个消费者每轮都会
-     * 对该目录做 `listFiles()`（`readEventFiles` / `maxEventSequence`），文件数膨胀
-     * 会直接拖慢发布与消费路径。
-     *
-     * 安全性：只删除 `name <= cursor` 的文件 —— 游标是唯一读取起点，这些条目
-     * 不可能再被读出，删除既不会造成重复也不会造成丢失。`consumed/` 归档仍按
-     * 自身的 TTL / 上限保留审计副本。
-     *
-     * @param keepAtMost 低水位：文件数不超过该值时不做任何删除（避免高频 unlink）
-     * @return 实际删除的文件数
-     */
-    fun pruneConsumedEvents(queue: String, keepAtMost: Int): Int {
-        if (!isValidEventQueue(queue)) return 0
-        val eventDir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
-        if (!Files.isDirectory(eventDir.toPath(), LinkOption.NOFOLLOW_LINKS)) return 0
-
-        // 只用 list() 取文件名：listFiles() 会对每个条目做一次 stat，
-        // 而上限判定与游标比较都只需要名字。旧实现是"先 listFiles + 逐文件 stat
-        // + 全量排序，再判断是否超过低水位"，即在**无需清理**的绝大多数轮次里
-        // 也付了 O(n log n) + n 次 stat。
-        val names = eventDir.list() ?: return 0
-        if (names.isEmpty() || names.size <= keepAtMost) return 0
-
-        val cursor = readCursor(queue)
-        if (cursor.isEmpty()) return 0
-
-        // 待删集合 = 文件名 <= cursor（与旧的"排序后 break 到 name > cursor"等价）。
-        val consumed = names.filter { it.endsWith(".json") && it <= cursor }
-        if (consumed.isEmpty()) return 0
-
-        // 只对待删候选做类型校验（防符号链接/目录），不扫全目录。
-        var deleted = 0
-        for (name in consumed.sorted()) {
-            val file = File(eventDir, name)
-            if (isRegularFileNoFollow(file) && file.delete()) deleted++
-        }
-        return deleted
-    }
-
-    private fun sanitizeFileName(value: String): String =
-        value.replace(Regex("[^A-Za-z0-9._-]"), "_").take(180).ifBlank { "lease" }
+    internal fun sanitizeFileName(value: String): String =
+        value.replace(UNSAFE_FILENAME_CHARS, "_").take(180).ifBlank { "lease" }
 
     private fun isValidSnapshotName(name: String): Boolean =
-        isValidName("snapshot", name, validSnapshotNames)
+        isValidName("snapshot", name, DataBusProtocol.validSnapshotNames)
 
     private fun isValidSignalName(name: String): Boolean =
-        isValidName("signal", name, validSignalNames)
+        isValidName("signal", name, DataBusProtocol.validSignalNames)
 
-    private fun isValidEventQueue(queue: String): Boolean =
-        isValidName("event queue", queue, validEventQueues)
+    internal fun isValidEventQueue(queue: String): Boolean =
+        isValidName("event queue", queue, DataBusProtocol.validEventQueues)
 
-    private fun isValidLeaseCategory(category: String): Boolean =
-        isValidName("lease category", category, validLeaseCategories)
+    internal fun isValidLeaseCategory(category: String): Boolean =
+        isValidName("lease category", category, DataBusProtocol.validLeaseCategories)
 
     private fun isValidName(kind: String, value: String, allowed: Set<String>): Boolean {
         if (value in allowed) {
@@ -870,8 +642,9 @@ object DataBus {
      *
      * @param repair true 时会尝试创建缺失目录并修复权限。
      */
-    fun checkHealth(repair: Boolean = false): HealthReport {
-        val init = if (repair) ensureInitialized() else initialized || File(BUS_ROOT).exists()
+    fun checkHealth(repair: Boolean = false): DataBusProtocol.HealthReport {
+        val init = if (repair) ensureInitialized() else initialized ||
+            File(BUS_ROOT).exists()
         val missingDirs = mutableListOf<String>()
         val permissionIssues = mutableListOf<String>()
 
@@ -900,20 +673,96 @@ object DataBus {
             }
         }
 
-        return HealthReport(
+        // 每个队列只计算一次：pending 数量与游标状态必须来自同一次观测。
+        // 若分两次调用，并发消费或游标变化会把不可信数量与可信状态拼在一起。
+        // 另：物理存量与积压来自**同一次**目录遍历（queueCensus），不再对同一目录
+        // 各扫一遍 —— checkHealth 由 DataBusLayerReporter 每 2s 调用一次，
+        // 旧实现（pending 一遍 listFiles+逐条 stat、eventQueueCounts 再一遍）对
+        // filesystem/redirect_notice 两个队列共白扫 2 遍、每条目多 1 次 stat。
+        val filesystemCensus = queueCensus(DataBusProtocol.EVENT_FILESYSTEM)
+        val redirectCensus = queueCensus(DataBusProtocol.EVENT_REDIRECT_NOTICE)
+        return DataBusProtocol.HealthReport(
             initialized = init && missingDirs.isEmpty(),
             missingDirectories = missingDirs,
             permissionIssues = permissionIssues,
-            snapshots = snapshotNames().map { inspectSnapshot(it) },
+            snapshots = DataBusProtocol.snapshotNames().map { inspectSnapshot(it) },
             eventQueueCounts = mapOf(
-                EVENT_FILESYSTEM to countJsonFiles("$BUS_ROOT/$DIR_EVENTS/$EVENT_FILESYSTEM"),
-                EVENT_REDIRECT_NOTICE to countJsonFiles("$BUS_ROOT/$DIR_EVENTS/$EVENT_REDIRECT_NOTICE"),
+                DataBusProtocol.EVENT_FILESYSTEM to filesystemCensus.first,
+                DataBusProtocol.EVENT_REDIRECT_NOTICE to redirectCensus.first,
                 DIR_CONSUMED to countJsonFiles("$BUS_ROOT/$DIR_EVENTS/$DIR_CONSUMED"),
             ),
             leaseCounts = mapOf(
-                LEASE_QUERY_SESSIONS to countJsonFiles("$BUS_ROOT/$DIR_LEASES/$LEASE_QUERY_SESSIONS"),
+                DataBusProtocol.LEASE_QUERY_SESSIONS to countJsonFiles(
+                    "$BUS_ROOT/$DIR_LEASES/${DataBusProtocol.LEASE_QUERY_SESSIONS}",
+                ),
+            ),
+            // pending 与游标可信状态：与 readEventFiles 同筛选同边界，
+            // 数据损坏时按队列退化，不吞并整体状态。
+            pendingEventCounts = mapOf(
+                DataBusProtocol.EVENT_FILESYSTEM to filesystemCensus.second,
+                DataBusProtocol.EVENT_REDIRECT_NOTICE to redirectCensus.second,
+            ),
+            quarantineCounts = mapOf(
+                DataBusProtocol.EVENT_FILESYSTEM to countJsonFiles(
+                    "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_FILESYSTEM}.quarantine",
+                ),
+                DataBusProtocol.EVENT_REDIRECT_NOTICE to countJsonFiles(
+                    "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.quarantine",
+                ),
+            ),
+            cursorReadStates = mapOf(
+                DataBusProtocol.EVENT_FILESYSTEM to filesystemCensus.third,
+                DataBusProtocol.EVENT_REDIRECT_NOTICE to redirectCensus.third,
             ),
         )
+    }
+
+    /**
+     * 按队列计算 (pending, cursorRead)。
+     *
+     * 筛选规则**必须**与 [readEventFiles] 一致：常规文件 + `.json` 后缀 +
+     * 字典序 `name > afterCursor`。若修改一处筛选，必须同步另一处，
+     * 否则 pending 会与消费行为分叉，产生另一种误报。
+     *
+     * - ABSENT（新队列）：全部有效事件计入 pending；
+     * - OK：只计 `name > cursor`；
+     * - UNREADABLE：pending 按剩余文件估算但标记不可信，
+     *   调用方不得把它当作可信积压依据。
+     */
+    /**
+     * 队列普查：**一次目录遍历**同时得到「物理存量」与「真实积压」与「游标可信状态」。
+     *
+     * `checkHealth` 由 `DataBusLayerReporter` 每 2s 调用一次。上游拆分前的实现是
+     * `countPendingEvents`（积压）与 `countJsonFiles`（物理存量）各自 `listFiles()` 一遍，
+     * 且各自对每个条目做一次 `isRegularFileNoFollow`（= 1 次 `stat`）—— 同一个目录、
+     * 同一批文件被扫两遍、每条目多 1 次 `stat`。这里合成一遍，判定口径完全沿用
+     * [DataBusPrune.isEventFile]（= 常规文件 + `.json`），因此
+     * `accumulated` 与原 `countJsonFiles` 逐字节等价。
+     *
+     * 积压语义与上游 `countPendingEvents` 完全一致：
+     * `ABSENT` ⇒ 全部算积压（旧口径 `name > ""` 恒真，不能退化成 0，
+     * 否则游标文件缺失时积压告警被静默关闭）；`OK` ⇒ 只数严格大于游标的；
+     * `UNREADABLE` ⇒ 数值不可信（原样返回 `files.size`），由
+     * `cursorReadStates` 单独告警、且不计入积压告警。
+     */
+    private fun queueCensus(
+        queue: String,
+    ): Triple<Int, Int, DataBusProtocol.CursorRead> {
+        val (read, cursor) = readCursorDetailed(queue)
+        val dir = File("$BUS_ROOT/$DIR_EVENTS/$queue")
+        val files = dir.listFiles() ?: return Triple(0, 0, read)
+        var accumulated = 0
+        var pending = 0
+        for (file in files) {
+            if (!isEventFile(file)) continue
+            accumulated++
+            val isPending = when (read) {
+                DataBusProtocol.CursorRead.OK -> file.name > cursor
+                else -> true
+            }
+            if (isPending) pending++
+        }
+        return Triple(accumulated, pending, read)
     }
 
     private fun requiredDirectories(): List<String> = listOf(
@@ -921,36 +770,31 @@ object DataBus {
         BUS_ROOT,
         "$BUS_ROOT/$DIR_SNAPSHOTS",
         "$BUS_ROOT/$DIR_SIGNALS",
-        "$BUS_ROOT/$DIR_EVENTS/$EVENT_FILESYSTEM",
-        "$BUS_ROOT/$DIR_EVENTS/$EVENT_REDIRECT_NOTICE",
+        "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_FILESYSTEM}",
+        "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_REDIRECT_NOTICE}",
+        "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_FILESYSTEM}.quarantine",
+        "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.quarantine",
         "$BUS_ROOT/$DIR_EVENTS/$DIR_CONSUMED",
-        "$BUS_ROOT/$DIR_LEASES/$LEASE_QUERY_SESSIONS",
+        "$BUS_ROOT/$DIR_LEASES/${DataBusProtocol.LEASE_QUERY_SESSIONS}",
         "$BUS_ROOT/$DIR_CURSORS",
+        "$BUS_ROOT/$DIR_CURSORS/${DataBusProtocol.EVENT_FILESYSTEM}.attempts",
+        "$BUS_ROOT/$DIR_CURSORS/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.attempts",
         "$BUS_ROOT/$DIR_COUNTERS",
         "$BUS_ROOT/$DIR_TMP",
     )
 
-    private fun snapshotNames(): List<String> = listOf(
-        SNAPSHOT_REDIRECT_POLICY,
-        SNAPSHOT_READ_ONLY,
-        SNAPSHOT_CONFIGURED_MOUNT_POINTS,
-        SNAPSHOT_PLATFORM_CAPABILITIES,
-        SNAPSHOT_ORCHESTRATED_STATUS,
-        SNAPSHOT_NATIVE_HOOK_STATUS,
-    )
-
-    private fun inspectSnapshot(name: String): SnapshotHealth {
+    private fun inspectSnapshot(name: String): DataBusProtocol.SnapshotHealth {
         val file = File("$BUS_ROOT/$DIR_SNAPSHOTS/$name")
         if (!Files.exists(file.toPath(), LinkOption.NOFOLLOW_LINKS)) {
-            return SnapshotHealth(name, exists = false, validJson = false)
+            return DataBusProtocol.SnapshotHealth(name, exists = false, validJson = false)
         }
         return try {
             val content = readRegularText(file, "snapshot/$name")
-                ?: return SnapshotHealth(name, exists = true, validJson = false)
+                ?: return DataBusProtocol.SnapshotHealth(name, exists = true, validJson = false)
             JSONObject(content)
-            SnapshotHealth(name, exists = true, validJson = true)
+            DataBusProtocol.SnapshotHealth(name, exists = true, validJson = true)
         } catch (e: Exception) {
-            SnapshotHealth(
+            DataBusProtocol.SnapshotHealth(
                 name = name,
                 exists = true,
                 validJson = false,
@@ -967,20 +811,16 @@ object DataBus {
             ?: 0
     }
 
-    /**
-     * 设置文件/目录的跨进程可访问权限。
-     *
-     * **只发一次 `chmod`。** 末尾的 `Os.chmod(path, mode)` 用的是**绝对 mode**，
-     * 会把之前任何 `File.setReadable/setWritable/setExecutable` 的结果完全覆盖；
-     * 而那些调用每一个内部都要 `stat` + `chmod`（2 次系统调用），在绝对 chmod 之下
-     * 属纯冗余。本函数在每次事件写入路径上被调用两次（计数器文件 + 事件文件），
-     * 去掉冗余调用可让**每个事件少 6~8 次系统调用**。
-     *
-     * 唯一的语义差异：`Os.chmod` 失败时旧实现还残留 setXxx 的部分效果作为兜底。
-     * 该路径仅在非 root 进程调用时出现（此时 setXxx 同样会失败），
-     * 失败仍会打 WARN，行为可观测。
-     */
-    private fun makeWorldAccessible(file: File, executable: Boolean, writable: Boolean = true) {
+    internal fun makeWorldAccessible(file: File, executable: Boolean, writable: Boolean = true) {
+        // ⚠️ 只发一次 `chmod`：末尾的 `Os.chmod(path, mode)` 用的是**绝对 mode**，
+        // 会把之前任何 `File.setReadable/setWritable/setExecutable` 的结果完全覆盖，
+        // 而那些调用每一个内部都要 `stat` + `chmod`（2 次系统调用），在绝对 chmod 之下
+        // 属纯冗余。本函数在每次事件写入路径上会被调用两次（计数器文件 + 事件文件），
+        // 去掉冗余调用可让**每个事件少 6~8 次系统调用**（bus 根在 f2fs 上，非 tmpfs）。
+        //
+        // 唯一的语义差异：`Os.chmod` 失败时旧实现还残留 setXxx 的部分效果作为兜底。
+        // 该路径仅在非 root 进程调用时出现（此时 setXxx 同样会失败），失败仍会打 WARN，行为可观测。
+        // 上游此前的写法保留在历史中（见 ADR 之前的 DataBus.makeWorldAccessible）。
         val mode = if (executable) {
             directoryMode(file)
         } else if (writable) {
@@ -997,9 +837,9 @@ object DataBus {
 
     private fun directoryMode(dir: File): Int = when (dir.path) {
         "$BUS_ROOT/$DIR_SIGNALS",
-        "$BUS_ROOT/$DIR_EVENTS/$EVENT_FILESYSTEM",
-        "$BUS_ROOT/$DIR_EVENTS/$EVENT_REDIRECT_NOTICE",
-        "$BUS_ROOT/$DIR_LEASES/$LEASE_QUERY_SESSIONS",
+        "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_FILESYSTEM}",
+        "$BUS_ROOT/$DIR_EVENTS/${DataBusProtocol.EVENT_REDIRECT_NOTICE}",
+        "$BUS_ROOT/$DIR_LEASES/${DataBusProtocol.LEASE_QUERY_SESSIONS}",
         "$BUS_ROOT/$DIR_COUNTERS" -> MODE_DIR_SHARED_STICKY
         else -> MODE_DIR_WORLD_READABLE
     }

@@ -1,9 +1,10 @@
 package me.gm.cleaner.client
 
 /**
- * logcat 观察器真死（serverException=2）的 App 侧监督决策纯函数。
+ * logcat 观察器真死/假活（serverException=2）的 App 侧监督决策纯函数。
  *
- * 背景：cleaner_server 进程活着但 logcat 观察线程已不可逆退出时，
+ * 背景：cleaner_server 进程活着但 logcat 观察线程已不可逆退出，
+ * 或线程活着但心跳停滞（readLine 被 wedged/logd 或下游 Binder 阻塞），
  * Binder ping 依然成功，假死看门狗无法发现。此时 CleanerService.getServerException()
  * 返回 2，App 侧看门狗轮询命中后复用既有 kill+recover 闭环重启整个 server
  * 进程（server 内不另建 Observer 重建路径，与架构铁律一致）。

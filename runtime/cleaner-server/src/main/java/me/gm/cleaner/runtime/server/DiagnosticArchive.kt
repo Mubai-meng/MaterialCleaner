@@ -5,7 +5,11 @@ import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.util.Log
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
+import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
+import me.gm.cleaner.runtime.server.orchestrator.MediaProviderHookLayerReporter
+import me.gm.cleaner.runtime.server.orchestrator.NativeHookLayerReporter
 import me.gm.cleaner.runtime.server.orchestrator.ServerErrorJournal
+import me.gm.cleaner.runtime.server.vfs.VfsProcessCensus
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -16,10 +20,10 @@ import java.io.RandomAccessFile
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -27,10 +31,32 @@ object DiagnosticArchive {
     private const val TAG = "DiagnosticArchive"
     private const val OUTPUT_DIR = "/data/local/tmp/cleaner_diagnostics"
     private const val AUTO_LOG_DIR = "/data/local/tmp/cleaner_logs"
-    private const val MAX_COMMAND_BYTES = 4 * 1024 * 1024
     private const val MAX_TEXT_FILE_BYTES = 512 * 1024
     private const val MAX_AUTO_LOG_FILES = 8
     private const val MAX_EVENT_FILES = 20
+
+    /**
+     * `logcat -t` 的行数上限：**按原始行计**，本机 ~700–1500 行/s ⇒ 30000 行 ≈ 20–40 s 覆盖窗。
+     * 旧值 5000/3000 只覆盖几秒，等于让"聚焦运行日志"变成空文件（实测过滤后仅 7 行）。
+     */
+    private const val LOGCAT_TAIL_LINES = 30_000
+
+    /** 脱敏别名的固定盐。**不要改成随机值**，否则跨归档就不可比（详见 [alias]）。 */
+    private const val ALIAS_SALT = "MaterialCleaner.DiagnosticArchive.v1"
+
+    /** 别名取 hex 用；不用 `Character.forDigit`（`java.lang.Character` 被 `kotlin.Char` 映射挡掉）。 */
+    private const val HEX_DIGITS = "0123456789abcdef"
+
+    /**
+     * 待脱敏的三类模式。
+     *
+     * 全部用 `replace(regex) { … }` 走 [alias]，即**保 identity** 替换；
+     * 严禁退回成 `replace(regex, "<字面量>")` —— 那会让「只有取值不同」的字段
+     * 在归档里变得无法区分（历史缺陷，见 [redact]）。
+     */
+    private val APP_DIR_REGEX = Regex("/data/app/(?:[^/\\s!]+/){2}[^/\\s!]*")
+    private val EXPAND_VOLUME_REGEX = Regex("/mnt/expand/[0-9A-Fa-f-]+")
+    private val HEX_ID_REGEX = Regex("(?i)\\b[0-9a-f]{24,}\\b")
 
     fun open(server: CleanerServer): ParcelFileDescriptor {
         val file = create(server)
@@ -49,7 +75,9 @@ object DiagnosticArchive {
             addText(zip, "summary.txt", buildSummary(server))
             addText(zip, "summary_zh-CN.txt", buildSummaryZhCn(server))
             addStatus(zip, server)
+            addFilesystem(zip)
             addErrorJournal(zip)
+            addHookErrorJournal(zip)
             addDataBus(zip)
             addLogcat(zip)
             addAutoLogs(zip)
@@ -125,6 +153,36 @@ object DiagnosticArchive {
         appendLine("model=${Build.MODEL}")
         appendLine("device=${Build.DEVICE}")
         appendLine("fingerprint=${Build.FINGERPRINT}")
+        // 归档**不是**完整日志：logs/auto/*.log 只留尾部 MAX_TEXT_FILE_BYTES。
+        // 把这件事提到入口文件，避免只看 manifest 的人把「归档里没有」读成「没发生」。
+        appendLine("truncation=${truncationSummary()}")
+    }
+
+    /**
+     * 归档会截断的条目预告。
+     *
+     * 动机：`logs/auto/<name>.log` 只保留**尾部** [MAX_TEXT_FILE_BYTES]（512 KiB）。
+     * 实测一次 16,424,932 B 的会话日志进包后只剩 524,338 B（**2.9%**）。此前这一事实
+     * 只写在被截断文件自己的第 4 行（`truncated=head omitted, tailBytes=…`），
+     * 而 `manifest.txt` / `summary.txt` 里毫无提示 —— 只看入口文件的人会把
+     * 「归档里没有」读成「没发生」；再叠加 ColorOS `LOG_FLOWCTRL` 的按进程丢日志
+     * （实测单次丢弃 2,470 行），就是**双重不完整**。
+     *
+     * 在写 manifest **之前**先算一遍（只读 `length()`，不做 IO，不写任何文件）。
+     */
+    private fun truncationSummary(): String {
+        val files = File(AUTO_LOG_DIR).listFiles()
+            ?.filter { isRegularFileNoFollow(it) && it.name.endsWith(".log") }
+            ?.sortedByDescending { it.lastModified() }
+            ?.take(MAX_AUTO_LOG_FILES)
+            ?: emptyList()
+        val truncated = files.filter { it.length() > MAX_TEXT_FILE_BYTES }
+        if (truncated.isEmpty()) {
+            return "none?autoLogsKept=tail(${MAX_TEXT_FILE_BYTES}B)"
+        }
+        return truncated.joinToString("; ") { file ->
+            "${file.name} keptLast=${MAX_TEXT_FILE_BYTES}B dropped=${file.length() - MAX_TEXT_FILE_BYTES}B"
+        }
     }
 
     private fun buildSummary(server: CleanerServer): String = buildString {
@@ -135,8 +193,22 @@ object DiagnosticArchive {
         appendLine("- status/orchestrated_status.json has the full five-layer state.")
         appendLine("- status/native_hook_status_pretty.json has MediaProvider/FUSE hook details.")
         appendLine("- databus/health.json has queue, snapshot, and permission health.")
+        appendLine("- errors/hook_errors.jsonl has MediaProvider (LSPosed module) runtime errors:")
+        appendLine("  structured, so unlike the logcat captures it is NOT subject to LOG_FLOWCTRL drops.")
         appendLine("- logs/logcat_material_cleaner_filtered.txt has focused runtime logs.")
-        appendLine("- commands/media_provider_maps.txt and commands/media_provider_mountinfo.txt prove native loading and mount state.")
+        appendLine("  ⚠️ Both logs/logcat_* captures are capped by '-t' counted in RAW lines (~700–1500/s),")
+        appendLine("  so they cover roughly the last 20–40 s only even with LOGCAT_TAIL_LINES=$LOGCAT_TAIL_LINES.")
+        appendLine("- commands/media_provider_maps.txt and commands/media_provider_mountinfo.txt show MediaProvider process state.")
+        appendLine("- ⚠️ This archive is NOT the full log: logs/auto/*.log keeps only the TAIL of each file")
+        appendLine("  (see the 'truncation=' line in manifest.txt), and logcat itself drops lines under")
+        appendLine("  ColorOS LOG_FLOWCTRL per-process quota. Absence in this archive != did not happen.")
+        appendLine("  In EMBEDDED hook mode (EMBEDDED_GOT_PATCH) native libs load from inside an APK/APEX, so")
+        appendLine("  /proc/<pid>/maps shows no libinline/libfuse_jni entry; use the 'nativeloader: Load ...'")
+        appendLine("  lines in the logs as the loading evidence.")
+        appendLine("- To attribute E Parcel (the largest E tag every batch): do NOT go looking for a call")
+        appendLine("  site. Compute  E Parcel count / inboundHookCallbacks  (status/orchestrated_status.json,")
+        appendLine("  dataBus layer). A stable ratio across sessions = fixed framework overhead per binder")
+        appendLine("  transaction; a flat numerator = unrelated to our IPC. Either way it settles the question.")
         appendLine()
 
         val status = runCatching { JSONObject(server.layerOrchestrator.collectStatusJson()) }
@@ -158,20 +230,23 @@ object DiagnosticArchive {
         if (health != null) {
             appendLine("DataBus:")
             appendLine("- initialized=${health.initialized}, healthy=${health.healthy}, criticalSnapshotsReady=${health.criticalSnapshotsReady}")
-            appendLine("- eventQueueCounts=${health.eventQueueCounts}")
+            appendLine("- eventQueueCounts=${health.eventQueueCounts} (physical, includes consumed-but-retained)")
+            appendLine("- pendingEventCounts=${health.pendingEventCounts} (drives backlog alerts)")
+            appendLine("- quarantineCounts=${health.quarantineCounts}")
+            appendLine("- cursorReadStates=${health.cursorReadStates} (UNREADABLE queues excluded from backlog)")
             appendLine("- leaseCounts=${health.leaseCounts}")
             appendLine("- missingDirectories=${health.missingDirectories.size}, permissionIssues=${health.permissionIssues.size}")
             appendLine()
         }
 
-        val nativeStatus = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_NATIVE_HOOK_STATUS)
+        val nativeStatus = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS)
             ?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (nativeStatus != null) {
             appendNativeHookSummary(nativeStatus)
             appendLine()
         }
 
-        val platformCaps = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_PLATFORM_CAPABILITIES)
+        val platformCaps = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES)
             ?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (platformCaps != null) {
             appendLine("Platform capabilities:")
@@ -181,7 +256,94 @@ object DiagnosticArchive {
             appendLine()
         }
 
+        if (status != null) {
+            appendLine("Key signals:")
+            appendKeySignals(status)
+            appendLine()
+        }
+
         appendLine("If the package is hard to read, start from this file, then open the referenced files above.")
+    }
+
+    /**
+     * P1 诊断质量：陈列 status JSON 中的关键信号。
+     *
+     * 职责边界：本函数只**陈列事实**，不做状态裁决——裁决归 Reporter
+     * （[NativeHookLayerReporter] / [MediaProviderHookLayerReporter]），
+     * 此处直接展示其结论与证据字段。自造判定词会与运行状态分叉，
+     * 正是历史上"摘要显示 synced 而实际 STALE"的成因。
+     */
+    internal fun StringBuilder.appendKeySignals(status: JSONObject) {
+        val vfs = status.optJSONObject("vfs")
+        val mp = status.optJSONObject("mediaProviderJavaHook")
+        val fuse = status.optJSONObject("fuseNativeHook")
+        if (vfs == null || mp == null || fuse == null) return
+        // FUSE：展示 Reporter 的权威裁决 + 支撑证据，不再自行推导 synced/pending
+        val appliedEpoch = fuse.optString(NativeHookLayerReporter.KEY_APPLIED_EPOCH, "")
+        val snapshotEpoch = fuse.optString(NativeHookLayerReporter.KEY_SNAPSHOT_EPOCH, "")
+        val policySynced = fuse.optBoolean(NativeHookLayerReporter.KEY_POLICY_SYNCED, false)
+        val verdict = fuse.optString(NativeHookLayerReporter.KEY_SYNC_VERDICT, "UNKNOWN")
+        val layerState = fuse.optString("state", "UNKNOWN")
+        if (appliedEpoch.isNotBlank() && snapshotEpoch.isNotBlank()) {
+            val epoch = if (appliedEpoch == snapshotEpoch) "consistent" else "MISMATCH"
+            appendLine("- FUSE: state=$layerState, sync=$verdict, " +
+                    "epoch=$epoch, policySynced=$policySynced")
+        }
+        // 恢复熔断：展示 Reporter 结论与计数（attempts 语义）
+        val wakeOnly = mp.optBoolean(MediaProviderHookLayerReporter.KEY_WAKE_ONLY_MODE, false)
+        val rounds = mp.optInt(MediaProviderHookLayerReporter.KEY_DESTRUCTIVE_ROUNDS, 0)
+        if (wakeOnly || rounds > 0) {
+            appendLine("- MediaProvider recovery: state=${mp.optString("state", "UNKNOWN")}, " +
+                    "wakeOnly=$wakeOnly, destructiveAttempts=$rounds/3")
+        }
+        // VFS 分母
+        val unmanaged = vfs.optInt(VfsProcessCensus.KEY_UNMANAGED, -1)
+        val managed = vfs.optInt(VfsProcessCensus.KEY_MANAGED, -1)
+        if (unmanaged >= 0 && managed >= 0) {
+            appendLine("- VFS pids: managed=$managed, unmanaged=$unmanaged")
+        }
+        // srStatus 截断
+        val truncated = vfs.optBoolean(VfsProcessCensus.KEY_SR_TRUNCATED, false)
+        val total = vfs.optInt(VfsProcessCensus.KEY_SR_TOTAL, -1)
+        if (total >= 0) {
+            appendLine("- srStatus: total=$total, truncated=$truncated")
+        }
+    }
+
+    /** 中文概览：同样只陈列 Reporter 结论，不自行裁决。 */
+    internal fun StringBuilder.appendKeySignalsZhCn(status: JSONObject) {
+        val vfs = status.optJSONObject("vfs")
+        val mp = status.optJSONObject("mediaProviderJavaHook")
+        val fuse = status.optJSONObject("fuseNativeHook")
+        if (vfs == null || mp == null || fuse == null) return
+        val appliedEpoch = fuse.optString(NativeHookLayerReporter.KEY_APPLIED_EPOCH, "")
+        val snapshotEpoch = fuse.optString(NativeHookLayerReporter.KEY_SNAPSHOT_EPOCH, "")
+        val policySynced = fuse.optBoolean(NativeHookLayerReporter.KEY_POLICY_SYNCED, false)
+        val verdict = fuse.optString(NativeHookLayerReporter.KEY_SYNC_VERDICT, "UNKNOWN")
+        val layerState = fuse.optString("state", "UNKNOWN")
+        if (appliedEpoch.isNotBlank() && snapshotEpoch.isNotBlank()) {
+            val epoch = if (appliedEpoch == snapshotEpoch) "一致" else "不一致"
+            appendLine("- FUSE：状态=$layerState，同步=$verdict，代次=$epoch，策略同步=$policySynced")
+        }
+        // 恢复熔断（attempts 语义）
+        val wakeOnly = mp.optBoolean(MediaProviderHookLayerReporter.KEY_WAKE_ONLY_MODE, false)
+        val rounds = mp.optInt(MediaProviderHookLayerReporter.KEY_DESTRUCTIVE_ROUNDS, 0)
+        if (wakeOnly || rounds > 0) {
+            appendLine("- MediaProvider 恢复：状态=${mp.optString("state", "UNKNOWN")}，" +
+                    "仅唤醒=$wakeOnly，破坏性尝试=$rounds/3")
+        }
+        // VFS 分母
+        val unmanaged = vfs.optInt(VfsProcessCensus.KEY_UNMANAGED, -1)
+        val managed = vfs.optInt(VfsProcessCensus.KEY_MANAGED, -1)
+        if (unmanaged >= 0 && managed >= 0) {
+            appendLine("- VFS 进程：已管理=$managed，未接管=$unmanaged")
+        }
+        // srStatus 截断
+        val truncated = vfs.optBoolean(VfsProcessCensus.KEY_SR_TRUNCATED, false)
+        val total = vfs.optInt(VfsProcessCensus.KEY_SR_TOTAL, -1)
+        if (total >= 0) {
+            appendLine("- srStatus：总数=$total，已截断=$truncated")
+        }
     }
 
     private fun buildSummaryZhCn(server: CleanerServer): String = buildString {
@@ -193,7 +355,17 @@ object DiagnosticArchive {
         appendLine("- status/native_hook_status_pretty.json：MediaProvider/FUSE Hook 详情。")
         appendLine("- databus/health.json：队列、快照和权限健康状态。")
         appendLine("- logs/logcat_material_cleaner_filtered.txt：聚焦运行日志。")
-        appendLine("- commands/media_provider_maps.txt 与 commands/media_provider_mountinfo.txt：native 加载与挂载状态证据。")
+        appendLine("  ⚠️ logs/logcat_* 两份捕获的 `-t` 计的是**原始行数**（本机 ~700–1500 行/s），")
+        appendLine("  即便上限已提到 $LOGCAT_TAIL_LINES 行，实际也只覆盖最近 20–40 秒。")
+        appendLine("- commands/media_provider_maps.txt 与 commands/media_provider_mountinfo.txt：MediaProvider 进程状态。")
+        appendLine("- ⚠️ 本归档**不是**完整日志：logs/auto/*.log 每份只保留**尾部**（见 manifest.txt 的")
+        appendLine("  'truncation=' 行），且 logcat 本身会被 ColorOS LOG_FLOWCTRL 按进程限额丢弃。")
+        appendLine("  「归档里没有」≠「没发生」。另：EMBEDDED 模式（EMBEDDED_GOT_PATCH）下 native 库是从")
+        appendLine("  APK/APEX 包内加载的，/proc/<pid>/maps 里不会有 libinline/libfuse_jni 条目 ——")
+        appendLine("  加载证据要看日志里的 'nativeloader: Load ...' 行。")
+        appendLine("- `E Parcel`（每批条目最多的 E tag）的归因方式：**不要再找调用点**，改算")
+        appendLine("  `E Parcel 条数 ÷ inboundHookCallbacks`（status/orchestrated_status.json 的 dataBus 段）。")
+        appendLine("  比值跨会话稳定 ⇒ 每次 binder 事务的固定框架开销，与业务无关；分子恒定不随它变 ⇒ 与我们无关。")
         appendLine()
 
         val status = runCatching { JSONObject(server.layerOrchestrator.collectStatusJson()) }
@@ -215,26 +387,35 @@ object DiagnosticArchive {
         if (health != null) {
             appendLine("DataBus：")
             appendLine("- initialized=${health.initialized}, healthy=${health.healthy}, criticalSnapshotsReady=${health.criticalSnapshotsReady}")
-            appendLine("- eventQueueCounts=${health.eventQueueCounts}")
+            appendLine("- eventQueueCounts=${health.eventQueueCounts}（物理量，含已消费未清理）")
+            appendLine("- pendingEventCounts=${health.pendingEventCounts}（待处理，唯一告警口径）")
+            appendLine("- quarantineCounts=${health.quarantineCounts}")
+            appendLine("- cursorReadStates=${health.cursorReadStates}（UNREADABLE 队列不计入告警）")
             appendLine("- leaseCounts=${health.leaseCounts}")
             appendLine("- missingDirectories=${health.missingDirectories.size}, permissionIssues=${health.permissionIssues.size}")
             appendLine()
         }
 
-        val nativeStatus = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_NATIVE_HOOK_STATUS)
+        val nativeStatus = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS)
             ?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (nativeStatus != null) {
             appendNativeHookSummaryZhCn(nativeStatus)
             appendLine()
         }
 
-        val platformCaps = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_PLATFORM_CAPABILITIES)
+        val platformCaps = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES)
             ?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (platformCaps != null) {
             appendLine("平台能力：")
             appendLine("- sdk=${platformCaps.optInt("sdkVersionInt", 0)}, fuse=${platformCaps.optBoolean("fuseAvailable", false)}, fuseBpf=${platformCaps.optBoolean("isFuseBpfEnabled", false)}")
             appendLine("- mediaProvider=${platformCaps.optString("mediaProviderPackageName", "")}")
             appendLine("- fuseJniLoadMode=${platformCaps.optString("fuseJniLoadMode", "UNKNOWN")}, nativeHookMode=${platformCaps.optString("supportedNativeHookMode", "UNKNOWN")}")
+            appendLine()
+        }
+
+        if (status != null) {
+            appendLine("关键信号：")
+            appendKeySignalsZhCn(status)
             appendLine()
         }
 
@@ -285,7 +466,7 @@ object DiagnosticArchive {
         appendLine("- inline.state=${inline?.optString("state", "UNKNOWN") ?: "UNKNOWN"}, retryCount=${inline?.optInt("retryCount", 0) ?: 0}, disabledByPlatform=${inline?.optBoolean("disabledByPlatform", false) ?: false}")
         appendLine("- fuseLibraryLoaded=${native?.optBoolean("fuseLibraryLoaded", false) ?: false}, hookMode=${native?.optString("hookMode", "UNKNOWN") ?: "UNKNOWN"}, fuseJniLoadMode=${native?.optString("fuseJniLoadMode", "UNKNOWN") ?: "UNKNOWN"}")
         if (symbols != null) {
-            appendLine("- symbols containsMount=${symbols.optBoolean("containsMount", false)}, startsWith=${symbols.optBoolean("startsWith", false)}, isFuseBpfEnabled=${symbols.optBoolean("isFuseBpfEnabled", false)}, fuseReqUserdata=${symbols.optBoolean("fuseReqUserdata", false)}, fuseBpfInstall=${symbols.optBoolean("fuseBpfInstall", false)}")
+            appendLine("- symbols containsMount=${symbols.optBoolean("containsMount", false)}, startsWith=${symbols.optBoolean("startsWith", false)}, isFuseBpfEnabled=${symbols.optBoolean("isFuseBpfEnabled", false)}, fuseReqUserdata=${symbols.optBoolean("fuseReqUserdata", false)}, fillEntries=${symbols.optBoolean("fillEntries", false)}, install=${symbols.optBoolean("install", false)}, effective=${symbols.optBoolean("effective", false)}")
         }
         if (missingSymbols != null && missingSymbols.length() > 0) {
             appendLine("- missingSymbols=$missingSymbols")
@@ -308,7 +489,7 @@ object DiagnosticArchive {
         appendLine("- inline.state=${inline?.optString("state", "UNKNOWN") ?: "UNKNOWN"}, retryCount=${inline?.optInt("retryCount", 0) ?: 0}, disabledByPlatform=${inline?.optBoolean("disabledByPlatform", false) ?: false}")
         appendLine("- fuseLibraryLoaded=${native?.optBoolean("fuseLibraryLoaded", false) ?: false}, hookMode=${native?.optString("hookMode", "UNKNOWN") ?: "UNKNOWN"}, fuseJniLoadMode=${native?.optString("fuseJniLoadMode", "UNKNOWN") ?: "UNKNOWN"}")
         if (symbols != null) {
-            appendLine("- symbols containsMount=${symbols.optBoolean("containsMount", false)}, startsWith=${symbols.optBoolean("startsWith", false)}, isFuseBpfEnabled=${symbols.optBoolean("isFuseBpfEnabled", false)}, fuseReqUserdata=${symbols.optBoolean("fuseReqUserdata", false)}, fuseBpfInstall=${symbols.optBoolean("fuseBpfInstall", false)}")
+            appendLine("- symbols containsMount=${symbols.optBoolean("containsMount", false)}, startsWith=${symbols.optBoolean("startsWith", false)}, isFuseBpfEnabled=${symbols.optBoolean("isFuseBpfEnabled", false)}, fuseReqUserdata=${symbols.optBoolean("fuseReqUserdata", false)}, fillEntries=${symbols.optBoolean("fillEntries", false)}, install=${symbols.optBoolean("install", false)}, effective=${symbols.optBoolean("effective", false)}")
         }
         if (missingSymbols != null && missingSymbols.length() > 0) {
             appendLine("- missingSymbols=$missingSymbols")
@@ -323,21 +504,53 @@ object DiagnosticArchive {
         runCatching {
             val status = server.layerOrchestrator.collectStatusJson()
             addText(zip, "status/orchestrated_status.json", status)
-            DataBus.writeSnapshot(DataBus.SNAPSHOT_ORCHESTRATED_STATUS, status)
+            DataBus.writeSnapshot(DataBusProtocol.SNAPSHOT_ORCHESTRATED_STATUS, status)
         }.onFailure {
             addText(zip, "status/orchestrated_status_error.txt", it.stackTraceToString())
         }
         runCatching {
             addText(zip, "status/server_exception.txt", server.cleanerService.serverException.toString())
         }
-        addSnapshotIfExists(zip, DataBus.SNAPSHOT_NATIVE_HOOK_STATUS,
+        addSnapshotIfExists(zip, DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS,
             "status/native_hook_status_pretty.json")
         addNativeHookSectionIfExists(zip, "fuseJavaGate",
             "status/fuse_java_gate_status.json")
-        addSnapshotIfExists(zip, DataBus.SNAPSHOT_PLATFORM_CAPABILITIES,
+        addSnapshotIfExists(zip, DataBusProtocol.SNAPSHOT_PLATFORM_CAPABILITIES,
             "status/platform_capabilities.json")
-        addSnapshotIfExists(zip, DataBus.SNAPSHOT_CONFIGURED_MOUNT_POINTS,
+        addSnapshotIfExists(zip, DataBusProtocol.SNAPSHOT_CONFIGURED_MOUNT_POINTS,
             "status/configured_mount_points.json")
+    }
+
+    /**
+     * 采集「文件系统 / 挂载」事实。
+     *
+     * 动机见 [FilesystemProbe]：历史归档的挂载采集全部带 grep 过滤
+     * （`mount | grep -E '/storage|/mnt/runtime|/Android/data|fuse'`），
+     * `/data/local/tmp` 从未出现在任何一条输出里，导致「DataBus 根所在文件系统类型」
+     * 只能靠 adb 才能确认。这里由模块自己把结论写进归档，并同步打一条 logcat，
+     * 使该事实**离线可自证**。
+     *
+     * 必须排在 [addLogcat] 之前：这样本条 logcat 会落在**本次**归档的
+     * `logs/` 分区内，归档自带证据闭环。
+     */
+    private fun addFilesystem(zip: ZipOutputStream) {
+        val root = FilesystemProbe.DATA_BUS_ROOT
+        val paths = listOf(
+            "/", "/data", "/data/local", root, DataBus.BUS_ROOT,
+            OUTPUT_DIR, AUTO_LOG_DIR, "/storage/emulated/0",
+        )
+        runCatching {
+            addText(
+                zip,
+                "status/filesystem.txt",
+                FilesystemProbe.report(paths, crossCheckPaths = listOf("/data", root)),
+            )
+        }.onFailure {
+            addText(zip, "status/filesystem_error.txt", it.stackTraceToString())
+        }
+        runCatching {
+            FilesystemProbe.logStartupSummary()
+        }
     }
 
     /**
@@ -369,36 +582,125 @@ object DiagnosticArchive {
         }
     }
 
+    /**
+     * 导出 MediaProvider（LSPosed 模块）进程的结构化错误流水。
+     *
+     * 与 [addErrorJournal] 的区别只是**来源进程**：后者是 server 进程自产的
+     * `ServerErrorJournal`，前者是模块进程自产的 `HookErrorJournal`，经
+     * `native_hook_status.json` 的 `hookErrors` 段跨进程搬运到此处。
+     *
+     * 为什么单独成文件而不是并入 `errors/journal.jsonl`：两个进程的错误码域不同，
+     * 混在一个文件里会让「这条错误出自哪个进程」需要二次推断。
+     *
+     * 空流水也写一个 0 字节条目：让「模块从未报错」与「模块根本没在跑」在包结构上
+     * 可区分（后者 `native_hook_status.json` 本身就缺失）。
+     */
+    private fun addHookErrorJournal(zip: ZipOutputStream) {
+        runCatching {
+            val json = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS)
+            if (json == null) {
+                addText(zip, "errors/hook_errors.jsonl", "")
+                return
+            }
+            val hookErrors = runCatching { JSONObject(json).optJSONObject("hookErrors") }
+                .getOrNull()
+            val entries = hookErrors?.optJSONArray("entries")
+            if (entries == null || entries.length() == 0) {
+                addText(zip, "errors/hook_errors.jsonl", "")
+                return
+            }
+            val lines = (0 until entries.length()).joinToString(separator = "\n") { i ->
+                entries.getJSONObject(i).toString()
+            }
+            addText(zip, "errors/hook_errors.jsonl", lines)
+            addText(
+                zip,
+                "errors/hook_errors_summary.txt",
+                buildString {
+                    appendLine("source=MediaProvider(LSPosed module) via native_hook_status.json")
+                    appendLine("totalRecorded=" + hookErrors.optLong("totalRecorded", 0L))
+                    appendLine("slotCount=" + hookErrors.optInt("slotCount", 0))
+                    appendLine("exportLimit=" + hookErrors.optInt("exportLimit", 0))
+                    appendLine("exported=" + entries.length())
+                    appendLine()
+                    appendLine("severity: W=warn E=error (as originally recorded)")
+                    appendLine("count: occurrences of this exact (code, severity, subject, detail)")
+                    appendLine("firstAtElapsed/lastAtElapsed: bounds of the observed span")
+                    appendLine("atElapsed: SystemClock.elapsedRealtime of the MediaProvider process")
+                },
+            )
+        }.onFailure {
+            addText(zip, "errors/hook_errors_error.txt", it.stackTraceToString())
+        }
+    }
+
     private fun addDataBus(zip: ZipOutputStream) {
         val initialized = DataBus.ensureInitialized()
         addText(zip, "databus/initialized.txt", initialized.toString())
+        val busRoot = File(DataBus.BUS_ROOT)
         runCatching {
-            addText(zip, "databus/health.json", healthToJson(DataBus.checkHealth(repair = true)).toString(2))
+            // P1 诊断质量：归档侧补齐隔离/计数/总账，不改 HealthReport 协议
+            val healthJson = healthToJson(DataBus.checkHealth(repair = true))
+            val q1 = File(busRoot, "events/${DataBusProtocol.EVENT_FILESYSTEM}.quarantine")
+            val q2 = File(busRoot, "events/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.quarantine")
+            val a1 = File(busRoot, "cursors/${DataBusProtocol.EVENT_FILESYSTEM}.attempts")
+            val a2 = File(busRoot, "cursors/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.attempts")
+            val recovery = File(busRoot, "cursors/media_provider_recovery.json")
+            healthJson.put("quarantineCounts", JSONObject().apply {
+                put("filesystem", q1.listFiles()?.count { it.isFile() && it.name.endsWith(".json") } ?: 0)
+                put("redirectNotice", q2.listFiles()?.count { it.isFile() && it.name.endsWith(".json") } ?: 0)
+            })
+            healthJson.put("attemptCounts", JSONObject().apply {
+                put("filesystem", a1.listFiles()?.count { it.isFile() } ?: 0)
+                put("redirectNotice", a2.listFiles()?.count { it.isFile() } ?: 0)
+            })
+            healthJson.put("recoveryStateExists", recovery.exists())
+            addText(zip, "databus/health.json", healthJson.toString(2))
         }.onFailure {
             addText(zip, "databus/health_error.txt", it.stackTraceToString())
         }
 
-        val busRoot = File(DataBus.BUS_ROOT)
         addDirectoryFiles(zip, File(busRoot, "snapshots"), "databus/snapshots", Int.MAX_VALUE)
         addDirectoryFiles(zip, File(busRoot, "signals"), "databus/signals", Int.MAX_VALUE)
         addDirectoryFiles(zip, File(busRoot, "cursors"), "databus/cursors", Int.MAX_VALUE)
-        addDirectoryFiles(zip, File(busRoot, "events/${DataBus.EVENT_FILESYSTEM}"),
-            "databus/events/${DataBus.EVENT_FILESYSTEM}", MAX_EVENT_FILES)
-        addDirectoryFiles(zip, File(busRoot, "events/${DataBus.EVENT_REDIRECT_NOTICE}"),
-            "databus/events/${DataBus.EVENT_REDIRECT_NOTICE}", MAX_EVENT_FILES)
+        addDirectoryFiles(zip, File(busRoot, "events/${DataBusProtocol.EVENT_FILESYSTEM}"),
+            "databus/events/${DataBusProtocol.EVENT_FILESYSTEM}", MAX_EVENT_FILES)
+        addDirectoryFiles(zip, File(busRoot, "events/${DataBusProtocol.EVENT_REDIRECT_NOTICE}"),
+            "databus/events/${DataBusProtocol.EVENT_REDIRECT_NOTICE}", MAX_EVENT_FILES)
         addDirectoryFiles(zip, File(busRoot, "events/consumed"),
             "databus/events/consumed", MAX_EVENT_FILES)
-        addDirectoryFiles(zip, File(busRoot, "leases/${DataBus.LEASE_QUERY_SESSIONS}"),
-            "databus/leases/${DataBus.LEASE_QUERY_SESSIONS}", MAX_EVENT_FILES)
+        addDirectoryFiles(zip, File(busRoot, "leases/${DataBusProtocol.LEASE_QUERY_SESSIONS}"),
+            "databus/leases/${DataBusProtocol.LEASE_QUERY_SESSIONS}", MAX_EVENT_FILES)
+        // P0-1：毒丸隔离与重试计数目录（Fix 1′/P0-B 产物，world-readable，只读导出）
+        addDirectoryFiles(zip,
+            File(busRoot, "events/${DataBusProtocol.EVENT_FILESYSTEM}.quarantine"),
+            "databus/events/${DataBusProtocol.EVENT_FILESYSTEM}.quarantine", MAX_EVENT_FILES)
+        addDirectoryFiles(zip,
+            File(busRoot, "events/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.quarantine"),
+            "databus/events/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.quarantine", MAX_EVENT_FILES)
+        addDirectoryFiles(zip,
+            File(busRoot, "cursors/${DataBusProtocol.EVENT_FILESYSTEM}.attempts"),
+            "databus/cursors/${DataBusProtocol.EVENT_FILESYSTEM}.attempts", MAX_EVENT_FILES)
+        addDirectoryFiles(zip,
+            File(busRoot, "cursors/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.attempts"),
+            "databus/cursors/${DataBusProtocol.EVENT_REDIRECT_NOTICE}.attempts", MAX_EVENT_FILES)
     }
 
-    private fun healthToJson(health: DataBus.HealthReport): JSONObject = JSONObject().apply {
+    private fun healthToJson(health: DataBusProtocol.HealthReport): JSONObject = JSONObject().apply {
         put("initialized", health.initialized)
         put("healthy", health.healthy)
         put("criticalSnapshotsReady", health.criticalSnapshotsReady)
         put("missingDirectories", JSONArray(health.missingDirectories))
         put("permissionIssues", JSONArray(health.permissionIssues))
+        // 两个字段并列：eventQueueCounts 是**累计写入量**（目录文件数，只增不减），
+        // eventQueuePendingCounts 才是**真实积压**（文件名 > 游标）。历史上把前者读成
+        // 积压导致过假告警，这里显式并列以消除歧义。
         put("eventQueueCounts", JSONObject(health.eventQueueCounts))
+        put("pendingEventCounts", JSONObject(health.pendingEventCounts))
+        put("quarantineCounts", JSONObject(health.quarantineCounts))
+        put("cursorReadStates", JSONObject(
+            health.cursorReadStates.mapValues { it.value.name },
+        ))
         put("leaseCounts", JSONObject(health.leaseCounts))
         put("snapshots", JSONArray().apply {
             for (snapshot in health.snapshots) {
@@ -413,15 +715,19 @@ object DiagnosticArchive {
     }
 
     private fun addLogcat(zip: ZipOutputStream) {
+        // ⚠️ `-t N` 限的是**原始行数**，不是过滤后的行数：本机 logd 输出 ~700–1500 行/s
+        // （实测 `-t 5000` 只得 6.8 s、`-t 3000` + TAG 过滤只得 2 行），
+        // 旧值 5000/3000 等价于"只覆盖最后几秒"，会让读者把"归档里没有"误读成"没发生"。
+        // 归档是用户主动触发的一次性动作，放大到 30000 才与"聚焦运行日志"的承诺相称。
         addCommand(
             zip,
             "logs/logcat_threadtime_recent.txt",
-            "/system/bin/logcat -d -v threadtime -b main,system,crash -t 5000",
+            "/system/bin/logcat -d -v threadtime -b main,system,crash -t $LOGCAT_TAIL_LINES",
         )
         addCommand(
             zip,
             "logs/logcat_material_cleaner_filtered.txt",
-            "/system/bin/logcat -d -v threadtime -b main,system,crash -t 3000 " +
+            "/system/bin/logcat -d -v threadtime -b main,system,crash -t $LOGCAT_TAIL_LINES " +
                     "MC_BOOT:* MC_EVENT:* MC_STATE:* MC_DIAG:* MC_NATIVE:* " +
                     "MC_REDIRECT:* DataBus:* DiagnosticArchive:* CleanerService:* " +
                     "LayerOrchestrator:* SnapshotPublisher:* HookRecoveryCoordinator:* " +
@@ -436,13 +742,14 @@ object DiagnosticArchive {
 
     private fun addAutoLogs(zip: ZipOutputStream) {
         val dir = File(AUTO_LOG_DIR)
-        val files = dir.listFiles()
+        val all = dir.listFiles()
             ?.filter { isRegularFileNoFollow(it) && it.name.endsWith(".log") }
             ?.sortedByDescending { it.lastModified() }
-            ?.take(MAX_AUTO_LOG_FILES)
             ?: emptyList()
+        val files = all.take(MAX_AUTO_LOG_FILES)
         addText(zip, "logs/auto_logging_manifest.txt", buildString {
             appendLine("dir=$AUTO_LOG_DIR")
+            appendLine("total=${all.size}")
             appendLine("included=${files.size}")
             for (file in files) {
                 appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}")
@@ -454,13 +761,39 @@ object DiagnosticArchive {
     }
 
     private fun addCommandOutputs(zip: ZipOutputStream) {
+        val rootDir = FilesystemProbe.DATA_BUS_ROOT
         val commands = linkedMapOf(
             "commands/id.txt" to "id; getenforce 2>/dev/null; getprop ro.build.version.sdk; getprop ro.product.model",
             "commands/processes_cleaner.txt" to "ps -A | grep -E 'cleaner|material|gm.cleaner' || true",
             "commands/processes_mediaprovider.txt" to "ps -A | grep -E 'media.provider|providers.media|MediaProvider' || true",
-            "commands/media_provider_maps.txt" to "for p in ${'$'}(pidof com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media 2>/dev/null); do echo === pid=${'$'}p ===; grep -E 'MediaProvider|libfuse_jni|libinline|com.android.mediaprovider' /proc/${'$'}p/maps 2>&1; done",
+            // ⚠️ 本机 hookMode=EMBEDDED_GOT_PATCH：libinline.so 从**本模块自己的 base.apk** 内加载，
+            // libfuse_jni.so 从 **APEX 的 MediaProvider.apk** 内加载。旧模式
+            // 'MediaProvider|libfuse_jni|libinline|com.android.mediaprovider' 在这两种情形下
+            // **必然 0 命中**（maps 里只有 <apk 路径>+偏移），于是这个证据文件只剩个空壳。
+            // 这里补上 me.gm.cleaner（本模块 APK 路径）—— 它才是"我们真的把库注进去了"的直接证据。
+            "commands/media_provider_maps.txt" to "for p in ${'$'}(pidof com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media 2>/dev/null); do echo === pid=${'$'}p ===; grep -E 'MediaProvider|libfuse_jni|libinline|com\\.android\\.mediaprovider|me\\.gm\\.cleaner' /proc/${'$'}p/maps 2>&1; done",
             "commands/media_provider_mountinfo.txt" to "for p in ${'$'}(pidof com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media 2>/dev/null); do echo === pid=${'$'}p ===; grep -E '/storage|/mnt/runtime|/Android/data|fuse' /proc/${'$'}p/mountinfo 2>&1 | head -200; done",
             "commands/mount_storage.txt" to "mount | grep -E '/storage|/mnt/runtime|/Android/data|fuse' || true",
+            // 以下是**未过滤**的原始挂载证据：上面那条 grep 把 /data/local/tmp 过滤掉了，
+            // 导致 DataBus 根所在文件系统类型无法离线判定。这里补齐原始数据。
+            "commands/proc_mounts.txt" to "cat /proc/mounts 2>&1",
+            "commands/proc_self_mountinfo.txt" to "cat /proc/self/mountinfo 2>&1",
+            // ⚠️ 本机 df 的 "Mounted on" 列**不是真实挂载点**，不能当证据用：
+            // toybox 的 find_mount_point() 按 major:minor 扫 /proc/mounts(mountinfo)，
+            // 且**后者覆盖前者**（last match wins）。本机 254:41(dm-41) 共 13 条，
+            // 最后一条是 /data/app/... 上的 bind mount ⇒ 所有 dm-41 路径（含 /data）
+            // 都被标成它。故这里保留原始 df 输出（用于看容量），同时追加一行显式说明，
+            // 避免读者把该列误读为挂载事实。权威结论在 status/filesystem.txt
+            // （/proc/mounts 最长前缀匹配 + statvfs f_fsid 三态比对）。
+            "commands/df_databus.txt" to "df -k /data /data/local/tmp $rootDir ${DataBus.BUS_ROOT} 2>&1; " +
+                "echo; " +
+                "echo 'NOTE: the \"Mounted on\" column of df is NOT a real mount point on this device.'; " +
+                "echo 'toybox find_mount_point() scans /proc/mounts matching major:minor with LAST-match-wins,'; " +
+                "echo 'and the last 254:41 entry here is a bind mount at /data/app/..., so every dm-41 path'; " +
+                "echo '(including /data) is labelled with it. Use this file only for capacity numbers.'; " +
+                "echo 'Authoritative per-path mount point/fstype: status/filesystem.txt (longest-prefix match'; " +
+                "echo 'on /proc/mounts plus statvfs f_fsid), backed by the stat -f block in stat_f_databus.txt.'",
+            "commands/stat_f_databus.txt" to "stat -f /data /data/local/tmp $rootDir 2>&1; echo '--- stat ---'; stat $rootDir ${DataBus.BUS_ROOT} 2>&1; echo '--- ls -d ---'; ls -ld /data /data/local /data/local/tmp $rootDir 2>&1",
             "commands/databus_tree.txt" to "ls -laR ${DataBus.BUS_ROOT} 2>&1 | head -400",
             "commands/auto_logs_tree.txt" to "ls -laR $AUTO_LOG_DIR 2>&1 | head -200",
         )
@@ -475,14 +808,16 @@ object DiagnosticArchive {
         entryPrefix: String,
         maxFiles: Int,
     ) {
-        val files = dir.listFiles()
+        val all = dir.listFiles()
             ?.filter { isRegularFileNoFollow(it) }
             ?.sortedWith(compareByDescending<File> { it.lastModified() }.thenBy { it.name })
-            ?.take(maxFiles)
             ?: emptyList()
+        val files = all.take(maxFiles)
         addText(zip, "$entryPrefix/manifest.txt", buildString {
             appendLine("path=${dir.path}")
             appendLine("exists=${dir.exists()}")
+            // 可审计：记录目录总数，排障者可判断证据是否完整
+            appendLine("total=${all.size}")
             appendLine("included=${files.size}")
             for (file in files) {
                 appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}")
@@ -494,7 +829,7 @@ object DiagnosticArchive {
     }
 
     private fun addCommand(zip: ZipOutputStream, entryName: String, command: String) {
-        val result = runCommand(command)
+        val result = DiagnosticCommandRunner.runCommand(command)
         addText(zip, entryName, buildString {
             appendLine("$ $command")
             appendLine("exitCode=${result.exitCode}")
@@ -518,58 +853,11 @@ object DiagnosticArchive {
         sectionName: String,
         entryName: String,
     ) {
-        val content = DataBus.readSnapshotSafe(DataBus.SNAPSHOT_NATIVE_HOOK_STATUS) ?: return
+        val content = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS) ?: return
         val section = runCatching {
             JSONObject(content).optJSONObject(sectionName)
         }.getOrNull() ?: return
         addText(zip, entryName, section.toString(2))
-    }
-
-    private fun runCommand(command: String): CommandResult {
-        var process: Process? = null
-        return try {
-            process = ProcessBuilder("/system/bin/sh", "-c", command)
-                .redirectErrorStream(true)
-                .start()
-            val output = ByteArrayOutputStream()
-            var truncated = false
-            val reader = Thread {
-                try {
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    val input = process.inputStream
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        if (output.size() + read <= MAX_COMMAND_BYTES) {
-                            output.write(buffer, 0, read)
-                        } else {
-                            val allowed = MAX_COMMAND_BYTES - output.size()
-                            if (allowed > 0) output.write(buffer, 0, allowed)
-                            truncated = true
-                            process.destroy()
-                            break
-                        }
-                    }
-                } catch (_: Exception) {
-                }
-            }
-            reader.start()
-            val finished = process.waitFor(15, TimeUnit.SECONDS)
-            if (!finished) {
-                process.destroyForcibly()
-            }
-            reader.join(1000)
-            CommandResult(
-                exitCode = if (finished) process.exitValue() else -1,
-                timedOut = !finished,
-                truncated = truncated,
-                output = output.toString(StandardCharsets.UTF_8.name()),
-            )
-        } catch (e: Exception) {
-            CommandResult(-1, timedOut = false, truncated = false, output = e.stackTraceToString())
-        } finally {
-            process?.destroy()
-        }
     }
 
     private fun addFileTail(zip: ZipOutputStream, file: File, entryName: String, maxBytes: Int) {
@@ -618,17 +906,65 @@ object DiagnosticArchive {
         zip.closeEntry()
     }
 
-    private fun redact(content: String): String {
+    /**
+     * 保 identity 的脱敏。
+     *
+     * **旧实现的真缺陷**：把所有 ≥24 位 hex 串一律换成同一个字面量 `<hex-id>`，
+     * 于是 `native_hook_status.json` 里
+     * `redirectConfiguredRevision` / `redirectPublishedRevision` / `redirectAppliedRevision`
+     * **三值全等** —— 归档再也无法回答「applied 是否 == configured」，而那正是该文件
+     * 存在的意义（一次归档实测出现 37 处 `<hex-id>`）。
+     *
+     * 现在改成**别名**：同一 token 必得同一别名，不同 token 必得不同别名，因此
+     * - 包内跨文件仍可比对（`redirect_policy.json` 的 revision ↔ native 段的 revision）；
+     * - **跨归档仍可比对**（别名只由 token 决定，盐是常量，不含每次运行的随机量）；
+     * - 仍不泄露原值（别名 = SHA-256(盐 + token) 的前 8 位 hex）；
+     * - `grep '<hex-id'` 依旧命中（前缀刻意保留）。
+     *
+     * `/data/app/…` 同理不再整段塌成 `/data/app/<redacted>`：那会把
+     * 「本模块自己的 base.apk 被加载」这类证据一起抹掉（实测因此无法从归档证明
+     * `libinline.so` 的加载来源）。现在整段换成同一个别名，至少在包内可自证同源。
+     *
+     * ⚠️ `app/src/main/java/me/gm/cleaner/client/ui/DiagnosticArchiveUtils.kt` 里有一份
+     * **复制品**（app 只以 `runtimeOnly` 依赖本模块，编译期看不到这里）。**两处必须同步改**：
+     * 盐、模式、语义任一不同，server 归档与 app fallback 归档的别名就对不上。
+     * 待办：把这段抽成共享类，消除复制。
+     */
+    internal fun redact(content: String): String {
         var redacted = content
         val fingerprint = Build.FINGERPRINT
-        if (fingerprint.isNotBlank()) {
+        // 用 isNullOrBlank：单元测试跑在 JVM 上，Build.FINGERPRINT 是 null（stub android.jar）。
+        if (!fingerprint.isNullOrBlank()) {
             redacted = redacted.replace(fingerprint, "<build-fingerprint>")
         }
         redacted = redacted
-            .replace(Regex("/data/app/[^\\s\\n\\r]+"), "/data/app/<redacted>")
-            .replace(Regex("/mnt/expand/[0-9A-Fa-f-]+"), "/mnt/expand/<volume>")
-            .replace(Regex("(?i)\\b[0-9a-f]{24,}\\b"), "<hex-id>")
+            // ⚠️ 模式**包含**前缀路径，所以替换串必须把前缀写回去；
+            // 只写 "<id:…>" 会把整个 "/data/app/" 也吃掉（已被单测抓到过一次）。
+            .replace(APP_DIR_REGEX) { match -> "/data/app/<id:" + alias(match.value) + ">" }
+            .replace(EXPAND_VOLUME_REGEX) { match -> "/mnt/expand/<id:" + alias(match.value) + ">" }
+            .replace(HEX_ID_REGEX) { match -> "<hex-id:" + alias(match.value) + ">" }
         return redacted
+    }
+
+    /**
+     * 脱敏别名：SHA-256(固定盐 + token) 的前 4 字节 hex。
+     *
+     * 盐是**编译期常量**而非每次运行的随机值 —— 这是「跨归档可比」的前提：
+     * 若每次导出换个盐，两次归档里的同一 revision 就会得到不同别名，
+     * 等于把「配置变了吗」这个问题也一起变成不可答。
+     *
+     * 取 32 bit 是因为单个归档里的 token 只有几十个，碰撞概率可忽略。
+     */
+    private fun alias(token: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest((ALIAS_SALT + token).toByteArray(Charsets.UTF_8))
+        val sb = StringBuilder(8)
+        for (i in 0 until 4) {
+            val b = digest[i].toInt() and 0xFF
+            sb.append(HEX_DIGITS[b ushr 4])
+            sb.append(HEX_DIGITS[b and 0xF])
+        }
+        return sb.toString()
     }
 
     private fun safeEntryName(name: String): String =
@@ -649,10 +985,6 @@ object DiagnosticArchive {
         }
     }
 
-    private data class CommandResult(
-        val exitCode: Int,
-        val timedOut: Boolean,
-        val truncated: Boolean,
-        val output: String,
-    )
+    // 命令执行实现见 DiagnosticCommandRunner（G2 粒度抽离）；
+    // 历史 CommandResult 已迁移为 DiagnosticCommandRunner.CommandResult。
 }

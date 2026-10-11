@@ -2,16 +2,21 @@ package me.gm.cleaner.runtime.server
 
 import android.app.ActivityManager.RunningAppProcessInfo
 import android.os.storage.VolumeInfo
-import android.util.Log
 import api.SystemService
 import hidden.HiddenApiBridge.UserHandle_isIsolated
 import me.gm.cleaner.core.common.RuntimeFileUtils
 import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.model.PackageStatus
-import me.gm.cleaner.runtime.server.observer.BaseProcessObserver
-import me.gm.cleaner.runtime.server.observer.ObserverManager
-import me.gm.cleaner.runtime.server.observer.PackageInfoMapper
-import me.gm.cleaner.runtime.server.observer.StorageEventListenerDelegate
+import me.gm.cleaner.runtime.server.process.BaseProcessObserver
+import me.gm.cleaner.runtime.server.process.PackageInfoMapper
+import me.gm.cleaner.runtime.server.vfs.CensusEntry
+import me.gm.cleaner.runtime.server.vfs.CensusIsolationPolicy
+import me.gm.cleaner.runtime.server.vfs.CensusVerdict
+import me.gm.cleaner.runtime.server.vfs.PidMountClassifier
+import me.gm.cleaner.runtime.server.vfs.VfsProcessCensus
+import me.gm.cleaner.runtime.server.vfs.VfsProcessCensusBuilder
+import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
+import me.gm.cleaner.runtime.server.storage.StorageEventListenerDelegate
 import me.gm.cleaner.runtime.server.orchestrator.LayerId
 import me.gm.cleaner.runtime.server.orchestrator.LayerReport
 import me.gm.cleaner.runtime.server.orchestrator.LayerState
@@ -27,8 +32,15 @@ import java.util.TreeMap
 class VfsLayerController {
 
     private companion object {
-        const val TAG = "VfsLayerController"
+        /** 普查节流：collectReport 每 2s 心跳复用缓存，避免诊断成为负载源。 */
+        private const val CENSUS_THROTTLE_MS = 30_000L
     }
+
+    @Volatile
+    private var lastCensusAt: Long = 0L
+
+    @Volatile
+    private var cachedCensus: VfsProcessCensus? = null
 
     fun isFuseBpfEnabled(): Boolean {
         val observer = ObserverManager.getObserver(BaseProcessObserver::class.java)
@@ -83,25 +95,28 @@ class VfsLayerController {
     fun getPackageStatus(packageName: String, flags: Int): PackageStatus {
         val observer = ObserverManager.getObserver(BaseProcessObserver::class.java)
             ?: return PackageStatus()
-        val startUpAwarePids = observer.getStartUpAwarePids(packageName)
-        val processes = selectProcesses(flags, startUpAwarePids)
+        val processes = selectProcesses(flags, observer.getStartUpAwarePids(packageName))
         val status = PackageStatus()
         val pids = mutableListOf<Int>()
         val pidFlags = mutableListOf<Int>()
         val userIds = mutableListOf<Int>()
+        val startUpAwarePids = observer.getStartUpAwarePids(packageName)
         val mountFailedPids = observer.getMountFailedPids()
         val mkdir = observer.getMountedPackages().contains(packageName)
-        // 只有已配置重定向的包才走 uid 权威判定。非 sr 包（详情页也可能来查）
-        // 保持原 pkgList 语义，避免把"不在 sr 配置里"误判成"没有进程"。
-        val uidMappingReady = VfsRuntimeConfigStore.getStorageRedirectPackages()
+        // 只有已配置重定向的包才走 uid 权威判定，非重定向包保持 pkgList 语义，
+        // 避免把不在重定向配置中的查询误判成没有进程。
+        val uidMappingReady = VfsRuntimePolicy.getStorageRedirectPackages()
             .contains(packageName) && PackageInfoMapper.isMappingReady()
 
         processes
             .asSequence()
-            .filter { !UserHandle_isIsolated(RuntimeFileUtils.read_uid(it.pid)) }
             .sortedBy { it.pid }
             .forEach { procInfo ->
                 if (!isProcessOfPackage(procInfo, packageName, uidMappingReady)) return@forEach
+                // 隔离判定刻意放在归属判定**之后**：read_uid 要打开 /proc/<pid>/cgroup，
+                // 对全部进程先做一次（实测 ~120 个 pid）纯属浪费；而归属不到重定向包的
+                // 隔离进程本来就会被上面这行过滤掉，延后判定不改变任何计数。
+                if (isExcludedForCensus(procInfo.pid)) return@forEach
                 val userId = procInfo.uid.toUserId()
                 pids.add(procInfo.pid)
                 pidFlags.add(buildPidFlag(
@@ -122,77 +137,81 @@ class VfsLayerController {
     }
 
     fun getSrPackagesStatus(flags: Int): Map<String, PackageStatus> {
-        val observer = ObserverManager.getObserver(BaseProcessObserver::class.java)
-            ?: return emptyMap()
-        val allStartUpAwarePids = observer.getAllStartUpAwarePids()
-        val mountFailedPids = observer.getMountFailedPids()
-        val mountedPackages = observer.getMountedPackages()
-        val srPackages = VfsRuntimeConfigStore.getStorageRedirectPackages()
-        val processes = selectProcesses(flags, allStartUpAwarePids)
-        // 包级 pidRecords。getAllStartUpAwarePids() 只回答"这个 pid 被**任意**包接管过"，
-        // 回答不了"是不是被**本包**接管"；那正是区分"未接管"和"挂了"的关键，
-        // 所以按包各取一份（N = 已配置包数，通常个位数）。
-        val recordedPidsByPackage = srPackages.associateWith { observer.getStartUpAwarePids(it) }
-        val uidMappingReady = PackageInfoMapper.isMappingReady()
-        val statuses = TreeMap<String, MutablePackageStatus>()
-
-        processes
-            .asSequence()
-            .filter { !UserHandle_isIsolated(RuntimeFileUtils.read_uid(it.pid)) }
-            .sortedBy { it.pid }
-            .forEach { procInfo ->
-                val packageName =
-                    resolveSrPackageName(procInfo, srPackages, uidMappingReady) ?: return@forEach
-                val userId = procInfo.uid.toUserId()
-                val status = statuses.getOrPut(packageName) { MutablePackageStatus() }
-                status.pids.add(procInfo.pid)
-                status.pidFlags.add(buildPidFlag(
-                    procInfo.pid,
-                    packageName,
-                    userId,
-                    recordedPidsByPackage[packageName] ?: emptySet(),
-                    mountFailedPids,
-                    mountedPackages.contains(packageName),
-                ))
-                status.userIds.add(userId)
-            }
-
-        return statuses.mapValues { (_, value) -> value.toPackageStatus() }
+        return enumerateSrProcesses(flags).statuses.mapValues { (_, value) -> value.toPackageStatus() }
     }
 
     /**
-     * 把进程归属到**唯一**一个重定向包；null 表示它不属于任何重定向包。
-     *
-     * 为什么不能只用 `procInfo.pkgList`：pkgList 回答的是"这个进程里有哪些包"，
-     * 而托管了他人组件的宿主进程（OEM 推送通道那类）会把别人的包名也列进来。
-     * 那种进程永远不会是重定向对象，`check_mounts` 必然一个 target 都命不中，
-     * 一旦并入本包就会被判成"异常"，且随宿主进程生灭而抖动。
-     * 改用 uid（sharedUserId 场景下退化为进程名）→ 包名的权威映射即可天然剔除。
+     * P1-C 普查（节流 30s）：与 [collectReport] 复用同一次采样，产出分母与
+     * 有界 srStatus 明细。诊断投影，不驱动接管行为；失败只降诊断能力。
      */
-    private fun resolveSrPackageName(
-        procInfo: RunningAppProcessInfo,
-        srPackages: Set<String>,
-        uidMappingReady: Boolean,
-    ): String? {
-        if (!uidMappingReady) {
-            // 映射表未就绪：保守回退到旧的 pkgList 语义。
-            // 这里绝不能直接 return null —— 那会把**所有**进程判成非目标，
-            // 让每个包都显示"未挂载"，是比误报更糟的静默降级。
-            return procInfo.pkgList?.firstOrNull { srPackages.contains(it) }
+    fun collectCensus(now: Long): VfsProcessCensus {
+        cachedCensus?.let {
+            if (now >= lastCensusAt && now - lastCensusAt < CENSUS_THROTTLE_MS) return it
         }
-        val srPackageName = PackageInfoMapper.getSrPackageName(procInfo.uid, procInfo.processName)
-        return if (srPackageName != null && srPackages.contains(srPackageName)) srPackageName else null
+        val enumeration = enumerateSrProcesses(PackageStatus.GET_FROM_ALL_PROCESS)
+        val census = VfsProcessCensusBuilder.build(
+            sampledAt = now,
+            entries = enumeration.entries,
+            unattributedPids = enumeration.unattributedPids,
+        )
+        lastCensusAt = now
+        cachedCensus = census
+        return census
     }
 
-    private fun isProcessOfPackage(
-        procInfo: RunningAppProcessInfo,
-        packageName: String,
-        uidMappingReady: Boolean,
-    ): Boolean {
-        if (!uidMappingReady) {
-            return procInfo.pkgList?.contains(packageName) == true
-        }
-        return PackageInfoMapper.getSrPackageName(procInfo.uid, procInfo.processName) == packageName
+    private data class SrEnumeration(
+        val statuses: TreeMap<String, MutablePackageStatus>,
+        val entries: List<CensusEntry>,
+        val unattributedPids: Int,
+    )
+
+    private fun enumerateSrProcesses(flags: Int): SrEnumeration {
+        val empty = SrEnumeration(TreeMap(), emptyList(), 0)
+        val observer = ObserverManager.getObserver(BaseProcessObserver::class.java)
+            ?: return empty
+        val startUpAwarePids = observer.getAllStartUpAwarePids()
+        val mountFailedPids = observer.getMountFailedPids()
+        val mountedPackages = observer.getMountedPackages()
+        val srPackages = VfsRuntimePolicy.getStorageRedirectPackages()
+        val processes = selectProcesses(flags, startUpAwarePids)
+        // 映射就绪用 uid 权威归属，未就绪保守回退 pkgList，绝不直接返回空。
+        val uidMappingReady = PackageInfoMapper.isMappingReady()
+        val statuses = TreeMap<String, MutablePackageStatus>()
+        val entries = mutableListOf<CensusEntry>()
+        var unattributed = 0
+
+        processes
+            .asSequence()
+            .sortedBy { it.pid }
+            .forEach { procInfo ->
+                val packageName =
+                    resolveSrPackageName(procInfo, srPackages, uidMappingReady)
+                if (packageName == null) {
+                    unattributed++
+                    return@forEach
+                }
+                // 与 getPackageStatus 同口径：只对已归属到重定向包的 pid 付出
+                // /proc/<pid>/cgroup 的读取成本（实测从 ~120 次降到个位数）。
+                // 被排除的隔离进程既不进 entries 也不计入 unattributed，
+                // 与「过滤前置」时的行为完全一致。
+                if (isExcludedForCensus(procInfo.pid)) return@forEach
+                val userId = procInfo.uid.toUserId()
+                val flag = buildPidFlag(
+                    procInfo.pid,
+                    packageName,
+                    userId,
+                    startUpAwarePids,
+                    mountFailedPids,
+                    mountedPackages.contains(packageName),
+                )
+                val status = statuses.getOrPut(packageName) { MutablePackageStatus() }
+                status.pids.add(procInfo.pid)
+                status.pidFlags.add(flag)
+                status.userIds.add(userId)
+                entries.add(CensusEntry(packageName, procInfo.pid, procInfo.uid, flag))
+            }
+
+        return SrEnumeration(statuses, entries, unattributed)
     }
 
     fun collectReport(generation: Long, now: Long): LayerReport {
@@ -203,8 +222,11 @@ class VfsLayerController {
             val mountFailedPids = observer.getMountFailedPids().size
             val mountTotalAttempts = observer.getTotalMountAttempts()
             val mountFailureCount = observer.getMountFailureCount()
+            val mountGateRefusals = observer.getGateRefusalCount()
             val lastFailure = observer.getLastMountFailure()
             val lastMountErrorCode = observer.getLastMountErrorCode()
+            // 同一次普查采样复用：分母与 srStatus 明细同源，诊断失败不改行为。
+            val census = runCatching { collectCensus(now) }.getOrNull()
             val state = if (mountFailedPids > 0) {
                 LayerState.DEGRADED
             } else {
@@ -223,21 +245,16 @@ class VfsLayerController {
                 },
                 metrics = mapOf(
                     "started" to "true",
-                    "configuredPackages" to VfsRuntimeConfigStore
+                    "configuredPackages" to VfsRuntimePolicy
                         .getStorageRedirectPackages()
                         .size
                         .toString(),
                     "mountedPackages" to mountedPackages.toString(),
-                    // 逐 pid 的挂载分类现场（pkg=u<userId>:<pid>#<flag>;…）。
-                    // 存在的意义：ColorOS 按进程限流 logcat（约 300 行），
-                    // 关键证据会被吃掉；而快照文件完全免疫。
-                    // 形如 "com.x=y" 的挂载状态争议，靠它可直接定位到 pid 与 flag，
-                    // 不必再靠"读代码猜"。
-                    "srStatus" to buildSrStatusSummary(),
                     "recordedPids" to recordedPids.toString(),
                     "mountFailedPids" to mountFailedPids.toString(),
                     "mountTotalAttempts" to mountTotalAttempts.toString(),
                     "mountFailureCount" to mountFailureCount.toString(),
+                    "mountGateRefusals" to mountGateRefusals.toString(),
                     "lastMountFailureAt" to (lastFailure?.timeMillis ?: 0L).toString(),
                     "lastMountFailurePackage" to (lastFailure?.packageName ?: ""),
                     "lastMountFailurePid" to (lastFailure?.pid ?: 0).toString(),
@@ -255,7 +272,7 @@ class VfsLayerController {
                             (lastFailure?.forceStopAttempted ?: false).toString(),
                     "lastMountForceStopSucceeded" to
                             (lastFailure?.forceStopSucceeded ?: false).toString(),
-                ),
+                ) + (census?.toMetrics() ?: emptyMap()),
             )
         } else {
             LayerReport(
@@ -269,35 +286,10 @@ class VfsLayerController {
         }
     }
 
-    /**
-     * 逐 pid 的挂载分类现场，供快照指标使用。
-     *
-     * 格式：`pkg=u<userId>:<pid>#<flag-hex>,…;…`
-     *
-     * 成本与 [getSrPackagesStatus] 相同：每个 (包, pid) 一次 native `check_mounts`
-     * （读一遍 `/proc/<pid>/mountinfo`）。N = 已配置包数、M = 每包进程数，通常个位数，
-     * 相对 5 s 的快照周期可忽略。
-     */
-    private fun buildSrStatusSummary(): String {
-        val statuses = runCatching { getSrPackagesStatus(PackageStatus.GET_FROM_ALL_PROCESS) }
-            .getOrElse {
-                Log.w(TAG, "srStatus summary unavailable", it)
-                return "unavailable"
-            }
-        if (statuses.isEmpty()) return "none"
-        return statuses.entries.joinToString(";") { (packageName, status) ->
-            val pids = status.pids.indices.joinToString(",") { index ->
-                "u${status.userIds.getOrElse(index) { 0 }}:${status.pids[index]}" +
-                        "#${status.pidFlags[index].toString(16)}"
-            }
-            "$packageName=$pids"
-        }
-    }
-
     private fun switchAppDataDirOwnersAsync() {
         Thread {
             for (userId in SystemService.getUserIdsNoThrow()) {
-                for (packageName in VfsRuntimeConfigStore.getStorageRedirectPackages()) {
+                for (packageName in VfsRuntimePolicy.getStorageRedirectPackages()) {
                     val ai = SystemService.getApplicationInfoNoThrow(packageName, 0, userId)
                         ?: continue
                     RuntimeFileUtils.switch_owner(
@@ -313,6 +305,35 @@ class VfsLayerController {
         }.start()
     }
 
+    /**
+     * 把进程归属到唯一一个重定向包，空表示它不属于任何重定向包。
+     * 不能只用 pkgList：宿主进程会把他人包名也列进来，那种进程永远不是重定向对象，
+     * 一旦并入就会被判成异常且随宿主生灭抖动。改用 uid（共享 uid 场景退化为进程名）权威映射天然剔除。
+     * 映射未就绪时保守回退旧 pkgList 语义，绝不直接返回空，避免把全部进程判成非目标。
+     */
+    private fun resolveSrPackageName(
+        procInfo: RunningAppProcessInfo,
+        srPackages: Set<String>,
+        uidMappingReady: Boolean,
+    ): String? {
+        if (!uidMappingReady) {
+            return procInfo.pkgList?.firstOrNull { srPackages.contains(it) }
+        }
+        val srPackageName = PackageInfoMapper.getSrPackageName(procInfo.uid, procInfo.processName)
+        return if (srPackageName != null && srPackages.contains(srPackageName)) srPackageName else null
+    }
+
+    private fun isProcessOfPackage(
+        procInfo: RunningAppProcessInfo,
+        packageName: String,
+        uidMappingReady: Boolean,
+    ): Boolean {
+        if (!uidMappingReady) {
+            return procInfo.pkgList?.contains(packageName) == true
+        }
+        return PackageInfoMapper.getSrPackageName(procInfo.uid, procInfo.processName) == packageName
+    }
+
     private fun selectProcesses(flags: Int, startUpAwarePids: Set<Int>): List<RunningAppProcessInfo> {
         val processes = SystemService.getRunningAppProcessesNoThrow()
         return when (flags) {
@@ -323,12 +344,40 @@ class VfsLayerController {
     }
 
     /**
-     * 单 pid 的挂载状态分类。**必须覆盖所有取值组合**。
+     * 该 pid 是否应从 VFS 普查中排除（隔离进程 / uid 不可读）。
      *
-     * 旧实现缺 else 分支：`check_mounts` 成功、无负值、但命中数少于 target 数时
-     * 得到 base flag = 0（既非 MOUNTED 也非 UNKNOWN），调用侧只能靠兜底分支猜，
-     * 于是同一种状况会随该包进程数在"未挂载"与"挂载异常"之间漂移。
+     * 注意默认值：**读不到 uid 时排除，而不是放行**。
+     * 放行会让隔离进程过滤整体失效（read_uid 在 cgroup v2 下恒 -1 的真机实证）。
      */
+    private fun isExcludedForCensus(pid: Int): Boolean {
+        val uid = runCatching { RuntimeFileUtils.read_uid(pid) }.getOrDefault(-1)
+        val verdict = CensusIsolationPolicy.verdict(
+            observedUid = uid,
+            frameworkSaysIsolated = uid >= 0 && UserHandle_isIsolated(uid),
+        )
+        if (verdict == CensusVerdict.EXCLUDE_UID_UNREADABLE) {
+            UnreadableUidWarn.warn(
+                "census: unreadable uid for pid=$pid, excluding it from VFS stats",
+            )
+        }
+        return verdict != CensusVerdict.INCLUDE
+    }
+
+    /** uid 不可读的告警限频：普查每 30s 一轮，逐 pid 刷屏会淹没其他信号。 */
+    private object UnreadableUidWarn {
+        private const val INTERVAL_MS = 60_000L
+
+        @Volatile
+        private var lastAt = 0L
+
+        fun warn(message: String) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastAt < INTERVAL_MS) return
+            lastAt = now
+            android.util.Log.w("VfsLayerController", message)
+        }
+    }
+
     private fun buildPidFlag(
         pid: Int,
         packageName: String,
@@ -337,47 +386,48 @@ class VfsLayerController {
         mountFailedPids: Set<Int>,
         mkdir: Boolean,
     ): Int {
-        val targets = VfsRuntimeConfigStore.getMountTargets(packageName, userId)
-        val mountedIndices = RuntimeFileUtils.check_mounts(pid, targets.toTypedArray())
-        var pidFlag = 0
-        when {
-            mountedIndices == null ->
-                pidFlag = pidFlag or PackageStatus.PID_FLAG_UNKNOWN
-
-            mountedIndices.any { it < 0 } -> {
-                // 挂载点被 //deleted 或被子挂载前缀覆盖：都算"没挂上"，但要分开记原因。
-                if (mountedIndices.contains(-1)) {
-                    pidFlag = pidFlag or PackageStatus.PID_FLAG_DELETED
-                }
-                if (mountedIndices.contains(-2)) {
-                    pidFlag = pidFlag or PackageStatus.PID_FLAG_OVERRIDE
-                }
-            }
-            // target 为空 = 无规则可挂，视为完成（与旧行为一致）。
-            targets.isEmpty() ->
-                pidFlag = pidFlag or PackageStatus.PID_FLAG_MOUNTED
-
-            mountedIndices.size == targets.size ->
-                pidFlag = pidFlag or PackageStatus.PID_FLAG_MOUNTED
-
-            mountedIndices.isEmpty() ->
-                pidFlag = pidFlag or PackageStatus.PID_FLAG_NOT_MOUNTED
-
-            else ->
-                pidFlag = pidFlag or PackageStatus.PID_FLAG_PARTIALLY_MOUNTED
+        val targets = VfsRuntimePolicy.getMountTargets(packageName, userId)
+        var pidFlag = if (targets.isEmpty()) {
+            // 该 (package,user) 无挂载目标：已观测但不在管理范围，不进 managed 分母。
+            PackageStatus.PID_FLAG_UNMANAGED
+        } else {
+            PidMountClassifier.classify(
+                targets.size,
+                RuntimeFileUtils.check_mounts(pid, targets.toTypedArray()),
+            )
         }
-        // STARTUP_AWARE = 被**本包**接管过；否则 UNMANAGED = 压根不是我们的对象。
-        // 二者互斥，调用侧据此判断该 pid 是否应计入分母。
         if (startUpAwarePids.contains(pid)) {
             pidFlag = pidFlag or PackageStatus.PID_FLAG_STARTUP_AWARE
-        } else {
-            pidFlag = pidFlag or PackageStatus.PID_FLAG_UNMANAGED
         }
         if (mountFailedPids.contains(pid)) {
             pidFlag = pidFlag or PackageStatus.PID_FLAG_MOUNT_FAILED
         }
         if (!mkdir) {
             pidFlag = pidFlag or PackageStatus.PID_FLAG_MKDIR_FAILED
+        }
+        return normalizePidFlag(pidFlag, pid)
+    }
+
+    /**
+     * 终态维度互斥校验（P1-A）：非法组合运行时退化为 UNKNOWN + 诊断日志
+     * （测试中强断言）。判定规则归 [PidMountClassifier]。
+     */
+    private fun normalizePidFlag(pidFlag: Int, pid: Int): Int {
+        if (!PidMountClassifier.isLegalCombination(pidFlag)) {
+            android.util.Log.w(
+                "VfsLayerController",
+                "Illegal pidFlag combination $pidFlag for pid=$pid, degrading to UNKNOWN",
+            )
+            val stateBits = pidFlag and (
+                PackageStatus.PID_FLAG_MOUNTED or
+                    PackageStatus.PID_FLAG_PARTIALLY_MOUNTED or
+                    PackageStatus.PID_FLAG_NOT_MOUNTED or
+                    PackageStatus.PID_FLAG_UNMANAGED or
+                    PackageStatus.PID_FLAG_UNKNOWN or
+                    PackageStatus.PID_FLAG_DELETED or
+                    PackageStatus.PID_FLAG_OVERRIDE
+                )
+            return (pidFlag and stateBits.inv()) or PackageStatus.PID_FLAG_UNKNOWN
         }
         return pidFlag
     }

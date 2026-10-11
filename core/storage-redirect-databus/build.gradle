@@ -15,3 +15,7 @@ android {
     }
     namespace 'me.gm.cleaner.core.storage.redirect.databus'
 }
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}

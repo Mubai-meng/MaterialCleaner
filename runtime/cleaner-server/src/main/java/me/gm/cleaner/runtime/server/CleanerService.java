@@ -42,23 +42,24 @@ import me.gm.cleaner.core.common.nio.RootWorkerService;
 import me.gm.cleaner.server.ICleanerService;
 import me.gm.cleaner.server.IFileChangeObserver;
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway;
-import me.gm.cleaner.runtime.server.observer.ActivityManagerLogsObserver;
-import me.gm.cleaner.runtime.server.observer.FileSystemObserver;
-import me.gm.cleaner.runtime.server.observer.ObserverManager;
-import me.gm.cleaner.runtime.server.observer.StorageEventListenerDelegate;
-import me.gm.cleaner.runtime.server.observer.StorageMountObserver;
+import me.gm.cleaner.runtime.server.process.ActivityManagerLogsObserver;
+import me.gm.cleaner.runtime.server.process.ObserverStallPolicy;
+import me.gm.cleaner.runtime.server.recording.FileSystemObserver;
+import me.gm.cleaner.runtime.server.lifecycle.ObserverManager;
+import me.gm.cleaner.runtime.server.storage.StorageEventListenerDelegate;
+import me.gm.cleaner.runtime.server.storage.StorageMountObserver;
 
 public class CleanerService extends ICleanerService.Stub {
     private static final String TAG = "CleanerService";
     private final CleanerServer mServer;
     private final int mManagerAid;
     private final RemoteCallbackList<IFileChangeObserver> mFileChangeObservers = new RemoteCallbackList<>();
-    private final StorageRedirectConfigController mStorageRedirectConfigController;
+    private final StoragePolicyChangeCoordinator mStoragePolicyChangeCoordinator;
 
     public CleanerService(final CleanerServer service, final int uid) {
         mServer = service;
         mManagerAid = uid;
-        mStorageRedirectConfigController = new StorageRedirectConfigController(service);
+        mStoragePolicyChangeCoordinator = new StoragePolicyChangeCoordinator(service);
     }
 
     private void enforceManager(final Object func) {
@@ -68,6 +69,44 @@ public class CleanerService extends ICleanerService.Stub {
             return;
         }
         throw new SecurityException(String.valueOf(func));
+    }
+
+    /**
+     * logd 旁路探针：疑似假活时确认 logd 本身是否响应。
+     * logd wedged 时杀 server 无用（新 tail 照样读不到行），此时必须放行。
+     */
+    private static boolean probeLogdResponsive() {
+        // 全限定是必须的：本文件 import 了 android.os.Process，裸写 Process 会解析到它没有
+        // waitFor/destroy 的那个类（编译期即可发现）。
+        java.lang.Process process = null;
+        try {
+            process = Runtime.getRuntime().exec(new String[]{"logcat", "-d", "-t", "1"});
+            final boolean exited = process.waitFor(
+                    ObserverStallPolicy.LOGD_PROBE_TIMEOUT_MS,
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!exited) {
+                return false;
+            }
+            return process.exitValue() == 0;
+        } catch (final Throwable t) {
+            return false;
+        } finally {
+            // P0-8：本探针挂在 getServerException()（健康检查入口）上，被调用相当频繁。
+            // 原来只 waitFor，从不关闭三条管道 ⇒ 每次探针泄漏 3 个 FD，数小时即逼近 ulimit；
+            // 子进程写满 stderr 管道时还会把自己阻塞住，连超时都踩不准。
+            if (process != null) {
+                for (final java.io.Closeable stream : new java.io.Closeable[]{
+                        process.getInputStream(), process.getErrorStream(),
+                        process.getOutputStream()}) {
+                    try {
+                        stream.close();
+                    } catch (final Throwable ignored) {
+                        // 关闭失败无副作用：子进程退出后 ProcessManager 会兜底回收。
+                    }
+                }
+                process.destroy();
+            }
+        }
     }
 
     @Override
@@ -89,6 +128,19 @@ public class CleanerService extends ICleanerService.Stub {
             if (observer instanceof final ActivityManagerLogsObserver activityManagerObserver) {
                 if (activityManagerObserver.isLogcatShutdown()) {
                     return 2;
+                }
+                if (ObserverStallPolicy.INSTANCE.isStalled(
+                        android.os.SystemClock.elapsedRealtime(),
+                        activityManagerObserver.getStartAtMs(),
+                        activityManagerObserver.getLastReadAtMs())) {
+                    // 疑似假活：先确认 logd 本身响应，排除 logd wedged 导致的误杀
+                    //（logd 死了杀 server 也没用，新 tail 照样读不到行）。
+                    if (probeLogdResponsive()) {
+                        return 2;
+                    }
+                    android.util.Log.w("CleanerService",
+                            "observer stall suspected but logd wedged, skip kill");
+                    return 0;
                 }
                 if (!activityManagerObserver.hasAmStart()) {
                     return 3;
@@ -219,19 +271,19 @@ public class CleanerService extends ICleanerService.Stub {
     @Override
     public void notifyPreferencesChanged() {
         enforceManager(BuildConfig.DEBUG ? "notifyPreferencesChanged" : 12);
-        mStorageRedirectConfigController.onPreferencesChanged();
+        mStoragePolicyChangeCoordinator.onPreferencesChanged();
     }
 
     @Override
     public void notifySrChanged() {
         enforceManager(BuildConfig.DEBUG ? "notifySrChanged" : 13);
-        mStorageRedirectConfigController.onStorageRedirectChanged();
+        mStoragePolicyChangeCoordinator.onStorageRedirectChanged();
     }
 
     @Override
     public void notifyReadOnlyChanged() {
         enforceManager(BuildConfig.DEBUG ? "notifyReadOnlyChanged" : 14);
-        mStorageRedirectConfigController.onReadOnlyChanged();
+        mStoragePolicyChangeCoordinator.onReadOnlyChanged();
     }
 
     @Override

@@ -22,6 +22,9 @@ dependencies {
     // main.jar 随行模块清单由根项目 xposedRuntimeModules 统一声明
     rootProject.xposedRuntimeModules.each { implementation project(it) }
     testImplementation 'junit:junit:4.13.2'
-    compileOnly files('../../app/libs/api-82.jar')
+    compileOnly files('../../app/libs/libxposed-api-102.jar')
+    // compileOnly 不会延伸到测试source set；基类 intercept(Chain) 的清理钩子单测
+    // 必须实现 Chain，故把同一个 jar（仓库内已有，非新依赖）加进测试 classpath。
+    testImplementation files('../../app/libs/libxposed-api-102.jar')
     implementation "androidx.annotation:annotation:$rootProject.annotationVersion"
 }
