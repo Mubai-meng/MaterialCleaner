@@ -15,14 +15,34 @@ import java.io.IOException
 import java.util.Locale
 
 object AppLabelCache {
+    private const val TAG = "AppLabelCache"
     private lateinit var pm: PackageManager
-    private lateinit var labelDir: File
+    private var appContext: Context? = null
+    private var labelDir: File? = null
     private var lastLocale: Locale = Locale.getDefault()
     private var labelCache: JSONObject? = null
 
+    /**
+     * 只做零 IO 的初始化。
+     *
+     * ⚠️ **绝不能在这里触碰 `context.filesDir`**：本批（第 17 批）实机取证 ——
+     * `BootCompleteReceiver` 拉起进程时 CE 存储尚未解锁，`getFilesDir()` 内部的
+     * `ensurePrivateDirExists` 会 mkdir 失败（`errno 126 ENOKEY`），而这是跑在
+     * **Application.onCreate 主线程**上的同步磁盘 IO。更糟的是把这条注定不可用的
+     * 路径缓存下来，会让标签缓存整个会话都写不进去 ⇒ 每次启动都要为 600+ 个包
+     * 重新解析应用名。统一延迟到首次读写再解析（那时多半已解锁）。
+     */
     fun init(context: Context) {
         pm = context.packageManager
-        labelDir = context.filesDir.resolve("label")
+        appContext = context.applicationContext
+    }
+
+    /** 惰性解析标签目录；未初始化或拿不到 filesDir 时返回 null（调用方按无缓存处理）。 */
+    private fun dir(): File? {
+        labelDir?.let { return it }
+        val dir = appContext?.filesDir?.resolve("label") ?: return null
+        labelDir = dir
+        return dir
     }
 
     fun getPackageLabelFromPackageManager(applicationInfo: ApplicationInfo): String =
@@ -91,21 +111,26 @@ object AppLabelCache {
         }
     }
 
-    private fun getLabelFile(): File = labelDir.resolve(Locale.getDefault().toLanguageTag())
+    private fun getLabelFile(): File? = dir()?.resolve(Locale.getDefault().toLanguageTag())
 
     @Synchronized
     private fun writeLabel(json: JSONObject) {
+        labelCache = json
+        val dir = dir()
+        if (dir == null) {
+            Log.w(TAG, "writeLabel: filesDir unavailable, label cache kept in memory only")
+            return
+        }
         try {
-            labelCache = json
-            labelDir.mkdirs()
-            val labelFile = getLabelFile()
+            dir.mkdirs()
+            val labelFile = getLabelFile() ?: return
             if (labelFile.exists()) {
                 labelFile.delete()
             }
             val encryptedFile = SecurityHelper.encryptedFile(labelFile)
             encryptedFile.write(json.toString().toByteArray())
         } catch (e: IOException) {
-            Log.e("AppLabelCache", "Failed to write label cache", e)
+            Log.e(TAG, "Failed to write label cache", e)
         }
     }
 
@@ -116,13 +141,18 @@ object AppLabelCache {
             labelCache = null
         }
         if (labelCache == null) {
-            labelCache = try {
-                val encryptedFile = SecurityHelper.encryptedFile(getLabelFile())
-                JSONObject(encryptedFile.read().toString())
-            } catch (e: IOException) {
+            val labelFile = getLabelFile()
+            labelCache = if (labelFile == null) {
                 JSONObject()
-            } catch (e: RuntimeException) {
-                JSONObject()
+            } else {
+                try {
+                    val encryptedFile = SecurityHelper.encryptedFile(labelFile)
+                    JSONObject(encryptedFile.read().toString())
+                } catch (e: IOException) {
+                    JSONObject()
+                } catch (e: RuntimeException) {
+                    JSONObject()
+                }
             }
         }
         return labelCache!!

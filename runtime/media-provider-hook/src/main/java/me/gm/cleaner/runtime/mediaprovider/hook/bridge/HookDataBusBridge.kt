@@ -1,8 +1,12 @@
 package me.gm.cleaner.runtime.mediaprovider.hook.bridge
 
 import android.os.RemoteException
+import android.os.SystemClock
 import android.util.Log
+import me.gm.cleaner.core.common.err.ErrorCodes
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
+import me.gm.cleaner.runtime.mediaprovider.hook.err.HookErrorJournal
+import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeHookStatus
 import me.gm.cleaner.server.ICleanerServerCallback
 import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 
@@ -15,6 +19,7 @@ import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
  */
 object HookDataBusBridge {
     private const val TAG = "HookDataBusBridge"
+    private const val FALLBACK_COOLDOWN_MS = 30_000L
     private val hookWritableSnapshots = setOf(
         DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS,
     )
@@ -27,6 +32,18 @@ object HookDataBusBridge {
 
     @Volatile
     private var callback: ICleanerServerCallback? = null
+
+    /**
+     * DataBus **文件兜底**的冷却截止时刻（elapsedRealtime）。
+     *
+     * MediaProvider（uid 10326）的 SELinux 域写不了 /data/local/tmp/cleaner/bus，
+     * 兜底路径**注定失败**。旧实现每条事件都要把 `ensureInitialized()` +
+     * `prepareDirectory()` + 写文件走一遍，全是白付的 tmpfs IO。
+     * 失败一次后冷却 [FALLBACK_COOLDOWN_MS]，期间直接放弃并记录流水。
+     * 冷却到期会再试一次 —— 若权限环境变化（如 server 换了可写目录）仍能自适应。
+     */
+    @Volatile
+    private var fallbackDisabledUntilElapsed = 0L
 
     fun setCallback(value: ICleanerServerCallback?) {
         callback = value
@@ -42,6 +59,10 @@ object HookDataBusBridge {
                 Log.w(TAG, "readSnapshot via server failed: $name", e)
             } catch (e: RuntimeException) {
                 Log.w(TAG, "readSnapshot via server failed: $name", e)
+                reportBridgeFailure(
+                    ErrorCodes.HOOK_JAVA_BUS_WRITE_FAILED,
+                    "readSnapshot via server failed: $name (${e.javaClass.simpleName})",
+                )
             }
         }
         return DataBus.readSnapshot(name)
@@ -56,12 +77,20 @@ object HookDataBusBridge {
                 Log.w(TAG, "getSignalTimestamp via server failed: $name", e)
             } catch (e: RuntimeException) {
                 Log.w(TAG, "getSignalTimestamp via server failed: $name", e)
+                reportBridgeFailure(
+                    ErrorCodes.HOOK_JAVA_BUS_WRITE_FAILED,
+                    "getSignalTimestamp via server failed: $name (${e.javaClass.simpleName})",
+                )
             }
         }
         return DataBus.getSignalTimestamp(name)
     }
 
     fun writeEvent(queue: String, content: String): Long {
+        // 冷却期内不再尝试注定失败的文件兜底（理由见字段注释）。
+        if (SystemClock.elapsedRealtime() < fallbackDisabledUntilElapsed) {
+            return -1L
+        }
         val remote = callback
         if (remote != null) {
             try {
@@ -71,9 +100,36 @@ object HookDataBusBridge {
                 Log.w(TAG, "writeEvent via server failed: $queue", e)
             } catch (e: RuntimeException) {
                 Log.w(TAG, "writeEvent via server failed: $queue", e)
+                reportBridgeFailure(
+                    ErrorCodes.HOOK_JAVA_BUS_WRITE_FAILED,
+                    "writeEvent via server failed: $queue (${e.javaClass.simpleName})",
+                )
             }
         }
-        return DataBus.writeEvent(queue, content)
+        val seq = DataBus.writeEvent(queue, content)
+        if (seq < 0L) {
+            fallbackDisabledUntilElapsed = SystemClock.elapsedRealtime() + FALLBACK_COOLDOWN_MS
+            reportBridgeFailure(
+                ErrorCodes.HOOK_JAVA_BUS_WRITE_FAILED,
+                "writeEvent fallback returned $seq: $queue, cooling down " +
+                        "${FALLBACK_COOLDOWN_MS}ms",
+            )
+        }
+        return seq
+    }
+
+    /**
+     * 远程通道（或 DataBus 兜底）写入失败的统一留痕。
+     *
+     * 这些分支此前只 `Log.w`，而 ColorOS `LOG_FLOWCTRL` 会按进程配额丢日志，
+     * 于是「写失败」这一事实可能永远进不了诊断包。这里补一条
+     * [NativeHookStatus.markHookError]，随快照落进 `errors/hook_errors.jsonl`。
+     */
+    private fun reportBridgeFailure(code: String, detail: String) {
+        NativeHookStatus.markHookError(
+            code, detail, "HookDataBusBridge",
+            HookErrorJournal.SEVERITY_WARN, 0, 0L,
+        )
     }
 
     fun writeLease(category: String, key: String, content: String): Boolean {
@@ -85,14 +141,29 @@ object HookDataBusBridge {
                 Log.w(TAG, "writeLease via server failed: $category/$key", e)
             } catch (e: RuntimeException) {
                 Log.w(TAG, "writeLease via server failed: $category/$key", e)
+                reportBridgeFailure(
+                    ErrorCodes.HOOK_JAVA_BUS_WRITE_FAILED,
+                    "writeLease via server failed: $category/$key (${e.javaClass.simpleName})",
+                )
             }
         }
-        return DataBus.writeLease(category, key, content)
+        val ok = DataBus.writeLease(category, key, content)
+        if (!ok) {
+            reportBridgeFailure(
+                ErrorCodes.HOOK_JAVA_BUS_WRITE_FAILED,
+                "writeLease fallback failed: $category/$key",
+            )
+        }
+        return ok
     }
 
     fun writeSnapshot(name: String, content: String): Boolean {
         if (name !in hookWritableSnapshots) {
             Log.w(TAG, "Rejected hook snapshot write: $name")
+            reportBridgeFailure(
+                ErrorCodes.BUS_WRITE_REJECTED,
+                "Rejected hook snapshot write: $name",
+            )
             return false
         }
         val remote = callback
@@ -111,6 +182,10 @@ object HookDataBusBridge {
     fun signal(name: String): Boolean {
         if (name !in hookWritableSignals) {
             Log.w(TAG, "Rejected hook signal write: $name")
+            reportBridgeFailure(
+                ErrorCodes.BUS_WRITE_REJECTED,
+                "Rejected hook signal write: $name",
+            )
             return false
         }
         val remote = callback

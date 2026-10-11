@@ -10,6 +10,8 @@ import me.gm.cleaner.model.PackageStatus
 import me.gm.cleaner.runtime.server.process.BaseProcessObserver
 import me.gm.cleaner.runtime.server.process.PackageInfoMapper
 import me.gm.cleaner.runtime.server.vfs.CensusEntry
+import me.gm.cleaner.runtime.server.vfs.CensusIsolationPolicy
+import me.gm.cleaner.runtime.server.vfs.CensusVerdict
 import me.gm.cleaner.runtime.server.vfs.PidMountClassifier
 import me.gm.cleaner.runtime.server.vfs.VfsProcessCensus
 import me.gm.cleaner.runtime.server.vfs.VfsProcessCensusBuilder
@@ -108,10 +110,13 @@ class VfsLayerController {
 
         processes
             .asSequence()
-            .filter { !UserHandle_isIsolated(RuntimeFileUtils.read_uid(it.pid)) }
             .sortedBy { it.pid }
             .forEach { procInfo ->
                 if (!isProcessOfPackage(procInfo, packageName, uidMappingReady)) return@forEach
+                // 隔离判定刻意放在归属判定**之后**：read_uid 要打开 /proc/<pid>/cgroup，
+                // 对全部进程先做一次（实测 ~120 个 pid）纯属浪费；而归属不到重定向包的
+                // 隔离进程本来就会被上面这行过滤掉，延后判定不改变任何计数。
+                if (isExcludedForCensus(procInfo.pid)) return@forEach
                 val userId = procInfo.uid.toUserId()
                 pids.add(procInfo.pid)
                 pidFlags.add(buildPidFlag(
@@ -177,7 +182,6 @@ class VfsLayerController {
 
         processes
             .asSequence()
-            .filter { !UserHandle_isIsolated(RuntimeFileUtils.read_uid(it.pid)) }
             .sortedBy { it.pid }
             .forEach { procInfo ->
                 val packageName =
@@ -186,6 +190,11 @@ class VfsLayerController {
                     unattributed++
                     return@forEach
                 }
+                // 与 getPackageStatus 同口径：只对已归属到重定向包的 pid 付出
+                // /proc/<pid>/cgroup 的读取成本（实测从 ~120 次降到个位数）。
+                // 被排除的隔离进程既不进 entries 也不计入 unattributed，
+                // 与「过滤前置」时的行为完全一致。
+                if (isExcludedForCensus(procInfo.pid)) return@forEach
                 val userId = procInfo.uid.toUserId()
                 val flag = buildPidFlag(
                     procInfo.pid,
@@ -331,6 +340,41 @@ class VfsLayerController {
             PackageStatus.GET_FROM_ALL_PROCESS -> processes
             PackageStatus.GET_FROM_RECORDS -> processes.filter { startUpAwarePids.contains(it.pid) }
             else -> emptyList()
+        }
+    }
+
+    /**
+     * 该 pid 是否应从 VFS 普查中排除（隔离进程 / uid 不可读）。
+     *
+     * 注意默认值：**读不到 uid 时排除，而不是放行**。
+     * 放行会让隔离进程过滤整体失效（read_uid 在 cgroup v2 下恒 -1 的真机实证）。
+     */
+    private fun isExcludedForCensus(pid: Int): Boolean {
+        val uid = runCatching { RuntimeFileUtils.read_uid(pid) }.getOrDefault(-1)
+        val verdict = CensusIsolationPolicy.verdict(
+            observedUid = uid,
+            frameworkSaysIsolated = uid >= 0 && UserHandle_isIsolated(uid),
+        )
+        if (verdict == CensusVerdict.EXCLUDE_UID_UNREADABLE) {
+            UnreadableUidWarn.warn(
+                "census: unreadable uid for pid=$pid, excluding it from VFS stats",
+            )
+        }
+        return verdict != CensusVerdict.INCLUDE
+    }
+
+    /** uid 不可读的告警限频：普查每 30s 一轮，逐 pid 刷屏会淹没其他信号。 */
+    private object UnreadableUidWarn {
+        private const val INTERVAL_MS = 60_000L
+
+        @Volatile
+        private var lastAt = 0L
+
+        fun warn(message: String) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastAt < INTERVAL_MS) return
+            lastAt = now
+            android.util.Log.w("VfsLayerController", message)
         }
     }
 

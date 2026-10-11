@@ -3,6 +3,7 @@ import android.os.SystemClock
 import android.util.Log
 import me.gm.cleaner.core.common.err.ErrorCodes
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.HookDataBusBridge
+import me.gm.cleaner.runtime.mediaprovider.hook.err.HookErrorJournal
 import org.json.JSONArray
 import org.json.JSONObject
 import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
@@ -10,10 +11,25 @@ import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeStatusSnapshotParse
 
 object NativeHookStatus {
     private const val TAG = "NativeHookStatus"
-    private const val SCHEMA_VERSION = 2
+    /**
+     * 快照结构版本：5 = 新增 `readOnlyEval` 段（只读判定 / 拒绝计数）。
+     * 6 = 新增 `inaccessibleEval` 段（「不可访问的路径」判定 / 拒绝计数）。
+     * 7 = `inaccessibleEval` 新增 `appSpecificRows`（应用专属存储幽灵行观测计数）。
+     *     ⚠️ 不可访问 ≠ 只读：只读允许读、拒绝写；不可访问连读都拒绝。
+     * 4 = 新增 `fuseRedirect` 段（重定向命中/未命中计数）。
+     * 3 = 新增 `hookErrors` 段（模块进程结构化错误流水）。
+     * 2 = 无这两段。消费方一律用 `optJSONObject` 读取，缺段即视为模块未提供。
+     */
+    private const val SCHEMA_VERSION = 7
 
     /** 快照内受控文本（错误详情等）的最大长度，超出截断。 */
     private const val MAX_TEXT_LENGTH = 200
+
+    /**
+     * `hookErrors.entries` 的导出条数上限。
+     * 该快照每 8s 心跳重写一次，50 条 × ~150 B ≈ 7.5 KB 尚可接受，但不放开上限。
+     */
+    private const val HOOK_ERROR_SNAPSHOT_LIMIT = 20
 
     /**
      * 宿主预期异常（swallowedHostExceptions）计数的快照发布最小间隔。
@@ -211,6 +227,15 @@ object NativeHookStatus {
      */
     @Volatile
     private var fuseEventDedupedCount = 0L
+
+    // ── FUSE 重定向命中/未命中观测（见 [recordFuseRedirect]）──
+    private val fuseRedirectEvaluated = java.util.concurrent.atomic.AtomicLong(0L)
+    private val fuseRedirectRedirected = java.util.concurrent.atomic.AtomicLong(0L)
+    private val fuseRedirectMissed = java.util.concurrent.atomic.AtomicLong(0L)
+    @Volatile
+    private var fuseRedirectLastMissPackage = ""
+    @Volatile
+    private var fuseRedirectLastMissPrefix = ""
 
     // ── policyCache 失败语义（错误码引用 ErrorCodes.HOOK_JAVA_CACHE_*） ──
     @Volatile
@@ -666,6 +691,46 @@ object NativeHookStatus {
     }
 
     /**
+     * 记录一次模块进程（MediaProvider / LSPosed）运行期错误。
+     *
+     * 与 `Log.*` 的关系：**不是替代，而是补一条不依赖 logcat 的留痕**。
+     * ColorOS `LOG_FLOWCTRL` 按进程配额丢日志（实测本进程单次会话丢 237 行），
+     * 因此「日志里没有」不能证明「没发生」；本方法把错误写进
+     * [HookErrorJournal]，随下一次 `publishSnapshot` 落进
+     * `native_hook_status.json` 的 `hookErrors` 段，从而进入诊断包的
+     * `status/native_hook_status_pretty.json` 与 `errors/hook_errors.jsonl`。
+     *
+     * 幂等性：同一 `(code, severity, subject, detail)` 在 30s 内合并计数，
+     * 不会因高频告警把流水槽位刷满。
+     *
+     * @param code 必须引用 [me.gm.cleaner.core.common.err.ErrorCodes] 常量。
+     * @param severity [HookErrorJournal.SEVERITY_WARN] / [SEVERITY_ERROR]。
+     */
+    fun markHookError(
+        code: String,
+        detail: String?,
+        subject: String?,
+        severity: String,
+        errno: Int,
+        generation: Long,
+    ) {
+        runCatching {
+            HookErrorJournal.record(
+                code = code,
+                severity = severity,
+                detail = detail,
+                subject = subject,
+                errno = errno,
+                generation = generation,
+            )
+        }.onFailure {
+            // 流水自身失败绝不阻断业务流程，也不得递归再记一次。
+            Log.w(TAG, "markHookError failed for $code", it)
+        }
+        publishSnapshot()
+    }
+
+    /**
      * `mark*` 路径的发布入口：登记一次语义变更后按闸门判定是否落盘。
      *
      * 本方法在 29 个 `mark*` / `reset*` 调用点被触发，**不再**做无条件发布；
@@ -790,6 +855,40 @@ object NativeHookStatus {
             })
             put("fuseJavaGate", fuseJavaGateStatus.toJson())
             put("dedupedEvents", fuseEventDedupedCount)
+            put("fuseRedirect", JSONObject().apply {
+                put("evaluated", fuseRedirectEvaluated.get())
+                put("redirected", fuseRedirectRedirected.get())
+                put("missed", fuseRedirectMissed.get())
+                put("lastMissPackage", fuseRedirectLastMissPackage)
+                put("lastMissPrefix", fuseRedirectLastMissPrefix)
+                put("prefixSegments", FuseRedirectStats.DEFAULT_PREFIX_SEGMENTS)
+            })
+            put("readOnlyEval", JSONObject().apply {
+                ReadOnlyEvalStats.snapshot().forEach { (k, v) -> put(k, v) }
+            })
+            put("inaccessibleEval", JSONObject().apply {
+                InaccessibleEvalStats.snapshot().forEach { (k, v) -> put(k, v) }
+            })
+            put("hookErrors", JSONObject().apply {
+                put("totalRecorded", HookErrorJournal.total())
+                put("exportLimit", HOOK_ERROR_SNAPSHOT_LIMIT)
+                put("slotCount", HookErrorJournal.size())
+                put("entries", JSONArray().apply {
+                    HookErrorJournal.snapshot().takeLast(HOOK_ERROR_SNAPSHOT_LIMIT).forEach { e ->
+                        put(JSONObject().apply {
+                            put("code", e.code)
+                            put("severity", e.severity)
+                            put("atElapsed", e.lastAtElapsed)
+                            put("firstAtElapsed", e.firstAtElapsed)
+                            put("count", e.count)
+                            if (e.errno != 0) put("errno", e.errno)
+                            e.subject?.let { put("subject", it) }
+                            if (e.generation > 0L) put("generation", e.generation)
+                            e.detail?.let { put("detail", it) }
+                        })
+                    }
+                })
+            })
         }.toString()
     }
 
@@ -801,6 +900,42 @@ object NativeHookStatus {
      */
     fun setFuseEventDedupedCount(total: Long) {
         fuseEventDedupedCount = total
+    }
+
+    /**
+     * 记录一次 FUSE 路径重定向评估的结果。
+     *
+     * **为什么需要它**：`redirected:` 日志只在**确实改写**时才打，
+     * 未命中的路径上没有任何日志也没有任何计数。于是「hook 没工作」与
+     * 「目标 app 触碰的路径根本不在任何已配置 target 之下」在产物里无法区分 ——
+     * 连续三批实机材料都因此只能给出无法证伪的结论（实测：deepseek 58 次访问
+     * 全部落在 `/storage/emulated/0` 根目录，而其 target 是
+     * `/storage/emulated/0/Download`，一次都不该命中）。
+     *
+     * **性能约束**：本方法跑在 FUSE 热路径上，**只做原子自增与 volatile 写，
+     * 不发布快照**（交给既有 8s 心跳）、不做字符串拼接（前缀只在变化时重算）。
+     * 调用方必须先自己确认该包在重定向配置里（[HookPolicyCache.hasRedirectRules]），
+     * 否则等于给所有包的文件操作都加了一次开销。
+     */
+    fun recordFuseRedirect(packageName: String, path: String, redirected: Boolean) {
+        fuseRedirectEvaluated.incrementAndGet()
+        if (redirected) {
+            fuseRedirectRedirected.incrementAndGet()
+            return
+        }
+        fuseRedirectMissed.incrementAndGet()
+        if (fuseRedirectLastMissPackage != packageName ||
+            fuseRedirectLastMissPrefix.isEmpty()
+        ) {
+            fuseRedirectLastMissPackage = packageName
+            fuseRedirectLastMissPrefix = FuseRedirectStats.prefixOf(path)
+        } else {
+            val prefix = FuseRedirectStats.prefixOf(path)
+            if (prefix != fuseRedirectLastMissPrefix) {
+                fuseRedirectLastMissPrefix = prefix
+                fuseRedirectLastMissPackage = packageName
+            }
+        }
     }
 
     private fun aggregatePolicyState(): String = when {

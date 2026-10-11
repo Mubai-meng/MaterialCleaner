@@ -121,6 +121,21 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
     private final ExecutorService mExecutor = Executors.newSingleThreadExecutor();
 
     /**
+     * 当前持有日志流的 logcat 子进程。
+     *
+     * onDestroy 里要靠关闭它的 stdout 让阻塞在原生 {@code readLine()} 的线程读到 EOF：
+     * {@code mExecutor.shutdownNow()} 的中断对原生读无效，少了这一步整个 runnable 都退不出来。
+     */
+    private volatile Process mCurrentProcess;
+
+    /** logcat 重拉间隔：基线 5s，异常重启时指数放大到 60s 上限（P0-7）。 */
+    private static final long LOGCAT_RETRY_BASE_MS = 5000L;
+    private static final long LOGCAT_RETRY_MAX_MS = 60000L;
+
+    /** logcat 存活超过这个时长即认为本轮健康，退避归零。 */
+    private static final long LOGCAT_HEALTHY_MS = 30000L;
+
+    /**
      * 已被"静默丢弃"过的 app principal name 集合（去重后再记录日志）。
      * 没有它时，一次丢包在日志上完全不可见——正是上一轮"规则建了但没重定向"
      * 无法定位的原因。
@@ -332,8 +347,11 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                     }
                 }
 
+                long backoffMs = LOGCAT_RETRY_BASE_MS;
                 while (true) {
                     process = Runtime.getRuntime().exec(new String(logcat));
+                    mCurrentProcess = process;
+                    final long attachAtMs = android.os.SystemClock.elapsedRealtime();
                     // 启动留痕：本循环是进程启动事件的唯一来源，它一旦静默死掉
                     // （exec 失败、被 SELinux 拒绝等），整条 bind mount 链路就没了触发点。
                     Log.i("MC_REDIRECT", "[AMLogsObserver] logcat attached: attempt="
@@ -459,7 +477,19 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                         }
                     }
                     reader.close();
-                    Thread.sleep(5000);
+                    // P0-7：原来只关 reader —— 每轮至少泄漏 2 个 FD；logcat 迅速退出时
+                    // 还以固定 5s 重拉，形成约 720 次/小时的 exec 风暴。
+                    closeProcessStreams(process);
+                    process.destroy();
+                    // 指数退避：logcat 活够久说明本轮健康，退避归零；迅速退出
+                    //（exec 失败 / 被杀 / 权限被拒）才放大间隔。
+                    final long livedMs = android.os.SystemClock.elapsedRealtime() - attachAtMs;
+                    if (livedMs >= LOGCAT_HEALTHY_MS) {
+                        backoffMs = LOGCAT_RETRY_BASE_MS;
+                    } else {
+                        backoffMs = Math.min(backoffMs * 2, LOGCAT_RETRY_MAX_MS);
+                    }
+                    Thread.sleep(backoffMs);
                 }
             } catch (final IOException | InterruptedException e) {
                 Log.e("ActivityManagerLogsObserver", "Logcat reading loop exited unexpectedly", e);
@@ -468,6 +498,7 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                         broadcastIntent.setAction(ServerConstants.ACTION_LOGCAT_SHUTDOWN)
                 );
                 if (process != null) {
+                    closeProcessStreams(process);
                     process.destroy();
                 }
                 mExecutor.shutdown();
@@ -492,6 +523,27 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
         return true;
     }
 
+    /**
+     * 关闭子进程的三条管道。
+     *
+     * {@code Process} 的三条流各自持有本进程的一个 FD：原来的实现只关 {@code reader}，
+     * 且异常路径（{@code IOException}）连它都不关 —— 长时间运行后 FD 持续增长。
+     */
+    private static void closeProcessStreams(final Process process) {
+        if (process == null) {
+            return;
+        }
+        final java.io.Closeable[] streams = new java.io.Closeable[]{
+                process.getInputStream(), process.getErrorStream(), process.getOutputStream()};
+        for (final java.io.Closeable stream : streams) {
+            try {
+                stream.close();
+            } catch (final Throwable ignored) {
+                // 关闭失败无副作用：子进程退出后 libcore 的 ProcessManager 会兜底回收。
+            }
+        }
+    }
+
     public boolean hasAmStart() {
         return mHasAmStart;
     }
@@ -511,6 +563,14 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        final Process process = mCurrentProcess;
+        if (process != null) {
+            // 阻塞在原生 readLine() 的线程不响应 Thread.interrupt()，
+            // shutdownNow 对它无效 —— 关闭 stdout 让它读到 EOF 从而自行退出循环，
+            // 是唯一可靠的停机手段（原实现里 process.destroy() 因此永不执行）。
+            closeProcessStreams(process);
+            process.destroy();
+        }
         mExecutor.shutdownNow();
     }
 }

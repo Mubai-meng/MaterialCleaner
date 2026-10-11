@@ -2,6 +2,7 @@ package me.gm.cleaner.runtime.mediaprovider.hook.policy
 import android.util.Log
 import me.gm.cleaner.core.common.err.ErrorCodes
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
+import me.gm.cleaner.core.storage.redirect.domain.InaccessiblePathDeriver
 import me.gm.cleaner.core.storage.redirect.domain.MountPlanDeriver
 import me.gm.cleaner.core.storage.redirect.domain.OrderedRedirectInterpreter.isCanonicalAbsolutePath
 import me.gm.cleaner.core.storage.redirect.domain.RedirectRule
@@ -18,7 +19,11 @@ import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
  * 消费 [DataBus] 发布的快照，减少热路径对 Binder 的强依赖。
  *
  * ## 缓存内容
- * - **ReadOnlyCache**：packageName → Set<path>，来自 read_only.json 快照
+ * - **ReadOnlyCache**：packageName → Set<path>，来自 read_only.json 快照。
+ *   只读 = 允许读、拒绝写。
+ * - **InaccessibleCache**：packageName → List<path>，来自 redirect_policy.json
+ *   快照的 `inaccessibleRules` 段。不可访问 = 连读都拒绝，目标是让应用完全识别
+ *   不到该文件夹或文件；与只读是**两个不同的能力**，不可混用。
  * - **RuleCache**：packageName → userId → 规则对，来自 redirect_policy.json 快照，
  *   经 [MountPlanDeriver] 解释，不再持有旧 MountRules
  * - **ConfiguredMountPoints**：挂载点列表，来自 configured_mount_points.json 快照（推送到 native）
@@ -51,6 +56,21 @@ object HookPolicyCache {
         val revision: String = "",
     )
 
+    /**
+     * 「不可访问的路径」域。
+     *
+     * 与 [ReadOnlyHolder] 是两个不同的能力：只读允许读、拒绝写；
+     * 不可访问连读都拒绝，目标是让应用完全识别不到该文件夹或文件。
+     * 数据由投影器从重定向规则反解后随 redirect_policy 快照下发，
+     * 因此与 Rule 域同 generation / 同 revision。
+     */
+    private data class InaccessibleHolder(
+        val data: Map<String, List<String>> = emptyMap(),
+        val generation: Long = 0L,
+        val publisherEpoch: String = "",
+        val revision: String = "",
+    )
+
     private data class MountPointsHolder(
         val generation: Long = 0L,
         val publisherEpoch: String = "",
@@ -72,6 +92,10 @@ object HookPolicyCache {
     private var readOnly: ReadOnlyHolder = ReadOnlyHolder()
     @Volatile
     private var lastReadOnlySignalTimestamp: Long = 0L
+
+    // ── Inaccessible 域（不可访问的路径）──
+    @Volatile
+    private var inaccessible: InaccessibleHolder = InaccessibleHolder()
 
     // ── Rule 域（含 denylist） ──
     @Volatile
@@ -534,20 +558,25 @@ object HookPolicyCache {
     // ═══════════════════════════════════════════════════════════
 
     /**
-     * 检查指定路径是否在只读规则中。
+     * 检查指定路径是否命中只读规则（UI 上叫「不可访问的路径」）。
+     *
+     * **判定坐标是应用可见的原始路径**，不是挂载后路径 —— 规则是用户按
+     * "app 看到的路径"填的，而重定向后路径落在
+     * `/storage/emulated/0/Android/data/<pkg>/...` 下，拿它比规则永远匹配不上。
+     *
+     * 匹配语义见 [ReadOnlyPathMatcher]：规则**自身 + 任意深度子孙**。
+     * 旧判据只认「路径相等」或「直接父目录相等」，等于只覆盖一层；而应用真实
+     * 写入路径永远比规则深至少两层（`Pictures/<app>/x.jpg`）⇒ 规则形同虚设。
      *
      * @param packageName 包名
-     * @param path 要检查的路径（已规范化）
-     * @param pathAsUser 按 userId=0 展开的路径
+     * @param pathAsUser 按 userId=0 展开的路径（重定向前的原始路径）
      * @return true 如果路径命中只读规则
      */
     fun isReadOnly(packageName: String, pathAsUser: String): Boolean {
         val readOnlyPaths = readOnly.data[packageName] ?: return false
-        val parent = File(pathAsUser).parent ?: return false
-        return readOnlyPaths.any { roPath ->
-            roPath.equals(pathAsUser, ignoreCase = true) ||
-                    roPath.equals(parent, ignoreCase = true)
-        }
+        val matchedRule = readOnlyPaths.firstOrNull { ReadOnlyPathMatcher.matches(it, pathAsUser) }
+        ReadOnlyEvalStats.recordEval(packageName, matchedRule != null, matchedRule)
+        return matchedRule != null
     }
 
     /**
@@ -555,6 +584,38 @@ object HookPolicyCache {
      * 返回 0 表示未加载任何快照。
      */
     fun getReadOnlyGeneration(): Long = readOnly.generation
+
+    // ═══════════════════════════════════════════════════════════
+    // 不可访问路径查询（「不可访问的路径」，q4）
+    // ═══════════════════════════════════════════════════════════
+
+    /**
+     * 判定应用可见路径是否落在「不可访问」规则之下。
+     *
+     * 与 [isReadOnly] 的关键差别：**不受操作类型限制**。只读只在写操作上生效，
+     * 不可访问对读也生效 —— 否则应用仍能枚举到、仍算「访问到了」。
+     *
+     * 判定必须用**应用可见的原始路径**（重定向前的路径）：规则按应用看到的路径填写，
+     * 重定向后路径落在 `/storage/emulated/0/Android/data/<pkg>/...` 下，永远匹配不上。
+     *
+     * @param packageName 包名
+     * @param pathAsUser 按 userId=0 展开的路径（重定向前的原始路径）
+     * @return 命中的规则路径；未命中返回 null
+     */
+    fun isInaccessible(packageName: String, pathAsUser: String): String? {
+        val paths = inaccessible.data[packageName] ?: return null
+        val matched = InaccessiblePathDeriver.matchesAny(paths, pathAsUser)
+        InaccessibleEvalStats.recordEval(packageName, matched != null, matched)
+        return matched
+    }
+
+    /** 该包配置的不可访问路径根集合；热路径先查这个做 O(1) 旁路。 */
+    fun getInaccessiblePaths(packageName: String): List<String> =
+        inaccessible.data[packageName] ?: emptyList()
+
+    /** 是否有不可访问规则；供 Query 等热路径在拼 SQL 前旁路。 */
+    fun hasInaccessibleRules(packageName: String): Boolean =
+        inaccessible.data.containsKey(packageName)
 
     // ═══════════════════════════════════════════════════════════
     // Rule 查询（路径重定向）
@@ -646,6 +707,31 @@ object HookPolicyCache {
 
         // 解析 denylist：缺席则沿用当前域快照，保持 copy-on-write 原子发布。
         val denyArr = root.optJSONArray("denylist")
+        // 解析「不可访问的路径」：与 Rule 域同代发布，缺席即视为空（老快照兼容）。
+        val inObj = root.optJSONObject("inaccessibleRules")
+        val newInaccessible = LinkedHashMap<String, List<String>>()
+        if (inObj != null) {
+            for (pkg in inObj.keys()) {
+                val arr = inObj.optJSONArray(pkg) ?: continue
+                val paths = LinkedHashSet<String>()
+                for (i in 0 until arr.length()) {
+                    val p = arr.optString(i, "")
+                    if (p.isNotEmpty()) {
+                        paths += p
+                    }
+                }
+                if (paths.isNotEmpty()) {
+                    newInaccessible[pkg] = paths.toList()
+                }
+            }
+        }
+        inaccessible = InaccessibleHolder(
+            data = newInaccessible.toMap(),
+            generation = generation,
+            publisherEpoch = publisherEpoch,
+            revision = revision,
+        )
+
         val newDenylist = if (denyArr != null) {
             val denySet = mutableSetOf<String>()
             for (i in 0 until denyArr.length()) {
@@ -664,6 +750,9 @@ object HookPolicyCache {
             revision = revision,
         )
         NativeHookStatus.markRedirectPolicyApplied(revision, generation, newCache.isNotEmpty())
+        if (newInaccessible.isNotEmpty()) {
+            Log.i(TAG, "parseRedirectPolicy: inaccessible packages=" + newInaccessible.size)
+        }
 
         // 解析偏好标记；native 侧应用由挂载点全量刷新（commitPolicy）统一原子完成。
         // 偏好独立 holder 发布，与 rule 域同代演进；解析见 PolicyPreferencesParser。

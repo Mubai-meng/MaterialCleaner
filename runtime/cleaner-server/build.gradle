@@ -28,7 +28,7 @@ dependencies {
     implementation project(':core:storage-redirect-domain')
     implementation project(':core:storage-redirect-databus')
     implementation project(':platform:hidden-api')
-    compileOnly files('../../app/libs/api-82.jar')
+    compileOnly files('../../app/libs/libxposed-api-102.jar')
 
     implementation "androidx.annotation:annotation:$rootProject.annotationVersion"
     implementation "androidx.core:core-ktx:$rootProject.coreVersion"

@@ -9,6 +9,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.os.FileUtils;
 import android.provider.MediaStore;
 import android.text.TextUtils;
@@ -20,8 +21,8 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.regex.Pattern;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedHelpers;
+import me.gm.cleaner.runtime.mediaprovider.hook.xp.HookParam;
+import me.gm.cleaner.runtime.mediaprovider.hook.xp.XpCompat;
 
 import me.gm.cleaner.core.storage.redirect.databus.DataBus;
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.AbstractGuardedHook;
@@ -91,6 +92,17 @@ public class InsertHooker extends AbstractGuardedHook {
     private final static Pattern KNOWN_APP_DIR_PATHS = Pattern.compile(
             "(?i)(^/storage/[^/]+/(?:([0-9]+)/)?Android/(?:data|media|obb|sandbox)/)([^/]+)(/.*)?");
 
+    /**
+     * "Skipping - on FUSE thread" 的日志节流窗口。
+     *
+     * FUSE 线程上的 insert 是常态（实测 43 条 / 150s），逐条打 D 级日志既占
+     * logd 配额（ColorOS LOG_FLOWCTRL 每进程 300 行）也没有信息量 ——
+     * 跳过这个事实本身不变，变的只有条数。改为每窗口放行一条并带抑制计数。
+     */
+    private final static long SKIP_LOG_INTERVAL_MS = 30_000L;
+    private static volatile long sLastSkipLogElapsed = 0L;
+    private static volatile long sSkipLogSuppressed = 0L;
+
     private String extractPathOwnerPackageName(String path) {
         final var m = KNOWN_APP_DIR_PATHS.matcher(path);
         if (m.matches()) {
@@ -100,9 +112,17 @@ public class InsertHooker extends AbstractGuardedHook {
     }
 
     @Override
-    protected void handleBefore(XC_MethodHook.MethodHookParam param) throws Throwable {
+    protected void handleBefore(HookParam param) throws Throwable {
         if (mHook.isFuseThread()) {
-            Log.d("MC_REDIRECT", "[InsertHooker] Skipping - on FUSE thread");
+            final long now = SystemClock.elapsedRealtime();
+            if (now - sLastSkipLogElapsed >= SKIP_LOG_INTERVAL_MS) {
+                Log.d("MC_REDIRECT", "[InsertHooker] Skipping - on FUSE thread"
+                        + " (suppressed=" + sSkipLogSuppressed + " since the last line)");
+                sLastSkipLogElapsed = now;
+                sSkipLogSuppressed = 0L;
+            } else {
+                sSkipLogSuppressed++;
+            }
             return;
         }
         /** ARGUMENTS */
@@ -233,42 +253,42 @@ public class InsertHooker extends AbstractGuardedHook {
             }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            final var resolvedVolumeName = (String) XposedHelpers.callMethod(
+            final var resolvedVolumeName = (String) XpCompat.callMethod(
                     mp, "resolveVolumeName", uri);
-            final var volumePath = (File) XposedHelpers.callMethod(
+            final var volumePath = (File) XpCompat.callMethod(
                     mp, "getVolumePath", resolvedVolumeName);
 
-            final var fileUtilsClass = XposedHelpers.findClass(
+            final var fileUtilsClass = XpCompat.findClass(
                     "com.android.providers.media.util.FileUtils", mClassLoader);
-            final var isFuseThread = (boolean) XposedHelpers.callMethod(mp, "isFuseThread");
-            XposedHelpers.callStaticMethod(fileUtilsClass, "sanitizeValues", working, !isFuseThread);
-            XposedHelpers.callStaticMethod(
+            final var isFuseThread = (boolean) XpCompat.callMethod(mp, "isFuseThread");
+            XpCompat.callStaticMethod(fileUtilsClass, "sanitizeValues", working, !isFuseThread);
+            XpCompat.callStaticMethod(
                     fileUtilsClass, "computeDataFromValues", working, volumePath, isFuseThread);
 
             var res = new File(working.getAsString(MediaStore.MediaColumns.DATA));
-            res = (File) XposedHelpers.callStaticMethod(
+            res = (File) XpCompat.callStaticMethod(
                     fileUtilsClass, "buildUniqueFile",
                     res.getParentFile(), mimeType, res.getName());
 
             working.put(MediaStore.MediaColumns.DATA, res.getAbsolutePath());
         } else {
-            final var resolvedVolumeName = (String) XposedHelpers.callMethod(
+            final var resolvedVolumeName = (String) XpCompat.callMethod(
                     mp, "resolveVolumeName", uri);
 
-            final var relativePath = XposedHelpers.callMethod(
+            final var relativePath = XpCompat.callMethod(
                     mp, "sanitizePath",
                     working.getAsString(MediaStore.MediaColumns.RELATIVE_PATH)
             );
-            final var displayName = XposedHelpers.callMethod(
+            final var displayName = XpCompat.callMethod(
                     mp, "sanitizeDisplayName",
                     working.getAsString(MediaStore.MediaColumns.DISPLAY_NAME)
             );
 
-            var res = (File) XposedHelpers.callMethod(
+            var res = (File) XpCompat.callMethod(
                     mp, "getVolumePath", resolvedVolumeName);
-            res = (File) XposedHelpers.callStaticMethod(
+            res = (File) XpCompat.callStaticMethod(
                     Environment.class, "buildPath", res, relativePath);
-            res = (File) XposedHelpers.callStaticMethod(
+            res = (File) XpCompat.callStaticMethod(
                     FileUtils.class, "buildUniqueFile", res, mimeType, displayName);
 
             working.put(MediaStore.MediaColumns.DATA, res.getAbsolutePath());

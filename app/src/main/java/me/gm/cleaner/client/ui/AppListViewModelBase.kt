@@ -79,7 +79,8 @@ abstract class AppListViewModelBase(application: Application) :
         AppListState.Done(sequence.toList())
     }
 
-    protected suspend fun loadAppsCommon() {
+    /** @return 本次结果是否为**服务端全量**列表；false 表示服务不可用、走了本地降级。 */
+    protected suspend fun loadAppsCommon(): Boolean {
         if (BuildConfig.DEBUG) Log.i(
             "CleanerTest",
             "AppListViewModelBase.loadAppsCommon: start"
@@ -94,7 +95,7 @@ abstract class AppListViewModelBase(application: Application) :
                 "AppListViewModelBase.loadAppsCommon: failed to load apps", e
             )
             _appsFlow.value = AppListState.Error(e.message ?: "Unknown error")
-            return
+            return false
         }
         if (BuildConfig.DEBUG) Log.i(
             "CleanerTest",
@@ -123,6 +124,7 @@ abstract class AppListViewModelBase(application: Application) :
             }
         }
         _appsFlow.value = AppListState.Done(list)
+        return result.isFullList
     }
 
     /** 策略快照或偏好变化后的统一刷新入口：先防抖，再决定增量/全量。 */

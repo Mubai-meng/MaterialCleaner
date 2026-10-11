@@ -8,13 +8,16 @@ import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeHookStatus;
 
 import android.os.IBinder;
 import android.os.RemoteException;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.IntFunction;
 import java.util.regex.Pattern;
 
 import api.SystemService;
@@ -24,6 +27,9 @@ import me.gm.cleaner.server.IMediaProviderHooksService;
 public class MediaProviderHooksService extends IMediaProviderHooksService.Stub {
     private volatile ICleanerServerCallback mCleanerServerBinder = null;
     private final AtomicBoolean mPolicyCacheInitialized = new AtomicBoolean(false);
+    private final UidPackageCache mUidPackageCache = new UidPackageCache();
+    private final IntFunction<java.util.List<String>> mPackagesForUidLookup =
+            SystemService::getPackagesForUidNoThrow;
     private final IBinder.DeathRecipient mCleanerServerDeathRecipient = () -> {
         mCleanerServerBinder = null;
         HookDataBusBridge.INSTANCE.setCallback(null);
@@ -203,19 +209,42 @@ public class MediaProviderHooksService extends IMediaProviderHooksService.Stub {
     }
 
     public boolean isReadOnly(@NonNull String path, int uid) {
-        final var packages = SystemService.getPackagesForUidNoThrow(uid);
-        if (packages.isEmpty()) {
+        if (HookPolicyCache.INSTANCE.getReadOnlyGeneration() <= 0) {
             return false;
         }
-        final var packageName = packages.get(0);
-        final var pathAsUser = getPathAsUser(path, 0);
-
-        // 使用 HookPolicyCache（来自 DataBus 快照）
-        // DataBus 是只读策略的唯一分发通道；Binder fallback 路径已移除。
-        if (HookPolicyCache.INSTANCE.getReadOnlyGeneration() > 0) {
-            return HookPolicyCache.INSTANCE.isReadOnly(packageName, pathAsUser);
+        final String packageName = resolvePackageName(uid);
+        if (packageName == null) {
+            return false;
         }
-        return false;
+        return HookPolicyCache.INSTANCE.isReadOnly(packageName, getPathAsUser(path, 0));
+    }
+
+    /**
+     * 「不可访问的路径」判定。
+     *
+     * 与 [isReadOnly] 是两套规则：只读允许读、拒绝写；不可访问连读都拒绝，
+     * 目标是让应用完全识别不到该文件夹或文件。因此这里的判定
+     * **不受操作类型限制** —— 读也要拦。
+     *
+     * @param path 应用可见的原始路径（重定向前）
+     * @param uid 调用方 uid
+     * @return 命中的规则路径；未命中返回 null
+     */
+    @Nullable
+    public String isInaccessible(@NonNull String path, int uid) {
+        final String packageName = resolvePackageName(uid);
+        if (packageName == null) {
+            return null;
+        }
+        return HookPolicyCache.INSTANCE.isInaccessible(packageName, getPathAsUser(path, 0));
+    }
+
+    @Nullable
+    private String resolvePackageName(int uid) {
+        if (uid < 0) {
+            return null;
+        }
+        return mUidPackageCache.get(uid, SystemClock.elapsedRealtime(), mPackagesForUidLookup);
     }
 
     @Override

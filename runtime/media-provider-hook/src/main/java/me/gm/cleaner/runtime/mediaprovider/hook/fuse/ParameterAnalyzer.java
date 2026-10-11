@@ -134,9 +134,15 @@ class ParameterAnalyzer {
             return new ParamRoles(pathIndex, path2Index, uidIdx, /*modeIndex=*/-1, extra);
         }
 
-        // ── 已知 openWithFuse 精确签名：mode 是独立位置角色，不做泛化推断 ──
-        // (String path, int uid, int mediaCapabilitiesUid, int modeBits, boolean, boolean, int)
-        if (name.equals("openwithfuse") && types.length == 7
+        // ── 已知 openWithFuse 签名**前缀**：mode 是独立位置角色，不做泛化推断 ──
+        // (String path, int uid, int mediaCapabilitiesUid, int modeBits, boolean, boolean, int, …)
+        //
+        // ⚠️ 设备实测（ColorOS 17 / Android 17）openWithFuse 有 **8** 个参数，
+        // 尾部多一个 String。旧判据写死 `types.length == 7` ⇒ 恒不匹配 ⇒
+        // modeIndex 落到 -1 ⇒ `shouldDenyOpen(null, …)` 永远返回 false ⇒
+        // **只读规则对「以写方式打开文件」整条链路失效**（用户报「不可访问的路径
+        // 设置完无效」的直接原因之一）。改为按前缀匹配，容忍尾部参数差异。
+        if (name.equals("openwithfuse") && types.length >= 7
                 && types[0] == String.class
                 && types[1] == int.class
                 && types[2] == int.class

@@ -67,7 +67,7 @@ MaterialCleaner/
 ├── platform/
 │   └── hidden-api/              # Android hidden API 桥接与 SystemService 封装
 ├── app/src/main/cpp/            # native：libcleaner（VFS/mount）、libinline（FUSE Hook + xhook）、starter
-├── app/src/main/assets/         # xposed_init + main.jar（buildXposedMainJar 生成）
+├── app/src/main/assets/         # main.jar（buildXposedMainJar 生成；模块元数据在 resources/META-INF/xposed）
 ├── docs/adr/                    # 架构决策记录（14 篇，状态见 docs/architecture/adr-status.md）
 ├── scripts/gates/               # 门禁检查脚本
 └── MaterialCleaner.wiki/        # GitHub Wiki（中文文档主页）

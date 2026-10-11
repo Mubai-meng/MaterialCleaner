@@ -83,6 +83,11 @@ namespace bpf_hook {
                 return false;
             }
         }
+        // P0-4：xhook 未命中该符号时 old_StartsWith 保持 nullptr，空指针调用会直接崩掉
+        // MediaProvider。降级为语义等价的标准库实现（C++20 string_view::starts_with）。
+        if (old_StartsWith == nullptr) {
+            return s.starts_with(prefix);
+        }
         return old_StartsWith(s, prefix);
     }
 
@@ -101,6 +106,10 @@ namespace bpf_hook {
         if (isMountPoint(path)) {
             return true;
         }
+        // P0-4：未捕获到原函数时按"未命中挂载点"降级，绝不能空指针跳转。
+        if (old_containsMount_31 == nullptr) {
+            return false;
+        }
         return old_containsMount_31(path);
     }
 
@@ -110,23 +119,44 @@ namespace bpf_hook {
         if (isMountPoint(path)) {
             return true;
         }
+        // P0-4：同上，未捕获到原函数时降级为 false。
+        if (old_containsMount_30 == nullptr) {
+            return false;
+        }
         return old_containsMount_30(path, userid);
     }
 
     bool (*old_IsFuseBpfEnabled)();
 
     bool new_IsFuseBpfEnabled() {
+        // P0-4：拿不到原实现时按"未启用"降级 —— 宁可少做拦截，不可空指针跳转。
+        if (old_IsFuseBpfEnabled == nullptr) {
+            isFuseBpfEnabled.store(false, std::memory_order_relaxed);
+            return false;
+        }
         const bool enabled = old_IsFuseBpfEnabled();
         isFuseBpfEnabled.store(enabled, std::memory_order_relaxed);
         return enabled;
     }
 
-    thread_local fuse_req_t fuse_req;
+    // P0-5：绝不跨请求保留 fuse_req 指针。
+    // fuse_req 由 FUSE daemon 在请求结束时释放，而 FUSE worker 线程是复用的：保留指针会让
+    // 下一次与本请求无关的访问读到已释放的 req（use-after-free ⇒ MediaProvider 随机崩溃）。
+    // 这里在 req 作为参数传入的当下（此刻必然有效）取出唯一需要的 ctx.uid，之后各拦截点
+    // 只读这个整数副本 —— 取值语义与原来完全一致（同一个请求的 ctx 不会被改写），
+    // 因此这是零行为变化、零 UAF 的写法。
+    thread_local bool fuse_req_valid = false;
+    thread_local uint32_t fuse_req_uid = 0;
 
     void *(*old_fuse_req_userdata)(fuse_req_t req);
 
     void *new_fuse_req_userdata(fuse_req_t req) {
-        fuse_req = req;
+        fuse_req_valid = req != nullptr;
+        fuse_req_uid = fuse_req_valid ? static_cast<uint32_t>(req->ctx.uid) : 0U;
+        // P0-4：同上，未捕获到原函数时返回空 userdata（拿不到就是拿不到，不能空指针跳转）。
+        if (old_fuse_req_userdata == nullptr) {
+            return nullptr;
+        }
         return old_fuse_req_userdata(req);
     }
 
@@ -136,7 +166,12 @@ namespace bpf_hook {
     void new_fuse_bpf_install(struct fuse *fuse, struct fuse_entry_param *e,
                               const std::string &child_path, int &backing_fd) {
         if (recordExternalAppSpecificStorage.load(std::memory_order_relaxed) ||
-            (fuse_req != nullptr && fuse_req->ctx.uid == 0)) {
+            (fuse_req_valid && fuse_req_uid == 0)) {
+            return;
+        }
+        // P0-4：同 new_fuse_bpf_fill_entries 的既有标准 —— 未捕获到原函数就退化成空操作，
+        // 绝不能空指针跳转。
+        if (old_fuse_bpf_install == nullptr) {
             return;
         }
         return old_fuse_bpf_install(fuse, e, child_path, backing_fd);
@@ -188,7 +223,7 @@ namespace bpf_hook {
                 fuseBpfBlockAll.load(std::memory_order_relaxed) || bpf_fd >= 0;
         if (interceptThisCall &&
             (recordExternalAppSpecificStorage.load(std::memory_order_relaxed) ||
-             (fuse_req != nullptr && fuse_req->ctx.uid == 0))) {
+             (fuse_req_valid && fuse_req_uid == 0))) {
             return;
         }
         return old_fuse_bpf_fill_entries(path, bpf_fd, e, backing_fd);

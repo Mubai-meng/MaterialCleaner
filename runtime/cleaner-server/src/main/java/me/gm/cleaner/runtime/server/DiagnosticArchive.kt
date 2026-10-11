@@ -77,6 +77,7 @@ object DiagnosticArchive {
             addStatus(zip, server)
             addFilesystem(zip)
             addErrorJournal(zip)
+            addHookErrorJournal(zip)
             addDataBus(zip)
             addLogcat(zip)
             addAutoLogs(zip)
@@ -192,6 +193,8 @@ object DiagnosticArchive {
         appendLine("- status/orchestrated_status.json has the full five-layer state.")
         appendLine("- status/native_hook_status_pretty.json has MediaProvider/FUSE hook details.")
         appendLine("- databus/health.json has queue, snapshot, and permission health.")
+        appendLine("- errors/hook_errors.jsonl has MediaProvider (LSPosed module) runtime errors:")
+        appendLine("  structured, so unlike the logcat captures it is NOT subject to LOG_FLOWCTRL drops.")
         appendLine("- logs/logcat_material_cleaner_filtered.txt has focused runtime logs.")
         appendLine("  ⚠️ Both logs/logcat_* captures are capped by '-t' counted in RAW lines (~700–1500/s),")
         appendLine("  so they cover roughly the last 20–40 s only even with LOGCAT_TAIL_LINES=$LOGCAT_TAIL_LINES.")
@@ -576,6 +579,58 @@ object DiagnosticArchive {
             addText(zip, "errors/journal.jsonl", lines)
         }.onFailure {
             addText(zip, "errors/journal_error.txt", it.stackTraceToString())
+        }
+    }
+
+    /**
+     * 导出 MediaProvider（LSPosed 模块）进程的结构化错误流水。
+     *
+     * 与 [addErrorJournal] 的区别只是**来源进程**：后者是 server 进程自产的
+     * `ServerErrorJournal`，前者是模块进程自产的 `HookErrorJournal`，经
+     * `native_hook_status.json` 的 `hookErrors` 段跨进程搬运到此处。
+     *
+     * 为什么单独成文件而不是并入 `errors/journal.jsonl`：两个进程的错误码域不同，
+     * 混在一个文件里会让「这条错误出自哪个进程」需要二次推断。
+     *
+     * 空流水也写一个 0 字节条目：让「模块从未报错」与「模块根本没在跑」在包结构上
+     * 可区分（后者 `native_hook_status.json` 本身就缺失）。
+     */
+    private fun addHookErrorJournal(zip: ZipOutputStream) {
+        runCatching {
+            val json = DataBus.readSnapshotSafe(DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS)
+            if (json == null) {
+                addText(zip, "errors/hook_errors.jsonl", "")
+                return
+            }
+            val hookErrors = runCatching { JSONObject(json).optJSONObject("hookErrors") }
+                .getOrNull()
+            val entries = hookErrors?.optJSONArray("entries")
+            if (entries == null || entries.length() == 0) {
+                addText(zip, "errors/hook_errors.jsonl", "")
+                return
+            }
+            val lines = (0 until entries.length()).joinToString(separator = "\n") { i ->
+                entries.getJSONObject(i).toString()
+            }
+            addText(zip, "errors/hook_errors.jsonl", lines)
+            addText(
+                zip,
+                "errors/hook_errors_summary.txt",
+                buildString {
+                    appendLine("source=MediaProvider(LSPosed module) via native_hook_status.json")
+                    appendLine("totalRecorded=" + hookErrors.optLong("totalRecorded", 0L))
+                    appendLine("slotCount=" + hookErrors.optInt("slotCount", 0))
+                    appendLine("exportLimit=" + hookErrors.optInt("exportLimit", 0))
+                    appendLine("exported=" + entries.length())
+                    appendLine()
+                    appendLine("severity: W=warn E=error (as originally recorded)")
+                    appendLine("count: occurrences of this exact (code, severity, subject, detail)")
+                    appendLine("firstAtElapsed/lastAtElapsed: bounds of the observed span")
+                    appendLine("atElapsed: SystemClock.elapsedRealtime of the MediaProvider process")
+                },
+            )
+        }.onFailure {
+            addText(zip, "errors/hook_errors_error.txt", it.stackTraceToString())
         }
     }
 

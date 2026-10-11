@@ -6,12 +6,14 @@ import me.gm.cleaner.core.config.ConfigSourceHealth
 import me.gm.cleaner.core.config.ConfiguredPolicySnapshot
 import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
+import me.gm.cleaner.core.storage.redirect.domain.InaccessiblePathDeriver
 import me.gm.cleaner.core.storage.redirect.domain.OrderedRedirectInterpreter
 import me.gm.cleaner.core.storage.redirect.domain.RedirectPolicySnapshot
 import me.gm.cleaner.core.storage.redirect.domain.RedirectRule
 import me.gm.cleaner.core.storage.redirect.domain.RuntimeBehaviorPolicy
 import me.gm.cleaner.core.storage.redirect.domain.RuntimeStoragePolicy
 import me.gm.cleaner.core.storage.redirect.domain.StoragePolicyEnvelope
+import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import java.util.UUID
 
@@ -82,6 +84,11 @@ object RuntimePolicyProjector {
             }
         }
 
+        // 「不可访问的路径」不是独立配置：它由向导 q4 展开成的特殊形态重定向规则
+        // 反解得到（判据见 InaccessiblePathDeriver）。放在投影期算一次，
+        // 下游（MediaProvider Hook）直接消费，不在热路径重复推导。
+        val inaccessibleRules = buildInaccessibleRules(rules)
+
         return RedirectPolicySnapshot(
             schemaVersion = 1,
             generation = gen,
@@ -93,6 +100,7 @@ object RuntimePolicyProjector {
             storage = RuntimeStoragePolicy(
                 redirectRules = rules,
                 readOnlyRules = readOnlyRules,
+                inaccessibleRules = inaccessibleRules,
             ),
             behavior = RuntimeBehaviorPolicy(
                 deniedPackages = if (preferencesReady) ServicePreferences.denylist.toSet() else emptySet(),
@@ -157,6 +165,49 @@ object RuntimePolicyProjector {
             }
         }
         return rules
+    }
+
+    /**
+     * 从已投影的重定向规则里反解「不可访问」target（向导 q4）。
+     *
+     * 只读在配置里是独立规则族，而 q4 不是 —— 它只表现为形态特殊的重定向规则。
+     * 运行时若不做这一步反解，MediaProvider 就只能看到「一个指向应用自己 cache
+     * 子目录的普通挂载」，于是 MediaStore 查询结果仍会把真实文件整条吐给应用，
+     * 「完全识别不到」做不到。
+     */
+    private fun buildInaccessibleRules(
+        rules: Map<String, Map<Int, List<RedirectRule>>>,
+    ): Map<String, List<String>> {
+        val out = LinkedHashMap<String, List<String>>()
+        for ((packageName, userRules) in rules) {
+            val targets = LinkedHashSet<String>()
+            for ((userId, list) in userRules) {
+                val sdDir = RuntimeFileUtils.getPathAsUser(
+                    RuntimeFileUtils.externalStorageDir.path, userId)
+                val cacheDir = RuntimeFileUtils.getPathAsUser(
+                    File(File(RuntimeFileUtils.androidDataDir, packageName), "cache").path, userId)
+                val byMarker = InaccessiblePathDeriver.deriveByMarker(list, packageName)
+                val byEnv = InaccessiblePathDeriver.derive(list, sdDir, cacheDir)
+                targets += byMarker + byEnv
+                // 无条件诊断（放行期证据）：externalStorageDir 在 root app_process 下的
+                // 取值与配置里的存储坐标未必同源，两条判据一旦不一致必须留下痕迹。
+                // 只按配置变更触发，不在访问热路径上。
+                Log.i(
+                    "MC_REDIRECT",
+                    "[RuntimePolicyProjector] inaccessible scan pkg=$packageName user=$userId " +
+                        "rules=${list.size} sdDir=$sdDir cacheDir=$cacheDir " +
+                        "byMarker=${byMarker.size} byEnv=${byEnv.size}"
+                )
+            }
+            if (targets.isNotEmpty()) {
+                out[packageName] = targets.toList()
+                Log.i(
+                    "MC_REDIRECT",
+                    "[RuntimePolicyProjector] inaccessible pkg=$packageName targets=$targets"
+                )
+            }
+        }
+        return out
     }
 
     private fun buildRedirectRuleOrNull(

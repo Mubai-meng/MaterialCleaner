@@ -22,8 +22,8 @@
 #      拉起 cleaner_server 进程。该类的 main() 在 Dex 内 0 引用 ⇒ R8 整类
 #      删除（mapping 无类行、usage.txt 有记录）⇒ 子进程启动即
 #      ClassNotFoundException ⇒ binder 永不就绪 ⇒ 上述 binder timeout。
-#   2) LSPosed 入口：assets/xposed_init
-#        = me.gm.cleaner.runtime.mediaprovider.hook.XposedInit
+#   2) LSPosed 入口：META-INF/xposed/java_init.list（libxposed API 102）
+#        = me.gm.cleaner.runtime.mediaprovider.hook.MediaProviderHookModule
 #      同样被从 classes.dex 整类删除（main.jar 内另有副本，但 APK 侧入口
 #      不缺失才是既有行为，不应依赖 main.jar 的加载时序）。
 #   3) JNI 入口：libinline.so / libcleaner.so 内的 FindClass

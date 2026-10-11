@@ -1,6 +1,9 @@
 package me.gm.cleaner.runtime.mediaprovider.hook.media;
 
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.HookPolicyCache;
+import me.gm.cleaner.runtime.mediaprovider.hook.xp.HookInstall;
+import me.gm.cleaner.runtime.mediaprovider.hook.xp.HookParam;
+import me.gm.cleaner.runtime.mediaprovider.hook.xp.XpCompat;
 
 import android.content.ContentProvider;
 import android.content.Intent;
@@ -14,9 +17,6 @@ import me.gm.cleaner.runtime.mediaprovider.hook.bridge.AbstractGuardedHook;
 import java.io.File;
 import java.lang.reflect.Method;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * 媒体数据库适配器。
@@ -52,22 +52,22 @@ public class MediaDatabaseAdapter {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             Method queryMethod;
             try {
-                queryMethod = XposedHelpers.findMethodExact(mMediaProviderClass, "query",
+                queryMethod = XpCompat.findMethodExact(mMediaProviderClass, "query",
                         Uri.class, String[].class, Bundle.class, CancellationSignal.class, boolean.class);
             } catch (final NoSuchMethodError e) {
-                queryMethod = XposedHelpers.findMethodExact(mMediaProviderClass, "query",
+                queryMethod = XpCompat.findMethodExact(mMediaProviderClass, "query",
                         Uri.class, String[].class, Bundle.class, CancellationSignal.class);
             }
-            XposedBridge.hookMethod(queryMethod, new QueryHooker(mHook, mService, mClassLoader));
+            HookInstall.hook(queryMethod, new QueryHooker(mHook, mService, mClassLoader));
         }
     }
 
     // ── scan_file Hook ──
 
     private void initScanHook() {
-        final var callMethod = XposedHelpers.findMethodExact(
+        final var callMethod = XpCompat.findMethodExact(
                 mMediaProviderClass, "call", String.class, String.class, Bundle.class);
-        XposedBridge.hookMethod(callMethod, new ScanCallHooker());
+        HookInstall.hook(callMethod, new ScanCallHooker());
     }
 
     /**
@@ -88,7 +88,7 @@ public class MediaDatabaseAdapter {
         }
 
         @Override
-        protected void handleBefore(XC_MethodHook.MethodHookParam param) {
+        protected void handleBefore(HookParam param) {
             final var method = (String) param.args[0];
             final var arg = (String) param.args[1];
             final var extras = (Bundle) param.args[2];
@@ -121,7 +121,7 @@ public class MediaDatabaseAdapter {
         }
     }
 
-    private void applyScanPath(final XC_MethodHook.MethodHookParam param,
+    private void applyScanPath(final HookParam param,
                                final Bundle extras, final String mountedPath) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             param.args[1] = mountedPath;
@@ -138,7 +138,7 @@ public class MediaDatabaseAdapter {
         }
         for (final var method : mMediaProviderClass.getDeclaredMethods()) {
             if (method.getName().equals("insertFile")) {
-                XposedBridge.hookMethod(method, new InsertHooker(mHook, mClassLoader));
+                HookInstall.hook(method, new InsertHooker(mHook, mClassLoader));
             }
         }
     }

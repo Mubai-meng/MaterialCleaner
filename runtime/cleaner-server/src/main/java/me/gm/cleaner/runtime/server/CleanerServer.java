@@ -143,6 +143,9 @@ public class CleanerServer extends ContextWrapper {
         } catch (final Throwable t) {
             Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "shutdown VFS layer failed", t);
         }
+        // P0-6：logcat 采集子进程必须随 server 一起退出，否则每次重启都多一条常驻 logcat。
+        // AutoLogging.destroy() 是幂等的，放在其它关停步骤之前不影响它们的语义。
+        mAutoLogging.destroy();
         MediaProviderHookGateway.onDestroy();
         ObserverManager.INSTANCE.stopAllObservers();
     }

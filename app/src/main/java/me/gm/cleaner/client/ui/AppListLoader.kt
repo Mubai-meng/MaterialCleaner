@@ -2,6 +2,7 @@ package me.gm.cleaner.client.ui
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -29,18 +30,25 @@ class AppListLoader(
 ) {
 
     suspend fun load(): AppListLoadResult = withContext(defaultDispatcher) {
+        val t0 = SystemClock.elapsedRealtime()
         if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: start loading packages")
         val installedPackages = CleanerClient.getInstalledPackagesOrNull(PackageManager.GET_PERMISSIONS)
+        val t1 = SystemClock.elapsedRealtime()
         if (installedPackages == null) {
             if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: service unavailable or RPC failed, fallback")
-            return@withContext AppListLoadResult(loadLocalFallback(), isFullList = false)
+            val fallback = loadLocalFallback()
+            val t2 = SystemClock.elapsedRealtime()
+            logTiming(fallback.size, false, t1 - t0, 0L, 0L, t2 - t1)
+            return@withContext AppListLoadResult(fallback, isFullList = false)
         }
         if (installedPackages.isNotEmpty()) {
             AppLabelCache.updatePackageLabelCacheInBulk(installedPackages, true)
         } else if (BuildConfig.DEBUG) {
             Log.w("CleanerTest", "AppListLoader.load: server returned empty installed list, keep previous label cache")
         }
+        val t2 = SystemClock.elapsedRealtime()
         val srPackageStatus = CleanerClient.getSrPackagesStatusOrNull(PackageStatus.GET_FROM_ALL_PROCESS)
+        val t3 = SystemClock.elapsedRealtime()
         if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: srPackageStatus size=${srPackageStatus?.size}")
         // 服务端映射就绪且查无记录等于真无，未就绪或链路失败一律按未知处理，不混用空表示两种含义。
         val statusUnknown = srPackageStatus == null
@@ -54,8 +62,40 @@ class AppListLoader(
                 parseMountState(if (statusUnknown) null else srPackageStatus?.get(pi.packageName), statusUnknown)
             )
         }
+        val t4 = SystemClock.elapsedRealtime()
         if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: result=${result.size} apps")
+        logTiming(result.size, true, t1 - t0, t2 - t1, t3 - t2, t4 - t3)
         AppListLoadResult(result, isFullList = true)
+    }
+
+    /**
+     * 分阶段耗时（release 也打）。
+     *
+     * 为什么必须打：主界面列表"慢半拍"的候选原因有四五个（服务端安装列表 RPC、
+     * 625 个包的应用名解析、挂载状态 RPC、模型映射），而在 release 构建里
+     * `BuildConfig.DEBUG` 为 false、`CleanerTest` 一条都不输出，
+     * 光看源码无法定位。每条加载一行，代价可忽略。
+     */
+    private fun logTiming(
+        size: Int,
+        full: Boolean,
+        getInstalled: Long,
+        labels: Long,
+        status: Long,
+        map: Long,
+    ) {
+        Log.i(
+            TAG, "load: apps=" + size + " full=" + full +
+                " getInstalled=" + getInstalled + "ms" +
+                " labels=" + labels + "ms" +
+                " status=" + status + "ms" +
+                " map=" + map + "ms" +
+                " total=" + (getInstalled + labels + status + map) + "ms"
+        )
+    }
+
+    private companion object {
+        const val TAG = "MC/AppList"
     }
 
     /** 服务不可用时：用 PackageManager 获取客户端可见的全量应用，供主界面过滤规则包和新建挂载选择。 */

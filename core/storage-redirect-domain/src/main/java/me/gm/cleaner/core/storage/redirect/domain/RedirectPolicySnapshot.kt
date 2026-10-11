@@ -42,9 +42,13 @@ data class RedirectPolicySnapshot(
  * 运行时存储策略：已投影、可直接消费的重定向映射与只读路径。
  *
  * @property redirectRules packageName → userId → 规则
- * @property readOnlyRules packageName → 只读路径列表
+ * @property readOnlyRules packageName → 只读路径列表（允许读、拒绝写）
+ * @property inaccessibleRules packageName → 不可访问路径列表（连读都拒绝，
+ *           目标是让应用完全识别不到；由 [InaccessiblePathDeriver] 从
+ *           [redirectRules] 推导，不是独立配置）
  */
 data class RuntimeStoragePolicy(
     val redirectRules: Map<String, Map<Int, List<RedirectRule>>> = emptyMap(),
     val readOnlyRules: Map<String, List<String>> = emptyMap(),
+    val inaccessibleRules: Map<String, List<String>> = emptyMap(),
 )

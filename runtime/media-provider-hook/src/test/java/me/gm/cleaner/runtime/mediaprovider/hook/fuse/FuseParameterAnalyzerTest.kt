@@ -25,6 +25,16 @@ class FuseParameterAnalyzerTest {
             shouldTranscode: Boolean,
             transcodeReason: Int,
         ) {}
+        fun openWithFuse(
+            path: String,
+            uid: Int,
+            mediaCapabilitiesUid: Int,
+            modeBits: Int,
+            shouldRedact: Boolean,
+            shouldTranscode: Boolean,
+            transcodeReason: Int,
+            volumeName: String,
+        ) {}
         fun onFileLookupForFuse(path: String, tag: String, uid: Int) {}
         fun isUidAllowedAccessToDataOrObbPathForFuse(uid: Int, path: String) {}
         fun isDirAccessAllowedForFuse(path: String, uid: Int, accessType: Int) {}
@@ -148,6 +158,29 @@ class FuseParameterAnalyzerTest {
             Boolean::class.javaPrimitiveType,
             Boolean::class.javaPrimitiveType,
             Int::class.javaPrimitiveType,
+        )
+        val roles = ParameterAnalyzer.analyze(m)
+        assertNotNull(roles)
+        assertEquals(0, roles.pathIndex)
+        assertEquals(-1, roles.path2Index)
+        assertEquals(1, roles.uidIndex)
+        assertEquals(3, roles.modeIndex)
+    }
+
+    @Test
+    fun `回归openWithFuse八参仍标定mode`() {
+        // 设备实测（ColorOS 17 / Android 17）签名：尾部多一个 String。
+        // 旧判据写死 7 参 ⇒ 漏判 ⇒ 只读对「以写方式打开」失效。
+        val m = method(
+            "openWithFuse",
+            String::class.java,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            String::class.java,
         )
         val roles = ParameterAnalyzer.analyze(m)
         assertNotNull(roles)

@@ -6,7 +6,7 @@ import me.gm.cleaner.runtime.mediaprovider.hook.policy.HookSystemProperties;
 
 import android.util.Log;
 
-import de.robv.android.xposed.XposedHelpers;
+import me.gm.cleaner.runtime.mediaprovider.hook.xp.XpCompat;
 
 /**
  * MediaProvider Hook 引导装配器。
@@ -70,17 +70,17 @@ public class MediaProviderHook {
 
     boolean isFuseThread() {
         try {
-            final var fuseDaemonCls = XposedHelpers.findClass(
+            final var fuseDaemonCls = XpCompat.findClass(
                     "com.android.providers.media.fuse.FuseDaemon", mClassLoader);
-            return (boolean) XposedHelpers.callStaticMethod(
+            return (boolean) XpCompat.callStaticMethod(
                     fuseDaemonCls, "native_is_fuse_thread");
-        } catch (final XposedHelpers.ClassNotFoundError e) {
+        } catch (final XpCompat.ClassNotFoundError e) {
             return false;
         }
     }
 
     String getCallingPackage(final Object mp) {
-        final var threadLocal = (ThreadLocal<?>) XposedHelpers.getObjectField(mp, "mCallingIdentity");
-        return (String) XposedHelpers.callMethod(threadLocal.get(), "getPackageName");
+        final var threadLocal = (ThreadLocal<?>) XpCompat.getObjectField(mp, "mCallingIdentity");
+        return (String) XpCompat.callMethod(threadLocal.get(), "getPackageName");
     }
 }

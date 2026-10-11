@@ -271,6 +271,15 @@ object SnapshotPublisher {
         }
         root.put("readOnlyRules", roObj)
 
+        // inaccessibleRules: { pkg: [paths] }
+        // 「不可访问」与「只读」是两回事：只读允许读、拒绝写；不可访问连读都拒绝。
+        // 这里由投影器从重定向规则反解（见 InaccessiblePathDeriver），不是独立配置。
+        val inObj = JSONObject()
+        for ((pkg, paths) in snapshot.storage.inaccessibleRules) {
+            inObj.put(pkg, JSONArray(paths as Collection<*>))
+        }
+        root.put("inaccessibleRules", inObj)
+
         // denylist
         root.put("denylist", JSONArray(snapshot.behavior.deniedPackages.toList() as Collection<*>))
 

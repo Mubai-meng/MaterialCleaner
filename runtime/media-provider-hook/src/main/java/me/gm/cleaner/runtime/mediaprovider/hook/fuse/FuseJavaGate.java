@@ -7,6 +7,8 @@ import me.gm.cleaner.runtime.mediaprovider.hook.media.MediaProviderHooksService;
 import me.gm.cleaner.runtime.mediaprovider.hook.media.QuerySessionCache;
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.HookPolicyCache;
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeHookStatus;
+import me.gm.cleaner.runtime.mediaprovider.hook.policy.InaccessibleEvalStats;
+import me.gm.cleaner.runtime.mediaprovider.hook.policy.ReadOnlyEvalStats;
 
 import android.os.FileObserver;
 import android.system.OsConstants;
@@ -21,9 +23,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
+import io.github.libxposed.api.XposedInterface;
+import me.gm.cleaner.core.common.err.ErrorCodes;
+import me.gm.cleaner.runtime.mediaprovider.hook.err.HookErrorJournal;
+import me.gm.cleaner.runtime.mediaprovider.hook.xp.HookInstall;
+import me.gm.cleaner.runtime.mediaprovider.hook.xp.HookParam;
+import me.gm.cleaner.runtime.mediaprovider.hook.xp.XpCompat;
 
 import me.gm.cleaner.core.storage.redirect.databus.DataBus;
 import org.json.JSONObject;
@@ -171,8 +176,13 @@ public class FuseJavaGate {
                     heuristicHooked.add(signature);
                 }
             } catch (final Throwable t) {
-                failedMethods.add(signature + " (" + t.getClass().getName() + ": " + t.getMessage() + ")");
+                final String reason = t.getClass().getName() + ": " + t.getMessage();
+                failedMethods.add(signature + " (" + reason + ")");
                 Log.e("MC_REDIRECT", "[FuseJavaGate] install failed " + signature, t);
+                NativeHookStatus.INSTANCE.markHookError(
+                        ErrorCodes.INSTANCE.HOOK_JAVA_LOAD_FAILED,
+                        signature + " (" + reason + ")", "FuseJavaGate",
+                        HookErrorJournal.SEVERITY_ERROR, 0, 0L);
             }
         }
 
@@ -263,23 +273,43 @@ public class FuseJavaGate {
     }
 
     /**
-     * 安装单个 FUSE Hook，使用统一的异常安全包装。
+     * 安装单个 FUSE Hook，使用统一的异常安全包装（libxposed API 102 拦截器链版）。
      * <p>
      * 所有 Hook 共享同一个异常策略：捕获所有 Throwable、记录日志、不阻断文件系统。
      * 这是与旧代码的关键区别 —— 旧代码中 renameForFuse 和 openWithFuse 的 handler
      * 没有 try-catch，异常会传播到 Xposed 框架并可能导致 MediaProvider 崩溃。
+     * <p>
+     * veto（{@code setResult(EPERM)} / {@code setThrowable(...)}）是刻意为之的
+     * 「拒绝宿主操作」，必须在防护之外传播给调用方 —— 因此本包装层只在 handler
+     * 抛出非 veto 异常时兜底，HookInstall 统一使用 PASSTHROUGH 异常模式（若用默认
+     * PROTECTIVE，proceed 前抛出的 veto 异常会被框架吞掉并继续执行原方法，
+     * 只读拒绝将静默失效）。
      */
     private void installHook(final Method method, final BehaviorHandler handler, final ParamRoles roles) {
-        XposedBridge.hookMethod(method, new XC_MethodHook() {
+        HookInstall.hook(method, new XposedInterface.Hooker() {
             @Override
-            protected void beforeHookedMethod(final MethodHookParam param) {
+            public Object intercept(final XposedInterface.Chain chain) throws Throwable {
+                final Object[] args = chain.getArgs().toArray();
+                final HookParam param = new HookParam(chain.getThisObject(), args);
                 try {
                     handler.handle(param, roles, method.getName());
                 } catch (final Throwable t) {
                     Log.e("MC_REDIRECT", "[FuseJavaGate] handler failed for "
                             + method.getName() + " " + Arrays.toString(method.getParameterTypes()), t);
+                    // logcat 会被 LOG_FLOWCTRL 丢弃，同步写一条结构化流水进诊断包。
+                    NativeHookStatus.INSTANCE.markHookError(
+                            ErrorCodes.INSTANCE.HOOK_JAVA_FUSE_HANDLER_FAILED,
+                            method.getName() + " type=" + t.getClass().getSimpleName(),
+                            "FuseJavaGate", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
                     // 永不阻断文件系统操作 —— Hook 是可选增强，不是系统依赖
                 }
+                if (param.isVetoResult()) {
+                    return param.getResult();
+                }
+                if (param.isVetoThrowable()) {
+                    throw param.getThrowable();
+                }
+                return chain.proceed(param.args);
             }
         });
     }
@@ -301,10 +331,17 @@ public class FuseJavaGate {
                 Log.w("MC_REDIRECT", "[FuseJavaGate] " + methodName + " cannot find uid");
                 return;
             }
+            if (rejectInaccessible(param, path, uid, methodName,
+                    InaccessibleEvalStats.DenyPoint.FILE, false)) {
+                return;
+            }
             final String packageName = getCallingPackageName(param.thisObject, uid);
             dispatchFileSystemEvent(packageName, path, eventType, methodName, uid);
-            final String mountedPath = redirectFusePath(param, roles.pathIndex, uid, methodName);
-            if (mService.isReadOnly(mountedPath, uid)) {
+            redirectFusePath(param, roles.pathIndex, uid, methodName);
+            // 只读判定必须用**应用可见的原始路径**：规则按 app 看到的路径填写，
+            // 挂载后路径落在 /storage/emulated/0/Android/data/<pkg>/… 下，永远匹配不上。
+            if (mService.isReadOnly(path, uid)) {
+                ReadOnlyEvalStats.INSTANCE.recordDenial(ReadOnlyEvalStats.DenyPoint.FILE);
                 param.setResult(OsConstants.EPERM);
             }
         };
@@ -333,15 +370,22 @@ public class FuseJavaGate {
                 Log.w("MC_REDIRECT", "[FuseJavaGate] " + methodName + " cannot find uid");
                 return;
             }
+            if (rejectInaccessible(param, oldPath, uid, methodName,
+                    InaccessibleEvalStats.DenyPoint.RENAME, false) ||
+                    rejectInaccessible(param, newPath, uid, methodName,
+                            InaccessibleEvalStats.DenyPoint.RENAME, false)) {
+                return;
+            }
             final String packageName = getCallingPackageName(param.thisObject, uid);
             final int isDir = new File(oldPath).isFile() ? 0 : DIR;
             dispatchFileSystemEvent(packageName, oldPath, FileObserver.MOVED_FROM | isDir,
                     methodName, uid);
             dispatchFileSystemEvent(packageName, newPath, FileObserver.MOVED_TO | isDir,
                     methodName, uid);
-            final String mountedOldPath = redirectFusePath(param, roles.pathIndex, uid, methodName + ".oldPath");
-            final String mountedNewPath = redirectFusePath(param, roles.path2Index, uid, methodName + ".newPath");
-            if (mService.isReadOnly(mountedOldPath, uid) || mService.isReadOnly(mountedNewPath, uid)) {
+            redirectFusePath(param, roles.pathIndex, uid, methodName + ".oldPath");
+            redirectFusePath(param, roles.path2Index, uid, methodName + ".newPath");
+            if (mService.isReadOnly(oldPath, uid) || mService.isReadOnly(newPath, uid)) {
+                ReadOnlyEvalStats.INSTANCE.recordDenial(ReadOnlyEvalStats.DenyPoint.RENAME);
                 param.setResult(OsConstants.EPERM);
             }
         };
@@ -377,6 +421,10 @@ public class FuseJavaGate {
                 Log.w("MC_REDIRECT", "[FuseJavaGate] " + methodName + " cannot find uid, skipping redirect");
                 return;
             }
+            if (rejectInaccessible(param, originalPath, uid, methodName,
+                    InaccessibleEvalStats.DenyPoint.OPEN, true)) {
+                return;
+            }
             final String mountedPath = redirectFusePath(param, roles.pathIndex, uid, methodName);
             redirectMatchingStringPathArgs(param, originalPath, mountedPath);
             final Integer modeBits;
@@ -386,7 +434,7 @@ public class FuseJavaGate {
                 final Object modeArg = param.args[roles.modeIndex];
                 modeBits = modeArg instanceof Integer ? (Integer) modeArg : null;
             }
-            final boolean readOnly = mountedPath != null && mService.isReadOnly(mountedPath, uid);
+            final boolean readOnly = originalPath != null && mService.isReadOnly(originalPath, uid);
             if (FuseOpenModePolicyKt.shouldDenyOpen(modeBits, readOnly)) {
                 rejectOpenHandle(param, methodName);
             }
@@ -394,11 +442,53 @@ public class FuseJavaGate {
     }
 
     /**
+     * 「不可访问的路径」拒绝：连读都不允许，目标是让应用完全识别不到。
+     *
+     * 必须在**路径重定向之前**、用应用可见的原始路径判定 ——
+     * 重定向后路径落在 `/storage/emulated/0/Android/data/<pkg>/...` 下，
+     * 拿它去比规则永远匹配不上。
+     *
+     * 与只读拒绝的三个差别：
+     * 1. 不看操作类型（读也拦），只读只看写；
+     * 2. 返回 ENOENT 而不是 EPERM —— 要的是"不存在"，不是"没权限"；
+     * 3. 命中后直接返回，不再做路径重定向。
+     *
+     * @param asThrowable true 时按 openWithFuse 的 Java 契约抛异常（它返回
+     *                    ParcelFileDescriptor，setResult(int) 会造成类型错配）
+     * @return 已拒绝返回 true，调用方应立即 return
+     */
+    private boolean rejectInaccessible(final HookParam param, final String visiblePath,
+                                       final int uid, final String methodName,
+                                       final InaccessibleEvalStats.DenyPoint point,
+                                       final boolean asThrowable) {
+        if (visiblePath == null || uid < 0) {
+            return false;
+        }
+        final String matched = mService.isInaccessible(visiblePath, uid);
+        if (matched == null) {
+            return false;
+        }
+        InaccessibleEvalStats.INSTANCE.recordDenial(point);
+        Log.i("MC_REDIRECT", "[FuseJavaGate] " + methodName
+                + " denied by inaccessible rule: " + visiblePath
+                + " (rule=" + matched + ")");
+        if (asThrowable) {
+            // FileNotFoundException → 应用侧看到的就是"文件不存在"。
+            param.setThrowable(new java.io.FileNotFoundException(
+                    "ENOENT: path is not accessible"));
+        } else {
+            param.setResult(OsConstants.ENOENT);
+        }
+        return true;
+    }
+
+    /**
      * open 句柄拒绝：按 openWithFuse 的 Java 契约抛异常，不返回 int errno。
      * <p>
      * openWithFuse 返回 ParcelFileDescriptor，直接 setResult(EPERM) 会造成调用方类型错配。
      */
-    private void rejectOpenHandle(final XC_MethodHook.MethodHookParam param, final String methodName) {
+    private void rejectOpenHandle(final HookParam param, final String methodName) {
+        ReadOnlyEvalStats.INSTANCE.recordDenial(ReadOnlyEvalStats.DenyPoint.OPEN);
         Log.i("MC_REDIRECT", "[FuseJavaGate] " + methodName + " denied by read-only rule");
         param.setThrowable(new java.io.FileNotFoundException("EPERM: denied by read-only rule"));
     }
@@ -441,6 +531,11 @@ public class FuseJavaGate {
                 Log.w("MC_REDIRECT", "[FuseJavaGate] " + methodName + " cannot find uid");
                 return;
             }
+            // 「不可访问」对**读**也生效，因此不能像只读那样等 accessType != READ 才判。
+            if (rejectInaccessible(param, path, uid, methodName,
+                    InaccessibleEvalStats.DenyPoint.DIR, false)) {
+                return;
+            }
             // 第三个参数可能是 int(accessType) 或 boolean(forCreate)
             final Object extraArg = param.args.length > roles.uidIndex + 1
                     ? param.args[roles.uidIndex + 1] : null;
@@ -456,9 +551,10 @@ public class FuseJavaGate {
                                     ? FileObserver.CREATE : FileObserver.DELETE) | DIR,
                             methodName, uid);
                 }
-                final String mountedPath = redirectFusePath(param, roles.pathIndex, uid, methodName);
+                redirectFusePath(param, roles.pathIndex, uid, methodName);
                 if (accessType != DIRECTORY_ACCESS_FOR_READ
-                        && mService.isReadOnly(mountedPath, uid)) {
+                        && mService.isReadOnly(path, uid)) {
+                    ReadOnlyEvalStats.INSTANCE.recordDenial(ReadOnlyEvalStats.DenyPoint.DIR);
                     param.setResult(OsConstants.EPERM);
                 }
             } else if (extraArg instanceof Boolean) {
@@ -468,8 +564,9 @@ public class FuseJavaGate {
                 dispatchFileSystemEvent(packageName, path,
                         (forCreate ? FileObserver.CREATE : FileObserver.DELETE) | DIR,
                         methodName, uid);
-                final String mountedPath = redirectFusePath(param, roles.pathIndex, uid, methodName);
-                if (mService.isReadOnly(mountedPath, uid)) {
+                redirectFusePath(param, roles.pathIndex, uid, methodName);
+                if (mService.isReadOnly(path, uid)) {
+                    ReadOnlyEvalStats.INSTANCE.recordDenial(ReadOnlyEvalStats.DenyPoint.DIR);
                     param.setResult(OsConstants.EPERM);
                 }
             } else {
@@ -508,7 +605,7 @@ public class FuseJavaGate {
      * 否则调用 {@link #findCallingUid(String, Object[])} 在运行时扫描参数列表，
      * 利用方法名提示 + 值 >= 10000 启发式定位 uid。
      */
-    private int resolveUid(final XC_MethodHook.MethodHookParam param,
+    private int resolveUid(final HookParam param,
                            final ParamRoles roles, final String methodName) {
         if (roles.uidIndex >= 0) {
             final Object arg = param.args[roles.uidIndex];
@@ -537,7 +634,7 @@ public class FuseJavaGate {
          * @param roles      静态分析得到的参数角色（path/uid/index 等）
          * @param methodName 方法名（用于日志和运行时 uid 推断提示）
          */
-        void handle(XC_MethodHook.MethodHookParam param, ParamRoles roles, String methodName)
+        void handle(HookParam param, ParamRoles roles, String methodName)
                 throws Throwable;
     }
 
@@ -760,6 +857,11 @@ public class FuseJavaGate {
             EventSignalCoalescer.INSTANCE.signal(DataBusProtocol.SIGNAL_FILESYSTEM_EVENTS_CHANGED);
         } catch (Exception e) {
             Log.e("MC_REDIRECT", "[FuseJavaGate] DataBus write failed", e);
+            NativeHookStatus.INSTANCE.markHookError(
+                    ErrorCodes.INSTANCE.HOOK_JAVA_BUS_WRITE_FAILED,
+                    "dispatchFileSystemEvent pkg=" + packageName
+                            + " type=" + e.getClass().getSimpleName(),
+                    "FuseJavaGate", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
         }
     }
 
@@ -768,12 +870,12 @@ public class FuseJavaGate {
     // ════════════════════════════════════════════════════════════════
 
     private String getCallingPackageName(final Object mp, final int uid) {
-        final var localCallingIdentity = XposedHelpers.callMethod(
+        final var localCallingIdentity = XpCompat.callMethod(
                 mp, "getCachedCallingIdentityForFuse", uid);
-        return (String) XposedHelpers.callMethod(localCallingIdentity, "getPackageName");
+        return (String) XpCompat.callMethod(localCallingIdentity, "getPackageName");
     }
 
-    private String redirectFusePath(final XC_MethodHook.MethodHookParam param, final int pathIndex,
+    private String redirectFusePath(final HookParam param, final int pathIndex,
                                     final int uid, final String operation) {
         final var path = (String) param.args[pathIndex];
         if (path == null) {
@@ -788,7 +890,14 @@ public class FuseJavaGate {
             return path;
         }
         final var mountedPath = HookPolicyCache.INSTANCE.getMountedPath(packageName, path);
-        if (mountedPath == null || path.equals(mountedPath)) {
+        final boolean redirected = mountedPath != null && !path.equals(mountedPath);
+        // 只对**已配置重定向规则**的包记账：否则等于给所有包的文件操作都加一次开销。
+        // 记账让"未命中"不再沉默 —— 未命中路径此前既无日志也无计数，
+        // 导致"hook 没工作"与"路径不在 target 之下"无法区分（连续三批实机的教训）。
+        if (HookPolicyCache.INSTANCE.hasRedirectRules(packageName)) {
+            NativeHookStatus.INSTANCE.recordFuseRedirect(packageName, path, redirected);
+        }
+        if (!redirected) {
             return path;
         }
         param.args[pathIndex] = mountedPath;
@@ -797,7 +906,7 @@ public class FuseJavaGate {
         return mountedPath;
     }
 
-    private void redirectMatchingStringPathArgs(final XC_MethodHook.MethodHookParam param,
+    private void redirectMatchingStringPathArgs(final HookParam param,
                                                 final String originalPath,
                                                 final String mountedPath) {
         if (originalPath == null || mountedPath == null || originalPath.equals(mountedPath)) {

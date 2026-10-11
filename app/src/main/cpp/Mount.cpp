@@ -245,10 +245,18 @@ static bool wait_zygote(int pid) {
     if (access(path.c_str(), F_OK)) {
         return false;
     }
-    char nice_name[PATH_MAX];
+    // 实际只用于比较 SELinux context（"u:r:zygote:s0" 13 字节）：原来开 4096 既浪费栈
+    // 又在 read 失败时读到未初始化内存。256 足够，栈占用同时降 3.8KB。
+    char nice_name[256];
     while (true) {
         int fd = sys_open(path.c_str(), O_RDONLY, 0);
-        nice_name[sys_read(fd, nice_name, sizeof(nice_name) - 1)] = 0;
+        // P0-3：sys_read 失败返回 -1，拿它当下标会写 nice_name[-1]（栈缓冲下溢）。
+        // 钳到 0 ⇒ 判定为"非 zygote"，与原来的实际走向一致，但不再有 UB。
+        ssize_t read_bytes = fd < 0 ? -1 : sys_read(fd, nice_name, sizeof(nice_name) - 1);
+        if (read_bytes < 0) {
+            read_bytes = 0;
+        }
+        nice_name[read_bytes] = '\0';
         sys_close(fd);
         if (!strcmp("u:r:zygote:s0"_iobfs.c_str(), nice_name)) {
             usleep(sleep_time);

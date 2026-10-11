@@ -1,5 +1,7 @@
 package me.gm.cleaner.client.ui
 
+import android.graphics.drawable.Drawable
+import android.util.LruCache
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.MenuItem
@@ -43,7 +45,18 @@ class AppListAdapter(
         if (BuildConfig.DEBUG) {
             Log.i("MC/Test", "onBindViewHolder: position=$position, package=${model.packageInfo.packageName}")
         }
-        binding.icon.setImageDrawable(model.packageInfo.applicationInfo.loadIcon(fragment.requireContext().packageManager))
+        val packageInfo = model.packageInfo
+        val packageName = packageInfo.packageName
+        val resources = fragment.resources
+        val cached = ICON_CACHE.get(packageName)?.takeIf {
+            it.lastUpdateTime == packageInfo.lastUpdateTime
+        }
+        val icon = cached?.constantState?.newDrawable(resources) ?: run {
+            val loaded = packageInfo.applicationInfo.loadIcon(fragment.requireContext().packageManager)
+            loaded.constantState?.let { ICON_CACHE.put(packageName, CachedIcon(packageInfo.lastUpdateTime, it)) }
+            loaded
+        }
+        binding.icon.setImageDrawable(icon)
         binding.title.text = model.label
         binding.summary.text = run {
             val summary = mutableListOf<CharSequence>()
@@ -161,7 +174,14 @@ class AppListAdapter(
 
     class ViewHolder(val binding: ApplistItemBinding) : RecyclerView.ViewHolder(binding.root)
 
+    private data class CachedIcon(
+        val lastUpdateTime: Long,
+        val constantState: Drawable.ConstantState,
+    )
+
     companion object {
+        private val ICON_CACHE = object : LruCache<String, CachedIcon>(48) {}
+
         private val CALLBACK = object : DiffUtil.ItemCallback<AppListModel>() {
             override fun areItemsTheSame(
                 oldItem: AppListModel, newItem: AppListModel
