@@ -196,7 +196,8 @@ App → Shell.cmd(Starter.command) → start.sh → starter (ELF 二进制)
 ## 赞助
 
 如果觉得软件好用可以赞助作者。
-<img width="480" height="608" alt="IMG_20261011_112622" src="https://github.com/user-attachments/assets/c406d2f6-bea9-4035-bbea-e89226ef7fcf" />
-<img width="480" height="604" alt="IMG_20261011_112539" src="https://github.com/user-attachments/assets/066bd2dc-5271-4b7a-8265-5353104a3f4c" />
+<img width="240" height="304" alt="IMG_20261011_112622" src="https://github.com/user-attachments/assets/98f9cd4b-68ff-4233-9dbb-e69c454839b9" />
+<img width="240" height="302" alt="IMG_20261011_112539" src="https://github.com/user-attachments/assets/f1b353d6-537a-4833-a253-249fc5b15784" />
+
 
 
