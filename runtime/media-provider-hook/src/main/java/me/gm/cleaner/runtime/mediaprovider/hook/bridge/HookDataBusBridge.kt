@@ -20,6 +20,9 @@ import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 object HookDataBusBridge {
     private const val TAG = "HookDataBusBridge"
     private const val FALLBACK_COOLDOWN_MS = 30_000L
+
+    /** Binder 不可用且文件兜底失败时，最多暂存多少条事件等待补写。 */
+    private const val MAX_PENDING_EVENTS = 256
     private val hookWritableSnapshots = setOf(
         DataBusProtocol.SNAPSHOT_NATIVE_HOOK_STATUS,
     )
@@ -32,6 +35,10 @@ object HookDataBusBridge {
 
     @Volatile
     private var callback: ICleanerServerCallback? = null
+
+    /** 失败事件暂存；Binder 恢复后按原顺序补写。 */
+    private val pendingEvents = PendingEventBuffer(MAX_PENDING_EVENTS)
+    private var lastOverflowLogAt = 0L
 
     /**
      * DataBus **文件兜底**的冷却截止时刻（elapsedRealtime）。
@@ -47,6 +54,10 @@ object HookDataBusBridge {
 
     fun setCallback(value: ICleanerServerCallback?) {
         callback = value
+        if (value != null) {
+            // server 重新注册回调：把断开期间暂存的事件补写回去。
+            drainPending(value)
+        }
     }
 
     fun readSnapshot(name: String): String? {
@@ -87,24 +98,33 @@ object HookDataBusBridge {
     }
 
     fun writeEvent(queue: String, content: String): Long {
-        // 冷却期内不再尝试注定失败的文件兜底（理由见字段注释）。
-        if (SystemClock.elapsedRealtime() < fallbackDisabledUntilElapsed) {
-            return -1L
-        }
         val remote = callback
         if (remote != null) {
-            try {
-                val seq = remote.writeDataBusEvent(queue, content)
-                if (seq >= 0L) return seq
+            val seq = try {
+                remote.writeDataBusEvent(queue, content)
             } catch (e: RemoteException) {
                 Log.w(TAG, "writeEvent via server failed: $queue", e)
+                -1L
             } catch (e: RuntimeException) {
                 Log.w(TAG, "writeEvent via server failed: $queue", e)
                 reportBridgeFailure(
                     ErrorCodes.HOOK_JAVA_BUS_WRITE_FAILED,
                     "writeEvent via server failed: $queue (${e.javaClass.simpleName})",
                 )
+                -1L
             }
+            if (seq >= 0L) {
+                // server 已恢复：解除文件兜底冷却，并补写断开期间积压的事件。
+                fallbackDisabledUntilElapsed = 0L
+                drainPending(remote)
+                return seq
+            }
+        }
+        // 冷却只约束「注定失败的文件兜底」，不再短路上面的 Binder 路径 ——
+        // 旧实现把冷却判断放在最前面，server 恢复后仍会盲丢 30s 事件。
+        if (SystemClock.elapsedRealtime() < fallbackDisabledUntilElapsed) {
+            bufferPending(queue, content)
+            return -1L
         }
         val seq = DataBus.writeEvent(queue, content)
         if (seq < 0L) {
@@ -114,8 +134,35 @@ object HookDataBusBridge {
                 "writeEvent fallback returned $seq: $queue, cooling down " +
                         "${FALLBACK_COOLDOWN_MS}ms",
             )
+            // 兜底也写不进去：暂存而不是丢弃，等 Binder 恢复后补写。
+            bufferPending(queue, content)
         }
         return seq
+    }
+
+    /** 把暂存事件按 FIFO 补写到 server；失败即停，剩余事件保留到下次重试。 */
+    private fun drainPending(remote: ICleanerServerCallback) {
+        val replayed = pendingEvents.drainTo { queue, content ->
+            try {
+                remote.writeDataBusEvent(queue, content) >= 0L
+            } catch (e: RemoteException) {
+                false
+            } catch (e: RuntimeException) {
+                false
+            }
+        }
+        if (replayed > 0) {
+            Log.i(TAG, "replayed $replayed buffered events after bridge recovery")
+        }
+    }
+
+    private fun bufferPending(queue: String, content: String) {
+        if (!pendingEvents.offer(queue, content)) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastOverflowLogAt > 10_000L) {
+            lastOverflowLogAt = now
+            Log.w(TAG, "pending event buffer full ($MAX_PENDING_EVENTS), dropping oldest")
+        }
     }
 
     /**
