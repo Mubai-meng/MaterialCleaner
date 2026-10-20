@@ -44,7 +44,9 @@ object PermissionUtils {
         }
 
     fun containsStoragePermissions(pi: PackageInfo): Boolean = pi.requestedPermissions?.let {
-        val requested = it.toSet()
+        // 不再 toSet()：应用列表的过滤流会对 500+ 个包逐个调用本函数，每次分配一个
+        // HashSet 纯属额外开销；下面三处都是「小常量集合 × 包权限数组」的成员判断。
+        val requested = it
         val hasLegacyStorage = (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
                 pi.applicationInfo.targetSdkVersion < Build.VERSION_CODES.TIRAMISU) &&
                 requested.any(legacyStoragePermissions::contains)

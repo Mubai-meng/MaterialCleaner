@@ -8,12 +8,14 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.Observer
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import me.gm.cleaner.BuildConfig
 import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
@@ -78,6 +80,9 @@ abstract class AppListViewModelBase(application: Application) :
         )
         AppListState.Done(sequence.toList())
     }
+        // 过滤 + collator 排序 531 项不是零成本（约 4800 次比较），而 collector 跑在
+        // lifecycleScope(Main)。flowOn 只影响上游变换线程，collect 仍在 Main，语义不变。
+        .flowOn(Dispatchers.Default)
 
     /** @return 本次结果是否为**服务端全量**列表；false 表示服务不可用、走了本地降级。 */
     protected suspend fun loadAppsCommon(): Boolean {

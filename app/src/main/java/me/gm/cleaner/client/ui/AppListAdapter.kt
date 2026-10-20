@@ -1,7 +1,5 @@
 package me.gm.cleaner.client.ui
 
-import android.graphics.drawable.Drawable
-import android.util.LruCache
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.MenuItem
@@ -48,14 +46,16 @@ class AppListAdapter(
         val packageInfo = model.packageInfo
         val packageName = packageInfo.packageName
         val resources = fragment.resources
-        val cached = ICON_CACHE.get(packageName)?.takeIf {
-            it.lastUpdateTime == packageInfo.lastUpdateTime
-        }
-        val icon = cached?.constantState?.newDrawable(resources) ?: run {
-            val loaded = packageInfo.applicationInfo.loadIcon(fragment.requireContext().packageManager)
-            loaded.constantState?.let { ICON_CACHE.put(packageName, CachedIcon(packageInfo.lastUpdateTime, it)) }
-            loaded
-        }
+        // 优先命中后台预取的缓存（见 AppListLoader.preloadConfiguredIcons）；
+        // 未命中（快速滚动到未预取项、超出预算）仍回退到原来的主线程懒加载，行为不退化。
+        val icon = AppIconCache.get(packageName, packageInfo.lastUpdateTime)?.newDrawable(resources)
+            ?: run {
+                val loaded = packageInfo.applicationInfo.loadIcon(fragment.requireContext().packageManager)
+                loaded.constantState?.let {
+                    AppIconCache.put(packageName, packageInfo.lastUpdateTime, it)
+                }
+                loaded
+            }
         binding.icon.setImageDrawable(icon)
         binding.title.text = model.label
         binding.summary.text = run {
@@ -174,14 +174,7 @@ class AppListAdapter(
 
     class ViewHolder(val binding: ApplistItemBinding) : RecyclerView.ViewHolder(binding.root)
 
-    private data class CachedIcon(
-        val lastUpdateTime: Long,
-        val constantState: Drawable.ConstantState,
-    )
-
     companion object {
-        private val ICON_CACHE = object : LruCache<String, CachedIcon>(48) {}
-
         private val CALLBACK = object : DiffUtil.ItemCallback<AppListModel>() {
             override fun areItemsTheSame(
                 oldItem: AppListModel, newItem: AppListModel

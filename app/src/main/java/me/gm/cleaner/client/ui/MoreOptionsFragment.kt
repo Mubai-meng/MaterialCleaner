@@ -39,7 +39,7 @@ import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
 import me.gm.cleaner.core.config.ServicePreferences
 import me.gm.cleaner.core.config.BatchCommitResult
 import me.gm.cleaner.core.config.StoragePolicyBatchEdit
-import me.gm.cleaner.core.config.getPackageSrCount
+import me.gm.cleaner.core.config.policyRuleCountIndex
 import me.gm.cleaner.core.config.getPackageSrZipped
 import me.gm.cleaner.net.NOTIFICATION_CHANNEL
 import me.gm.cleaner.settings.BaseSettingsFragment
@@ -144,10 +144,13 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                             val inputApps = inputPackageNames.mapNotNull {
                                 CleanerClient.service?.getPackageInfo(it, 0)
                             }
+                            // 一次读盘建索引：逐包 getPackageSrCount() 会各自重新解析策略文件，
+                            // 大模板（几百个包）上就是几百次全量解析，与主列表加载是同一根因。
+                            val counts = ConfiguredPolicyStoreProvider.instance.policyRuleCountIndex()
                             setAllAppsSupplier { inputApps }
                             setSelection(
                                 inputPackageNames.asSequence()
-                                    .filter { ConfiguredPolicyStoreProvider.instance.getPackageSrCount(it) == 0 }
+                                    .filter { counts.srCount(it) == 0 }
                                     .toSet()
                             )
                             addOnPositiveButtonClickListener { checkedApps ->

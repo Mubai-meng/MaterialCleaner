@@ -1,6 +1,7 @@
 package me.gm.cleaner.client.ui
 
 import android.content.Context
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.os.SystemClock
 import android.util.Log
@@ -12,8 +13,8 @@ import me.gm.cleaner.BuildConfig
 import me.gm.cleaner.client.CleanerClient
 import me.gm.cleaner.dao.AppLabelCache
 import me.gm.cleaner.core.config.ConfiguredPolicyStoreProvider
-import me.gm.cleaner.core.config.getPackageReadOnly
-import me.gm.cleaner.core.config.getPackageSrCount
+import me.gm.cleaner.core.config.PolicyRuleCountIndex
+import me.gm.cleaner.core.config.policyRuleCountIndex
 import me.gm.cleaner.core.config.readOnlyPackages
 import me.gm.cleaner.core.config.srPackages
 import me.gm.cleaner.model.PackageStatus
@@ -38,7 +39,7 @@ class AppListLoader(
             if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: service unavailable or RPC failed, fallback")
             val fallback = loadLocalFallback()
             val t2 = SystemClock.elapsedRealtime()
-            logTiming(fallback.size, false, t1 - t0, 0L, 0L, t2 - t1)
+            logTiming(fallback.size, false, t1 - t0, 0L, 0L, t2 - t1, 0L)
             return@withContext AppListLoadResult(fallback, isFullList = false)
         }
         if (installedPackages.isNotEmpty()) {
@@ -52,19 +53,27 @@ class AppListLoader(
         if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: srPackageStatus size=${srPackageStatus?.size}")
         // 服务端映射就绪且查无记录等于真无，未就绪或链路失败一律按未知处理，不混用空表示两种含义。
         val statusUnknown = srPackageStatus == null
+        // 一次读盘建「包名 → 规则数」索引。逐包调 getPackageSrCount()/getPackageReadOnly()
+        // 会各自重新读文件 + 解析 JSON，531 个包 = 1062 次全量解析（实测 map=1450ms）。
+        val counts = ConfiguredPolicyStoreProvider.instance.policyRuleCountIndex()
         val result = installedPackages.map { pi ->
             ensureActive()
+            val packageName = pi.packageName
             AppListModel(
                 pi,
                 AppLabelCache.getPackageLabel(pi),
-                ConfiguredPolicyStoreProvider.instance.getPackageSrCount(pi.packageName),
-                ConfiguredPolicyStoreProvider.instance.getPackageReadOnly(pi.packageName).size,
-                parseMountState(if (statusUnknown) null else srPackageStatus?.get(pi.packageName), statusUnknown)
+                counts.srCount(packageName),
+                counts.readOnlyCount(packageName),
+                parseMountState(if (statusUnknown) null else srPackageStatus?.get(packageName), statusUnknown)
             )
         }
         val t4 = SystemClock.elapsedRealtime()
+        // 主界面只显示「已配置应用」，在发布列表之前把它们的图标预取进缓存，
+        // 绑定阶段就不会在主线程逐条走 PackageManager.loadIcon()。
+        preloadConfiguredIcons(installedPackages, counts)
+        val t5 = SystemClock.elapsedRealtime()
         if (BuildConfig.DEBUG) Log.i("CleanerTest", "AppListLoader.load: result=${result.size} apps")
-        logTiming(result.size, true, t1 - t0, t2 - t1, t3 - t2, t4 - t3)
+        logTiming(result.size, true, t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4)
         AppListLoadResult(result, isFullList = true)
     }
 
@@ -83,6 +92,7 @@ class AppListLoader(
         labels: Long,
         status: Long,
         map: Long,
+        icons: Long,
     ) {
         Log.i(
             TAG, "load: apps=" + size + " full=" + full +
@@ -90,12 +100,48 @@ class AppListLoader(
                 " labels=" + labels + "ms" +
                 " status=" + status + "ms" +
                 " map=" + map + "ms" +
-                " total=" + (getInstalled + labels + status + map) + "ms"
+                " icons=" + icons + "ms" +
+                " total=" + (getInstalled + labels + status + map + icons) + "ms"
         )
     }
 
     private companion object {
         const val TAG = "MC/AppList"
+
+        /** 图标预取时间预算：超出后放弃剩余项（退回懒加载），避免拖慢首屏。 */
+        const val ICON_PRELOAD_BUDGET_MS = 400L
+    }
+
+    /**
+     * 后台预取「已配置应用」的图标。
+     *
+     * 主界面只显示 `mountRulesCount > 0 || readOnlyCount > 0` 的包（本机实测 15 个），
+     * 但绑定阶段拿不到"哪些会显示"，只能在 `onBindViewHolder` 主线程懒加载
+     * `PackageManager.loadIcon()` —— 实测 15 个 item 合计约 1.6s（单条 30–400ms）。
+     * 这里用一次有预算的 IO 预取，换取绑定阶段全命中。
+     *
+     * @param budgetMs 时间预算：超出即放弃剩余项（它们退回懒加载），不拖慢首屏。
+     */
+    private suspend fun preloadConfiguredIcons(
+        packages: List<PackageInfo>,
+        counts: PolicyRuleCountIndex,
+        budgetMs: Long = ICON_PRELOAD_BUDGET_MS,
+    ) {
+        val configured = packages.filter {
+            counts.srCount(it.packageName) > 0 || counts.readOnlyCount(it.packageName) > 0
+        }
+        if (configured.isEmpty()) {
+            return
+        }
+        withContext(Dispatchers.IO) {
+            val deadline = SystemClock.elapsedRealtime() + budgetMs
+            for (pi in configured) {
+                if (SystemClock.elapsedRealtime() >= deadline) {
+                    break
+                }
+                AppIconCache.preloadOne(context, pi)
+            }
+        }
     }
 
     /** 服务不可用时：用 PackageManager 获取客户端可见的全量应用，供主界面过滤规则包和新建挂载选择。 */
@@ -113,6 +159,7 @@ class AppListLoader(
         } else if (BuildConfig.DEBUG) {
             Log.w("CleanerTest", "AppListLoader.loadLocalFallback: keep previous label cache on empty/failed PM result")
         }
+        val counts = store.policyRuleCountIndex()
         return installedPackages.mapNotNull { pi ->
             val packageName = pi.packageName
             val label = AppLabelCache.getLabelIfCached(packageName)
@@ -121,8 +168,8 @@ class AppListLoader(
             AppListModel(
                 pi,
                 label,
-                store.getPackageSrCount(packageName),
-                store.getPackageReadOnly(packageName).size,
+                counts.srCount(packageName),
+                counts.readOnlyCount(packageName),
                 AppListModel.STATE_UNKNOWN,
             )
         }
@@ -179,11 +226,13 @@ class AppListLoader(
     suspend fun updateRuleCount(old: List<AppListModel>): List<AppListModel> =
         withContext(defaultDispatcher) {
             val srPackageStatus = CleanerClient.getSrPackagesStatusOrNull(PackageStatus.GET_FROM_ALL_PROCESS)
+            // 与 load() 同理：刷新规则计数必须用索引，否则每 200ms 防抖刷新就是又一轮 1062 次解析。
+            val counts = ConfiguredPolicyStoreProvider.instance.policyRuleCountIndex()
             old.map {
                 val packageName = it.packageInfo.packageName
                 it.copy(
-                    mountRulesCount = ConfiguredPolicyStoreProvider.instance.getPackageSrCount(packageName),
-                    readOnlyCount = ConfiguredPolicyStoreProvider.instance.getPackageReadOnly(packageName).size,
+                    mountRulesCount = counts.srCount(packageName),
+                    readOnlyCount = counts.readOnlyCount(packageName),
                     mountState = if (srPackageStatus == null) AppListModel.STATE_UNKNOWN else parseMountState(srPackageStatus[packageName], false),
                 )
             }

@@ -83,3 +83,45 @@ private fun expandPathAsUser(path: String, userId: Int): String {
     }
     return builder.toString()
 }
+
+
+/**
+ * 一次读取算出的规则计数索引。
+ *
+ * 为什么需要：`getPackageSrCount()` / `getPackageReadOnly()` 每次调用都要走
+ * `readRedirect()` / `readReadOnly()` —— 即**重新读盘 + 解析 JSON + 计算 revision**。
+ * 应用列表对 531 个包各调一次就是 1062 次全量解析（本机实测 `map=1450ms`，
+ * 加载总耗时 1567ms）。批量场景一律走本索引：一次 [readSnapshot]，之后 O(1) 查表。
+ */
+class PolicyRuleCountIndex internal constructor(
+    private val srCounts: Map<String, Int>,
+    private val readOnlyCounts: Map<String, Int>,
+) {
+    fun srCount(packageName: String): Int = srCounts[packageName] ?: 0
+
+    fun readOnlyCount(packageName: String): Int = readOnlyCounts[packageName] ?: 0
+
+    /** 配置过任意规则（重定向或只读）的包名集合。 */
+    val configuredPackages: Set<String>
+        get() = srCounts.keys + readOnlyCounts.keys
+}
+
+/**
+ * 构建规则计数索引。
+ *
+ * 用 [ConfiguredPolicyStore.readSnapshot] 而不是分别调 `readRedirect` / `readReadOnly`：
+ * 前者在同一锁区间内读完两个文件，保证 revision 属于同一时刻，与逐包读取的语义一致。
+ */
+fun ConfiguredPolicyStore.policyRuleCountIndex(): PolicyRuleCountIndex {
+    val snapshot = readSnapshot()
+    val srCounts = HashMap<String, Int>()
+    for (policy in snapshot.redirect.envelope.redirectPolicies) {
+        srCounts[policy.scope.packageName] = policy.rules.size
+    }
+    val readOnlyCounts = HashMap<String, Int>()
+    for (rule in snapshot.readOnly.envelope.readOnlyRules) {
+        val name = rule.scope.packageName
+        readOnlyCounts[name] = (readOnlyCounts[name] ?: 0) + 1
+    }
+    return PolicyRuleCountIndex(srCounts, readOnlyCounts)
+}
