@@ -18,6 +18,8 @@ internal object MountFailureRetryPolicy {
         "invalid_source",
         "invalid_target",
         "target_identity",
+        // 目标进程已消失：重试同一个 PID 必然复现；新进程会走全新的挂载链。
+        "target_gone",
         "namespace_transaction_timeout",
         "namespace_rollback_failed",
         "baseline_recovery_failed",

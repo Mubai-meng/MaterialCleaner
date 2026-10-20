@@ -237,13 +237,30 @@ static void fail_child(int sock, const char *stage, int err, int index = -1,
     sys__exit(1);
 }
 
+/// wait_zygote 的结果：区分「目标进程已消失」与「等待 zygote 退出超时」。
+///
+/// 旧实现两种情形都返回 false，调用方一律报 `stage=wait_zygote`，
+/// 于是 ENOENT（进程已死）被错误归类成 `MOUNT.ZYGOTE.WAIT_TIMEOUT`，
+/// 并在 Java 侧触发 5 分钟包级重投冷却。这里把两者分开。
+enum class ZygoteWaitResult {
+    OK,
+    GONE,
+    TIMEOUT,
+    /// /proc/<pid>/attr/current 存在但不可读（EACCES 等）：照旧记失败，不能当进程消失。
+    ERROR,
+};
+
 /// wait for system mount
-static bool wait_zygote(int pid) {
+static ZygoteWaitResult wait_zygote(int pid, int *out_errno) {
+    *out_errno = 0;
     const int sleep_time = 5 * 1000;
     int slept_time = 0;
     std::string path = StringPrintf("/proc/%d/attr/current"_iobfs.c_str(), pid);
     if (access(path.c_str(), F_OK)) {
-        return false;
+        *out_errno = errno;
+        // 只有 ENOENT 才是「进程已消失」；EACCES 等权限问题必须照旧记失败，
+        // 不能被误判成 target_gone 而静默跳过。
+        return errno == ENOENT ? ZygoteWaitResult::GONE : ZygoteWaitResult::ERROR;
     }
     // 实际只用于比较 SELinux context（"u:r:zygote:s0" 13 字节）：原来开 4096 既浪费栈
     // 又在 read 失败时读到未初始化内存。256 足够，栈占用同时降 3.8KB。
@@ -263,13 +280,14 @@ static bool wait_zygote(int pid) {
             slept_time += sleep_time;
             if (slept_time > 5 * 1000 * 1000) {
                 // Waited more than 5s.
-                return false;
+                *out_errno = ETIMEDOUT;
+                return ZygoteWaitResult::TIMEOUT;
             }
         } else {
 #ifdef DEBUG
             // LOGE("wait %d for %dms"_iobfs.c_str(), pid, slept_time / 1000);
 #endif
-            return true;
+            return ZygoteWaitResult::OK;
         }
     }
 }
@@ -536,8 +554,14 @@ namespace Mount {
             return make_mount_status(-1, "invalid_args", EINVAL, -1, nullptr, nullptr,
                                      MountPhase::PREPARE);
         }
-        if (!wait_zygote(pid)) {
-            return make_mount_status(-1, "wait_zygote", errno == 0 ? ETIMEDOUT : errno,
+        int wait_errno = 0;
+        const ZygoteWaitResult wait_result = wait_zygote(pid, &wait_errno);
+        if (wait_result != ZygoteWaitResult::OK) {
+            // GONE 与 TIMEOUT 分开上报：前者是「进程已消失」，Java 侧按跳过处理，
+            // 不记挂载失败、不进入 5 分钟包级重投；后者才是真正的 zygote 等待超时。
+            const char *stage = wait_result == ZygoteWaitResult::GONE
+                                ? "target_gone" : "wait_zygote";
+            return make_mount_status(-1, stage, wait_errno == 0 ? ETIMEDOUT : wait_errno,
                                      -1, nullptr, nullptr, MountPhase::PREPARE);
         }
         // 事务登记目标身份：starttime 在 PID 复用后必然变化，是全流程防误伤的锚点。

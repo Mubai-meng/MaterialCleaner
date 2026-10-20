@@ -122,6 +122,20 @@ class MountFailureRetryPolicyTest {
     }
 
     @Test
+    fun `目标进程已消失属于永久性失败`() {
+        // native wait_zygote 在 /proc/<pid>/attr/current 不存在时返回 target_gone（ENOENT）。
+        // 进程已经没了，重试同一个 PID 必然复现；新进程会走全新的挂载链。
+        val disposition = MountFailureRetryPolicy.classify(
+            stage = "target_gone",
+            errno = 2, // ENOENT
+            namespaceDirty = false,
+            targetTerminated = false,
+        )
+        assertFalse(disposition.retryable)
+        assertFalse(disposition.forceStopTargetPackage)
+    }
+
+    @Test
     fun `规则挂载的临时性错误可重试`() {
         // EBUSY(16)/EAGAIN(11) 等瞬时错误在干净回滚后允许退避重试。
         assertTrue(

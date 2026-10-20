@@ -16,6 +16,7 @@ import me.gm.cleaner.core.common.err.ErrorCodes
 import me.gm.cleaner.core.common.err.ErrorEvent
 import me.gm.cleaner.core.common.err.ErrorLogThrottle
 import me.gm.cleaner.runtime.server.orchestrator.ServerErrorJournal
+import me.gm.cleaner.runtime.server.process.ProcessIdentity
 import api.SystemService
 import me.gm.cleaner.runtime.server.VfsRuntimePolicy
 import java.io.File
@@ -87,6 +88,16 @@ class Mounter {
         get() = VfsRuntimePolicy.isFuseBpfEnabled()
 
     private fun bindMountLocked(packageName: String, pid: Int, uid: Int): Boolean {
+        // ActivityManager 的进程列表可能包含刚被系统杀掉的陈旧记录（实测：网易云
+        // PID 25180 在 server 启动前 5 秒被 ColorOS o-stop(40) 杀掉，仍被 remountAll
+        // 选中）。在调用 native 前先做存活复核：/proc/<pid> 不存在 ⇒ 进程已消失，
+        // 直接跳过，不计 mountTotalAttempts、不计失败、不调度 5 分钟包级重投。
+        if (!ProcessIdentity.isAlive(pid)) {
+            Log.i("MC_REDIRECT", "[Mounter] skip dead pid=$pid pkg=$packageName uid=$uid")
+            mountFailedPids.remove(pid)
+            mountRetryCount.remove(pid)
+            return false
+        }
         totalAttempts.incrementAndGet()
         // 代际标注：使 mount 与 FUSE apply（同代际快照）可在日志中直接配对。
         val policyGeneration = VfsRuntimePolicy.currentPolicy().generation
@@ -170,6 +181,19 @@ class Mounter {
             mountFailedPids.remove(pid)
             mountRetryCount.remove(pid)
             return true
+        }
+        if (result.stage == "target_gone") {
+            // native 在 wait_zygote 前发现 /proc/<pid>/attr/current 不存在：
+            // 进程在 Java 预检与 native 调用之间退出。属于竞态，不是挂载失败；
+            // 新进程启动会重新触发挂载，不要进入 5 分钟失败重投队列。
+            mountFailedPids.remove(pid)
+            mountRetryCount.remove(pid)
+            Log.i(
+                "MC_REDIRECT",
+                "[Mounter] target gone, skip pkg=$packageName pid=$pid uid=$uid " +
+                    "detail=${result.reason}",
+            )
+            return false
         }
         if (result.stage == "target_identity") {
             // 身份门拒绝：pid 已死或被复用，fail-closed 是正确行为；
@@ -331,6 +355,7 @@ class Mounter {
     private fun errorCodeForStage(stage: String): String = when (stage) {
         "invalid_args", "invalid_source", "invalid_target" -> ErrorCodes.MOUNT_ARGS_INVALID
         "wait_zygote" -> ErrorCodes.MOUNT_ZYGOTE_WAIT_TIMEOUT
+        "target_gone" -> ErrorCodes.MOUNT_TARGET_GONE
         "setns" -> ErrorCodes.MOUNT_SETNS_FAILED
         "target_identity" -> ErrorCodes.MOUNT_IDENTITY_MISMATCH
         "unmount_storage", "baseline_recovery_failed" ->

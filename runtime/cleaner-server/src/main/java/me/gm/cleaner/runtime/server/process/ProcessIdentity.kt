@@ -22,6 +22,15 @@ object ProcessIdentity {
     }
 
     /**
+     * `/proc/<pid>` 是否存在。
+     *
+     * 只用于「进程已消失」的**保守**快速判定：目录不存在 ⇒ 一定已退出；
+     * 目录存在但 stat 读不到（权限等）时仍返回 true，交给 native 的身份复核，
+     * 避免把活进程误判成死的。
+     */
+    fun isAlive(pid: Int): Boolean = pid > 0 && File("/proc/$pid").exists()
+
+    /**
      * 解析 stat 第 22 字段 starttime。comm 可含空格与括号，
      * 从最后一个 ')' 之后按空格切分，第 20 个 token（state=第3字段起算第20个）。
      */
