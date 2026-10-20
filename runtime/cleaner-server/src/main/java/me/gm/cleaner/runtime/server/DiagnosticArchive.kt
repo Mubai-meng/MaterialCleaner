@@ -33,6 +33,8 @@ object DiagnosticArchive {
     private const val AUTO_LOG_DIR = "/data/local/tmp/cleaner_logs"
     private const val MAX_TEXT_FILE_BYTES = 512 * 1024
     private const val MAX_AUTO_LOG_FILES = 8
+    /** 启动窗口段单独保留的份数（每份取头部，见 [addAutoLogs]）。 */
+    private const val MAX_BOOT_LOG_FILES = 2
     private const val MAX_EVENT_FILES = 20
 
     /**
@@ -161,7 +163,8 @@ object DiagnosticArchive {
     /**
      * 归档会截断的条目预告。
      *
-     * 动机：`logs/auto/<name>.log` 只保留**尾部** [MAX_TEXT_FILE_BYTES]（512 KiB）。
+     * 动机：主环形 `logs/auto/<name>.log` 只保留**尾部**；启动段只保留**头部**
+     * [MAX_TEXT_FILE_BYTES]（512 KiB）。
      * 实测一次 16,424,932 B 的会话日志进包后只剩 524,338 B（**2.9%**）。此前这一事实
      * 只写在被截断文件自己的第 4 行（`truncated=head omitted, tailBytes=…`），
      * 而 `manifest.txt` / `summary.txt` 里毫无提示 —— 只看入口文件的人会把
@@ -171,17 +174,18 @@ object DiagnosticArchive {
      * 在写 manifest **之前**先算一遍（只读 `length()`，不做 IO，不写任何文件）。
      */
     private fun truncationSummary(): String {
-        val files = File(AUTO_LOG_DIR).listFiles()
-            ?.filter { isRegularFileNoFollow(it) && it.name.endsWith(".log") }
-            ?.sortedByDescending { it.lastModified() }
-            ?.take(MAX_AUTO_LOG_FILES)
-            ?: emptyList()
+        val files = selectAutoLogFiles(
+            File(AUTO_LOG_DIR).listFiles()
+                ?.filter { isRegularFileNoFollow(it) && AutoLogging.isLogFileName(it.name) }
+                ?: emptyList(),
+        )
         val truncated = files.filter { it.length() > MAX_TEXT_FILE_BYTES }
         if (truncated.isEmpty()) {
-            return "none?autoLogsKept=tail(${MAX_TEXT_FILE_BYTES}B)"
+            return "none?autoLogs=bootHead+ringTail(${MAX_TEXT_FILE_BYTES}B)"
         }
         return truncated.joinToString("; ") { file ->
-            "${file.name} keptLast=${MAX_TEXT_FILE_BYTES}B dropped=${file.length() - MAX_TEXT_FILE_BYTES}B"
+            val kept = if (AutoLogging.isBootLogFileName(file.name)) "keptFirst" else "keptLast"
+            "${file.name} $kept=${MAX_TEXT_FILE_BYTES}B dropped=${file.length() - MAX_TEXT_FILE_BYTES}B"
         }
     }
 
@@ -199,8 +203,9 @@ object DiagnosticArchive {
         appendLine("  ⚠️ Both logs/logcat_* captures are capped by '-t' counted in RAW lines (~700–1500/s),")
         appendLine("  so they cover roughly the last 20–40 s only even with LOGCAT_TAIL_LINES=$LOGCAT_TAIL_LINES.")
         appendLine("- commands/media_provider_maps.txt and commands/media_provider_mountinfo.txt show MediaProvider process state.")
-        appendLine("- ⚠️ This archive is NOT the full log: logs/auto/*.log keeps only the TAIL of each file")
-        appendLine("  (see the 'truncation=' line in manifest.txt), and logcat itself drops lines under")
+        appendLine("- ⚠️ This archive is NOT the full log: ring logs keep only the TAIL; boot logs")
+        appendLine("  (cleaner-boot-*, first 60 s after server start) keep only the HEAD.")
+        appendLine("  See the 'truncation=' line in manifest.txt, and note logcat itself drops lines under")
         appendLine("  ColorOS LOG_FLOWCTRL per-process quota. Absence in this archive != did not happen.")
         appendLine("  In EMBEDDED hook mode (EMBEDDED_GOT_PATCH) native libs load from inside an APK/APEX, so")
         appendLine("  /proc/<pid>/maps shows no libinline/libfuse_jni entry; use the 'nativeloader: Load ...'")
@@ -358,8 +363,9 @@ object DiagnosticArchive {
         appendLine("  ⚠️ logs/logcat_* 两份捕获的 `-t` 计的是**原始行数**（本机 ~700–1500 行/s），")
         appendLine("  即便上限已提到 $LOGCAT_TAIL_LINES 行，实际也只覆盖最近 20–40 秒。")
         appendLine("- commands/media_provider_maps.txt 与 commands/media_provider_mountinfo.txt：MediaProvider 进程状态。")
-        appendLine("- ⚠️ 本归档**不是**完整日志：logs/auto/*.log 每份只保留**尾部**（见 manifest.txt 的")
-        appendLine("  'truncation=' 行），且 logcat 本身会被 ColorOS LOG_FLOWCTRL 按进程限额丢弃。")
+        appendLine("- ⚠️ 本归档**不是**完整日志：主环形每份只保留**尾部**；启动段 cleaner-boot-*")
+        appendLine("  （server 启动后 60 秒）只保留**头部**。见 manifest.txt 的 'truncation=' 行；")
+        appendLine("  且 logcat 本身会被 ColorOS LOG_FLOWCTRL 按进程限额丢弃。")
         appendLine("  「归档里没有」≠「没发生」。另：EMBEDDED 模式（EMBEDDED_GOT_PATCH）下 native 库是从")
         appendLine("  APK/APEX 包内加载的，/proc/<pid>/maps 里不会有 libinline/libfuse_jni 条目 ——")
         appendLine("  加载证据要看日志里的 'nativeloader: Load ...' 行。")
@@ -740,23 +746,53 @@ object DiagnosticArchive {
         )
     }
 
+    /**
+     * 纯函数：选出要进包的日志文件。
+     *
+     * 启动窗口段（`cleaner-boot-*`）**优先**：它们数量少、且承载 server 启动瞬间
+     * 的挂载/策略失败证据；主环形按时间取最新的 [maxRing] 个。
+     * 这样即使环形已经写了几分钟，启动段也不会被 `take(MAX_AUTO_LOG_FILES)` 挤掉。
+     */
+    internal fun selectAutoLogFiles(
+        all: List<File>,
+        maxBoot: Int = MAX_BOOT_LOG_FILES,
+        maxRing: Int = MAX_AUTO_LOG_FILES,
+    ): List<File> {
+        val boot = all.asSequence()
+            .filter { AutoLogging.isBootLogFileName(it.name) }
+            .sortedByDescending { it.lastModified() }
+            .take(maxBoot)
+            .toList()
+        val ring = all.asSequence()
+            .filter { !AutoLogging.isBootLogFileName(it.name) }
+            .sortedByDescending { it.lastModified() }
+            .take(maxRing)
+            .toList()
+        return boot + ring
+    }
+
     private fun addAutoLogs(zip: ZipOutputStream) {
         val dir = File(AUTO_LOG_DIR)
         val all = dir.listFiles()
-            ?.filter { isRegularFileNoFollow(it) && it.name.endsWith(".log") }
-            ?.sortedByDescending { it.lastModified() }
+            ?.filter { isRegularFileNoFollow(it) && AutoLogging.isLogFileName(it.name) }
             ?: emptyList()
-        val files = all.take(MAX_AUTO_LOG_FILES)
+        val files = selectAutoLogFiles(all)
         addText(zip, "logs/auto_logging_manifest.txt", buildString {
             appendLine("dir=$AUTO_LOG_DIR")
             appendLine("total=${all.size}")
             appendLine("included=${files.size}")
             for (file in files) {
-                appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}")
+                val kind = if (AutoLogging.isBootLogFileName(file.name)) "boot" else "ring"
+                appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}\tkind=$kind")
             }
         })
         for (file in files) {
-            addFileTail(zip, file, "logs/auto/${file.name}", MAX_TEXT_FILE_BYTES)
+            if (AutoLogging.isBootLogFileName(file.name)) {
+                // 启动段的诊断价值在**开头**（server 启动 + 首分钟），必须取 head。
+                addFileHead(zip, file, "logs/auto/${file.name}", MAX_TEXT_FILE_BYTES)
+            } else {
+                addFileTail(zip, file, "logs/auto/${file.name}", MAX_TEXT_FILE_BYTES)
+            }
         }
     }
 
@@ -895,6 +931,39 @@ object DiagnosticArchive {
                     output.write(buffer, 0, read)
                     remaining -= read
                 }
+            }
+        }
+        return output.toString(StandardCharsets.UTF_8.name())
+    }
+
+    private fun addFileHead(zip: ZipOutputStream, file: File, entryName: String, maxBytes: Int) {
+        runCatching {
+            val content = buildString {
+                appendLine("path=${file.path}")
+                appendLine("size=${file.length()}")
+                appendLine("modified=${file.lastModified()}")
+                if (file.length() > maxBytes) {
+                    appendLine("truncated=tail omitted, headBytes=$maxBytes")
+                }
+                appendLine()
+                append(readFileHead(file, maxBytes))
+            }
+            addText(zip, entryName, content)
+        }.onFailure {
+            addText(zip, "$entryName.error.txt", it.stackTraceToString())
+        }
+    }
+
+    private fun readFileHead(file: File, maxBytes: Int): String {
+        val output = ByteArrayOutputStream()
+        FileInputStream(file).use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            var remaining = maxBytes
+            while (remaining > 0) {
+                val read = input.read(buffer, 0, minOf(buffer.size, remaining))
+                if (read < 0) break
+                output.write(buffer, 0, read)
+                remaining -= read
             }
         }
         return output.toString(StandardCharsets.UTF_8.name())
