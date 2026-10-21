@@ -1,7 +1,6 @@
 package me.gm.cleaner.runtime.server
 
 import android.util.Log
-import me.gm.cleaner.core.config.ServicePreferences
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway
 import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
 import me.gm.cleaner.runtime.server.process.BaseProcessObserver
@@ -69,9 +68,10 @@ class LayerOrchestrator(
 
         server.mPackageReceiver.registerPackageReceiver()
 
-        if (ServicePreferences.autoLogging) {
-            server.mAutoLogging.registerBootShutdownReceiver(AutoLogging.MODE_CONTINUOUSLY)
-        }
+        // 日志采集按配置对账（不是"启动时读一次"）：应启用而未运行则启动，
+        // 应停用则保持未运行。关闭开关的生效点分别在
+        // StoragePolicyChangeCoordinator.onPreferencesChanged() 与本方法。
+        server.mAutoLogging.reconcileWithPreferences()
 
         val dataBusReady = SnapshotPublisher.publishAll()
 

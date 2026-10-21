@@ -144,8 +144,15 @@ public class CleanerServer extends ContextWrapper {
             Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "shutdown VFS layer failed", t);
         }
         // P0-6：logcat 采集子进程必须随 server 一起退出，否则每次重启都多一条常驻 logcat。
-        // AutoLogging.destroy() 是幂等的，放在其它关停步骤之前不影响它们的语义。
-        mAutoLogging.destroy();
+        // 第30批：destroy() 更名为 shutdown()（与上游 93bf07a 对齐），语义仍是"无条件停全部
+        // 采集通道 + 幂等"。它不等待进程退出（调用方紧接着 System.exit(0)），但句柄在手，
+        // logcat 对 SIGTERM 立即响应，不会留下 PPID=1 的孤儿。放在其它关停步骤之前
+        // 不影响它们的语义。
+        try {
+            mAutoLogging.shutdown();
+        } catch (final Throwable t) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "shutdown auto logging failed", t);
+        }
         MediaProviderHookGateway.onDestroy();
         ObserverManager.INSTANCE.stopAllObservers();
     }

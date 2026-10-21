@@ -163,8 +163,8 @@ object DiagnosticArchive {
     /**
      * 归档会截断的条目预告。
      *
-     * 动机：主环形 `logs/auto/<name>.log` 只保留**尾部**；启动段只保留**头部**
-     * [MAX_TEXT_FILE_BYTES]（512 KiB）。
+     * 动机：主环形/崩溃通道 `logs/auto/<name>.log` 保留**首尾各半**；启动段只保留
+     * **头部** [MAX_TEXT_FILE_BYTES]（512 KiB）。
      * 实测一次 16,424,932 B 的会话日志进包后只剩 524,338 B（**2.9%**）。此前这一事实
      * 只写在被截断文件自己的第 4 行（`truncated=head omitted, tailBytes=…`），
      * 而 `manifest.txt` / `summary.txt` 里毫无提示 —— 只看入口文件的人会把
@@ -181,10 +181,10 @@ object DiagnosticArchive {
         )
         val truncated = files.filter { it.length() > MAX_TEXT_FILE_BYTES }
         if (truncated.isEmpty()) {
-            return "none?autoLogs=bootHead+ringTail(${MAX_TEXT_FILE_BYTES}B)"
+            return "none?autoLogs=bootHead+ringHeadTail(${MAX_TEXT_FILE_BYTES}B)"
         }
         return truncated.joinToString("; ") { file ->
-            val kept = if (AutoLogging.isBootLogFileName(file.name)) "keptFirst" else "keptLast"
+            val kept = if (AutoLogging.isBootLogFileName(file.name)) "keptFirst" else "keptHeadTail"
             "${file.name} $kept=${MAX_TEXT_FILE_BYTES}B dropped=${file.length() - MAX_TEXT_FILE_BYTES}B"
         }
     }
@@ -205,7 +205,8 @@ object DiagnosticArchive {
         appendLine("- commands/media_provider_maps.txt and commands/media_provider_mountinfo.txt show MediaProvider process state.")
         appendLine("- commands/dmesg_evidence.txt has kernel-side denials (SELinux avc, FUSE, mount, namespace).")
         appendLine("- logs/logcat_crash_recent.txt and logs/logcat_media_provider_pid.txt cover crash and hook-host evidence.")
-        appendLine("- ⚠️ This archive is NOT the full log: ring logs keep only the TAIL; boot logs")
+        appendLine("- ⚠️ This archive is NOT the full log: ring/crash logs keep the HEAD and the TAIL")
+        appendLine("  (half of the budget each, middle omitted); boot logs")
         appendLine("  (cleaner-boot-*, first 60 s after server start) keep only the HEAD.")
         appendLine("  See the 'truncation=' line in manifest.txt, and note logcat itself drops lines under")
         appendLine("  ColorOS LOG_FLOWCTRL per-process quota. Absence in this archive != did not happen.")
@@ -800,7 +801,11 @@ object DiagnosticArchive {
             appendLine("total=${all.size}")
             appendLine("included=${files.size}")
             for (file in files) {
-                val kind = if (AutoLogging.isBootLogFileName(file.name)) "boot" else "ring"
+                val kind = when {
+                    AutoLogging.isBootLogFileName(file.name) -> "boot"
+                    AutoLogging.isCrashLogFileName(file.name) -> "crash"
+                    else -> "ring"
+                }
                 appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}\tkind=$kind")
             }
         })
@@ -809,7 +814,10 @@ object DiagnosticArchive {
                 // 启动段的诊断价值在**开头**（server 启动 + 首分钟），必须取 head。
                 addFileHead(zip, file, "logs/auto/${file.name}", MAX_TEXT_FILE_BYTES)
             } else {
-                addFileTail(zip, file, "logs/auto/${file.name}", MAX_TEXT_FILE_BYTES)
+                // 主环形与崩溃通道取首尾两段（上游 317e754）：一个文件对应一次采集
+                // 周期时，启动失败 / Hook 未加载 / 挂载首轮失败的证据位于**周期开头**，
+                // 只取尾部等于把这些证据直接丢弃 —— 与"排查启动或崩溃问题"的用途相悖。
+                addFileHeadAndTail(zip, file, "logs/auto/${file.name}", MAX_TEXT_FILE_BYTES)
             }
         }
     }
@@ -990,6 +998,45 @@ object DiagnosticArchive {
             }
         }
         return output.toString(StandardCharsets.UTF_8.name())
+    }
+
+    /**
+     * 取文件首尾两段并标注中段省略。
+     *
+     * 头段覆盖采集周期开头的现场（启动失败、Hook 未加载、挂载首轮失败都发生在这里），
+     * 尾段覆盖最近现场。两者各占一半预算，中间显式写明省略了多少字节 ——
+     * 读归档的人必须能一眼看出"这不是连续日志"，否则会把跳变读成事件。
+     */
+    private fun addFileHeadAndTail(
+        zip: ZipOutputStream,
+        file: File,
+        entryName: String,
+        maxBytes: Int,
+    ) {
+        runCatching {
+            val headBytes = maxBytes / 2
+            val tailBytes = maxBytes - headBytes
+            val longFile = file.length() > maxBytes
+            val content = buildString {
+                appendLine("path=${file.path}")
+                appendLine("size=${file.length()}")
+                appendLine("modified=${file.lastModified()}")
+                if (longFile) {
+                    appendLine("truncated=middle omitted, headBytes=$headBytes, tailBytes=$tailBytes")
+                }
+                appendLine()
+                append(readFileHead(file, if (longFile) headBytes else maxBytes))
+                if (longFile) {
+                    appendLine()
+                    appendLine("... [middle omitted: ${file.length() - maxBytes} bytes] ...")
+                    appendLine()
+                    append(readFileTail(file, tailBytes))
+                }
+            }
+            addText(zip, entryName, content)
+        }.onFailure {
+            addText(zip, "$entryName.error.txt", it.stackTraceToString())
+        }
     }
 
     private fun addText(zip: ZipOutputStream, entryName: String, content: String) {

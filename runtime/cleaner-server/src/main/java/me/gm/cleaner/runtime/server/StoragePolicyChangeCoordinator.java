@@ -31,6 +31,11 @@ public class StoragePolicyChangeCoordinator {
     public void onPreferencesChanged() {
         final var previousPackages = currentStorageRedirectPackages();
         reloadSharedPreferencesFromDisk();
+        // 新配置已可见：立即按 autoLogging 最新值对账日志采集进程。
+        // 必须在下方 CORRUPT 提前返回**之前**调用 —— 否则配置损坏时
+        // "关闭日志开关"这个动作会随 return 一起被丢掉，logcat 继续写盘。
+        // 与后续存储重定向处理无依赖关系。
+        mServer.mAutoLogging.reconcileWithPreferences();
         // 顺序治理（有序最终一致性，非全局原子切换）：先构建并更新内存策略
         // （Mounter 的数据源），VFS remount 先切，发布快照与 Hook 刷新后置——
         // 上层切换不领先于底层挂载视图。发布失败则 VFS 新代、Hook 旧代，

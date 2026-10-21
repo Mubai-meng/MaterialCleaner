@@ -125,8 +125,31 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
      *
      * onDestroy 里要靠关闭它的 stdout 让阻塞在原生 {@code readLine()} 的线程读到 EOF：
      * {@code mExecutor.shutdownNow()} 的中断对原生读无效，少了这一步整个 runnable 都退不出来。
+     *
+     * 第30批：读写全部收敛到 [registerLogcatProcess] / [stopLogcatProcess] /
+     * [clearLogcatProcess] 三个 {@code synchronized} 方法下。裸 volatile 字段挡不住
+     * 「停止流程置位之后、循环才 exec 出新进程」这个窗口 —— 那条进程无人持有句柄，
+     * 最终成为 PPID=1 的孤儿（上游 5091775 的实测结论）。
      */
-    private volatile Process mCurrentProcess;
+    private Process mLogcatProcess;
+
+    /**
+     * 停止流程是否已开始：用于终结"停止期间才创建出来"的子进程。
+     *
+     * 与 [mStopping] 的分工：[mStopped] 只管**进程回收**，[mStopping] 只管
+     * **要不要广播**。两者的置位点相同（都在 onDestroy），但语义不可混用 ——
+     * 混用会让"意外死亡"这条路径要么漏回收、要么漏通知。
+     */
+    private volatile boolean mStopped = false;
+
+    /**
+     * 主动停止标记：{@link #onDestroy()} 被调用时置位。
+     *
+     * <p>用于区分观察器线程的两种终止：
+     * - 主动停止（用户停止服务 / 服务退出）：广播只是退出副产品，app 侧不应提示；
+     * - 意外死亡（logcat 读取异常）：需要通知 app 侧走看门狗与提示闭环。
+     */
+    private volatile boolean mStopping = false;
 
     /** logcat 重拉间隔：基线 5s，异常重启时指数放大到 60s 上限（P0-7）。 */
     private static final long LOGCAT_RETRY_BASE_MS = 5000L;
@@ -349,8 +372,17 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
 
                 long backoffMs = LOGCAT_RETRY_BASE_MS;
                 while (true) {
+                    // 停止流程已经开始：绝不再拉起新进程。少了这道闸门，
+                    // 每轮 exec 出来的 logcat 都会被 registerLogcatProcess 立即干掉，
+                    // 循环却继续跑 —— 停止之后线程反而进入 exec 风暴。
+                    // （exec 本身不可中断，所以必须在循环入口判，不能只靠 shutdownNow）。
+                    if (mStopped) {
+                        Log.i("ActivityManagerLogsObserver",
+                                "logcat loop exiting: observer already stopped");
+                        break;
+                    }
                     process = Runtime.getRuntime().exec(new String(logcat));
-                    mCurrentProcess = process;
+                    registerLogcatProcess(process);
                     final long attachAtMs = android.os.SystemClock.elapsedRealtime();
                     // 启动留痕：本循环是进程启动事件的唯一来源，它一旦静默死掉
                     // （exec 失败、被 SELinux 拒绝等），整条 bind mount 链路就没了触发点。
@@ -481,6 +513,9 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                     // 还以固定 5s 重拉，形成约 720 次/小时的 exec 风暴。
                     closeProcessStreams(process);
                     process.destroy();
+                    // 本轮进程已由本线程自行回收，卸载句柄：否则 onDestroy 会重复
+                    // destroy 同一个 Process（无害但让"谁负责回收"变得不可推理）。
+                    clearLogcatProcess(process);
                     // 指数退避：logcat 活够久说明本轮健康，退避归零；迅速退出
                     //（exec 失败 / 被杀 / 权限被拒）才放大间隔。
                     final long livedMs = android.os.SystemClock.elapsedRealtime() - attachAtMs;
@@ -494,12 +529,23 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
             } catch (final IOException | InterruptedException e) {
                 Log.e("ActivityManagerLogsObserver", "Logcat reading loop exited unexpectedly", e);
             } finally {
-                mServer.noticeDispatcher.broadcastIntent(broadcastIntent ->
-                        broadcastIntent.setAction(ServerConstants.ACTION_LOGCAT_SHUTDOWN)
-                );
-                if (process != null) {
-                    closeProcessStreams(process);
-                    process.destroy();
+                // 先把子进程**同步**回收掉，再决定要不要广播。
+                // 旧实现把广播放在回收之前：广播抛异常会直接跳过回收，
+                // 而这条路径恰好是"服务即将退出"的唯一回收点。
+                stopLogcatProcess();
+                // 仅在非主动停止时广播。主动停止（用户停止服务 / 服务退出）时，
+                // 这条广播只是退出副产品；app 侧收到后因 server 已死而查不到
+                // serverException，会把"用户停止服务"误报成"日志猫已退出"
+                // （上游 6aa9ff1 的 issue）。
+                if (!mStopping) {
+                    try {
+                        mServer.noticeDispatcher.broadcastIntent(broadcastIntent ->
+                                broadcastIntent.setAction(ServerConstants.ACTION_LOGCAT_SHUTDOWN)
+                        );
+                    } catch (final Throwable t) {
+                        Log.w("ActivityManagerLogsObserver",
+                                "broadcast logcat shutdown failed", t);
+                    }
                 }
                 mExecutor.shutdown();
             }
@@ -563,14 +609,69 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
     @Override
     public void onDestroy() {
         super.onDestroy();
-        final Process process = mCurrentProcess;
-        if (process != null) {
-            // 阻塞在原生 readLine() 的线程不响应 Thread.interrupt()，
-            // shutdownNow 对它无效 —— 关闭 stdout 让它读到 EOF 从而自行退出循环，
-            // 是唯一可靠的停机手段（原实现里 process.destroy() 因此永不执行）。
-            closeProcessStreams(process);
-            process.destroy();
-        }
+        // 主动停止标记：区分「观察器意外死亡」（需通知 app 侧）与「服务正在停止」
+        // （广播只是退出副产品，不应让 app 侧弹"日志猫已退出"）。
+        mStopping = true;
+        // 同步终结采集子进程：必须在 onDestroy 返回前完成。调用方紧接着
+        // System.exit(0) 终止 JVM，届时另一个线程的 finally 不会再有执行机会。
+        // 关 stdout 让阻塞在原生 readLine() 的线程读到 EOF —— 中断对它无效，
+        // 这是唯一可靠的停机手段（原实现里 process.destroy() 因此永不执行）。
+        stopLogcatProcess();
         mExecutor.shutdownNow();
+    }
+
+    /**
+     * 登记当前采集子进程。
+     *
+     * <p>若停止流程已经开始（[mStopped]），说明这条进程是在停止过程中才被创建
+     * 出来的，必须立即终结，否则它将成为无人回收的孤儿。
+     */
+    private synchronized void registerLogcatProcess(final Process process) {
+        if (mStopped) {
+            destroyProcess(process);
+            return;
+        }
+        mLogcatProcess = process;
+    }
+
+    /**
+     * 卸载句柄：仅当当前登记的仍是**这一条**时才清空。
+     *
+     * 无条件下清空会误清下一轮刚登记的进程，导致那条进程再也没人回收。
+     */
+    private synchronized void clearLogcatProcess(final Process process) {
+        if (mLogcatProcess == process) {
+            mLogcatProcess = null;
+        }
+    }
+
+    /**
+     * 同步终结采集子进程。幂等：重复调用无副作用。
+     *
+     * <p>停止标记置位后，停止期间新创建的子进程会被 [registerLogcatProcess]
+     * 立即终结。
+     */
+    private synchronized void stopLogcatProcess() {
+        mStopped = true;
+        final Process process = mLogcatProcess;
+        mLogcatProcess = null;
+        if (process != null) {
+            destroyProcess(process);
+        }
+    }
+
+    /**
+     * 终结一个 logcat 子进程。
+     *
+     * <p>必须先关三条管道再 {@code destroy()}：阻塞在原生 {@code readLine()} 的线程
+     * 不响应 {@code Thread.interrupt()}，关 stdout 让它读到 EOF 是唯一可靠手段。
+     *
+     * <p>刻意<b>不</b> {@code waitFor}：本方法会在 onDestroy 路径上被调用，而调用方
+     * 紧接着 {@code System.exit(0)}，在这里等待只会拖长退出路径；logcat 对 SIGTERM
+     * 是立即响应的，句柄在手就不会留下孤儿（上游等的正是"没有句柄"那种情况）。
+     */
+    private static void destroyProcess(final Process process) {
+        closeProcessStreams(process);
+        process.destroy();
     }
 }

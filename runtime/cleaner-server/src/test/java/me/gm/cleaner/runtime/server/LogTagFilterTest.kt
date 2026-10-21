@@ -50,31 +50,99 @@ class LogTagFilterTest {
 
     @Test
     fun `核心 tag 均已登记避免采集与诊断同时漏采`() {
+        // 这份列表来自对源码的一次全量扫描（`Log.x("...")` 字面量 + `TAG = "..."`
+        // 常量）。第30批把主环形采集切到 tag 白名单时才发现清单漏了 30 个实际
+        // 在用的 tag —— 加过滤之前，那些日志一直在写；加过滤之后会**静默消失**，
+        // 而且没有任何报错。新增本项目 tag 时，请同时更新本列表与 LogTagFilter。
         val required = listOf(
-            // server / app 进程
+            // server / app 进程名当 tag 用的场合
             "me.gm.cleaner",
             "me.gm.cleaner.runtime.server",
             "cleaner_server",
             // 重定向与挂载
             "MC_REDIRECT",
+            "StorageRedirect",
+            "VfsLayerController",
+            "MountWizard",
+            "EditMountTemplate",
+            "StoragePolicyChangeCoordinator",
+            "StoragePolicyBatchEdit",
             // 生命周期与状态机
             "MC_BOOT",
+            "MC_EVENT",
+            "MC_STATE",
+            "MC_DIAG",
             "MC/Test",
             "MC/StateMachine",
             "MC/BootState",
             "MC/XposedState",
-            // 组件级
+            "MC/AppList",
+            "MC/Policy",
+            "MC_FsProbe",
+            "MC_PkgCache",
+            "MC/Launcher",
+            // server 侧组件
             "DataBus",
+            "DataBusEventQuarantine",
+            "DataBusEventWriter",
+            "DataBusLease",
+            "DataBusPrune",
+            "DataBusRecoveryLedger",
+            "DiagnosticArchive",
+            "CleanerService",
+            "CleanerServerCallback",
+            "BinderSender",
+            "LayerOrchestrator",
+            "SnapshotPublisher",
+            "HookRecoveryCoordinator",
+            "MediaProviderRecoveryStrategy",
             "NativeHookStatus",
             "HookPolicyCache",
+            "HookPolicyRefreshScheduler",
+            "FuseNativePolicyAdapter",
+            "HookDataBusBridge",
+            "EventConsumerScheduler",
+            "EventSignalCoalescer",
+            "EventDeadLetter",
+            "FileSystemEventConsumer",
+            "FileSystemObserver",
+            "RedirectNoticeConsumer",
+            "QuerySessionLeaseConsumer",
+            "QuerySessionCache",
             "ActivityManagerLogsObserver",
+            "AMLogs",
+            "PackageInfoMapper",
+            "PackageReceiver",
+            "BaseIntentObserver",
+            "IntentReceiver",
+            "PlatformCapabilitiesDetector",
+            "SecurityHelper",
+            "ServicePreferences",
+            "PermissionUtils",
+            "RootWorkerService",
+            "ClientErrorJournal",
+            "AppLabelCache",
+            // Hook 侧
+            "MediaProvider",
+            "HookBridgeRegistrar",
+            "HooksBridge",
+            "HooksBinderRetriever",
+            "BulkCursor",
+            "ParceledListSlice",
+            "IContentProviderKt",
+            // app 侧 UI / 通知
+            "NotificationService",
+            "ServiceMoreOptions",
+            "OverridableDefaultItemAnimator",
+            "SimpleListDiffer",
+            "ThemeColorPreference",
             // native 与启动器
             "xhook",
             "starter",
         )
         val spec = LogTagFilter.FILTER_SPEC
         for (tag in required) {
-            assertTrue("tag 未登记：$tag", spec.contains("$tag:"))
+            assertTrue("tag 未登记：$tag", spec.contains("$tag:*"))
         }
     }
 

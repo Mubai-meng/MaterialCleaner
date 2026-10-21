@@ -16,24 +16,55 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
+import me.gm.cleaner.core.config.ServicePreferences;
 import me.gm.cleaner.runtime.server.BuildConfig;
 
 
+/**
+ * 日志采集：三个独立通道 + 按配置对账 + 可回收。
+ *
+ * <h3>通道划分（第30批融合上游 5b1a87d）</h3>
+ * <ul>
+ *   <li><b>主环形</b> {@code cleaner.log}：`-b main,system` + [LogTagFilter] 白名单，
+ *       `-r 4096 -n 8`（32 MB 硬上限）。旧实现采 `main,system,crash` 全量，
+ *       实测 ~875 MB/天；按本项目 tag 聚焦后压缩两个数量级。</li>
+ *   <li><b>崩溃通道</b> {@code cleaner-crash.log}：`-b crash` **无过滤**。
+ *       崩溃时的 tag 是崩溃进程名或 {@code AndroidRuntime}，白名单穷举不到，
+ *       一旦施加过滤就是「崩溃证据直接消失」。crash buffer 只在崩溃时写入，
+ *       体积可忽略。</li>
+ *   <li><b>启动窗口段</b> {@code cleaner-boot-<ts>.log}：`-b main,system,crash`
+ *       **无过滤**，只跑 60 秒。主环形是滚动的，启动期那几秒会在几分钟内被新日志
+ *       覆盖，而实测挂载失败（`MOUNT.ZYGOTE.*`）恰好发生在启动后 1 秒内。
+ *       这一段同时是「白名单万一漏登记某 tag」的兜底现场。</li>
+ * </ul>
+ *
+ * <h3>为什么必须固定基名 + logcat 原生轮转</h3>
+ * 旧实现每次 server 启动都用 {@code createTempFile} 新建带时间戳的文件，而淘汰只在
+ * **启动瞬间**跑一次 ⇒ 单次会话内的活动文件没有任何上限。本机 logcat 实测
+ * ~700–1500 行/s、~177 B/行（≈120–265 KB/s），一个会话就能写出 10–20 GB/天；
+ * 而 {@code /data/local/tmp} 在本机是 f2fs {@code /data} 上的普通目录（不是 tmpfs），
+ * 这些日志会真实占用用户存储且重启不消失。
+ * 改为固定基名 + logcat 原生轮转（{@code -r}/{@code -n}）后，磁盘占用由 logcat
+ * 自己硬性封顶，不依赖任何 Java 侧定时器。
+ * <p>
+ * ⚠️ 因此上游的 {@code Files.createTempFile} 取文件法在本项目**不可用**：
+ * {@code logcat -f} 的 {@code -r/-n} 轮转是按<b>同一个路径</b>滚动的，
+ * 每次换新文件名等于让轮转永远不生效。本类保留固定基名。
+ *
+ * <h3>生命周期（第30批融合上游 93bf07a / b295b8f）</h3>
+ * 旧实现的配置只在服务初始化时读一次、进程句柄启动即丢弃，因此：
+ * ① 关闭「保存日志到文件」开关不会停掉已在写的 logcat，它继续向磁盘写；
+ * ② 每次服务重启都多一条永不退出的 logcat（旧的还继续写旧文件）。
+ * 现在统一走 [reconcileWithPreferences]：「期望状态」与「实际状态」对账，
+ * 并由 [shutdown] 在服务退出前无条件回收。
+ */
 public class AutoLogging {
-    public static final int MODE_CONTINUOUSLY = 1;
     private static final File sLogsDir = new File("/data/local/tmp/cleaner_logs");
 
     /**
-     * 环形日志的固定基名。
+     * 主环形日志的固定基名。
      *
-     * 旧实现每次 server 启动都用 {@code createTempFile} 新建一个带时间戳的文件，
-     * 而淘汰只在**启动瞬间**跑一次 ⇒ 单次会话内的活动文件没有任何上限。
-     * 本机 logcat 实测 ~700–1500 行/s、~177 B/行（≈120–265 KB/s），
-     * 一个会话就能写出 10–20 GB/天；而 `/data/local/tmp` 在本机是 f2fs `/data`
-     * 上的普通目录（不是 tmpfs），这些日志会真实占用用户存储且重启不消失。
-     *
-     * 改为固定基名 + logcat 原生轮转（`-r`/`-n`）后，磁盘占用由 logcat 自己
-     * 硬性封顶，不依赖任何 Java 侧定时器。
+     * 见类注释「为什么必须固定基名」——这里**不能**改成时间戳命名。
      */
     static final String LOG_BASE_NAME = "cleaner.log";
 
@@ -41,17 +72,35 @@ public class AutoLogging {
      * 「启动窗口」专用日志段的前缀。
      *
      * 主环形是**滚动**的：启动期那几秒会在几分钟内被新日志覆盖，而诊断包又只保留
-     * 每个文件尾部 512 KB。实测挂载失败（`MOUNT.ZYGOTE.*`）恰好发生在 server 启动
-     * 后 1 秒内，等用户生成诊断包时早已被挤掉。这里额外开一个只跑
+     * 每个文件固定预算的片段。实测挂载失败（`MOUNT.ZYGOTE.*`）恰好发生在 server
+     * 启动后 1 秒内，等用户生成诊断包时早已被挤掉。这里额外开一个只跑
      * [BOOT_LOG_SECONDS] 秒的独立段，专门保留「启动 + 首分钟内」的日志。
      */
     static final String BOOT_LOG_PREFIX = "cleaner-boot-";
+
+    /**
+     * 崩溃通道的固定基名。
+     *
+     * 与主环形同样需要 `-r/-n` 轮转，所以同样是固定基名；单独一个文件是因为
+     * 它的过滤条件完全不同（`-b crash` 且**无** tag 过滤）。它属于主通道的一部分，
+     * 随 [reconcileWithPreferences] 的期望状态一起起停。
+     */
+    static final String CRASH_LOG_BASE_NAME = "cleaner-crash.log";
 
     /** 单个文件轮转阈值（KB）。`logcat -r` 的单位就是 KB。 */
     private static final int ROTATE_KBYTES = 4096;      // 4 MB
 
     /** 环形文件数（含基名文件）。`-n 8` ⇒ cleaner.log + cleaner.log.1 … .7。 */
     private static final int ROTATE_COUNT = 8;
+
+    /**
+     * 崩溃通道轮转：2 × 2 MB。
+     *
+     * crash buffer 本身很小（`-b crash` 的默认容量就 256 KB 级别，且只在崩溃时写入），
+     * 这里给 4 MB 总量是纯保险，避免某次崩溃风暴把主环形的配额挤掉。
+     */
+    private static final int CRASH_ROTATE_KBYTES = 2048;
+    private static final int CRASH_ROTATE_COUNT = 2;
 
     /** 启动窗口段：跑 60 秒，最多 2 × 8 MB = 16 MB（峰值 ~265 KB/s 时仍覆盖 60 s）。 */
     private static final int BOOT_LOG_SECONDS = 60;
@@ -61,30 +110,40 @@ public class AutoLogging {
     /**
      * 磁盘侧兜底阈值：文件数 + 总字节。
      *
-     * 正常运行时主环形封顶 8 × 4 MB = 32 MB，启动段封顶 2 × 8 MB = 16 MB；
+     * 正常运行时三个通道合计封顶 8 × 4 + 2 × 2 + 2 × 8 = 52 MB；
      * 这里的 64 MB 只用于清理旧版本遗留的 `*.log`（时间戳命名）以及异常情况下
-     * 跑飞的单个文件。注意：{@link #pruneLocked()} 只在 server 启动时调用，
+     * 跑飞的单个文件。注意：{@link #pruneLocked()} 只在采集启动时调用，
      * **不是**会话内的实时看门狗；会话内的硬上限完全由 `logcat -r/-n` 保证。
      */
-    private static final int MAX_LOG_FILES = ROTATE_COUNT + BOOT_ROTATE_COUNT;
+    private static final int MAX_LOG_FILES =
+            ROTATE_COUNT + CRASH_ROTATE_COUNT + BOOT_ROTATE_COUNT;
     private static final long MAX_LOG_DIR_BYTES = 64L * 1024 * 1024;
 
     /**
-     * 当前由本类持有的 logcat 子进程。
+     * 采集状态锁。
      *
-     * 原来的写法丢弃了 {@code start()} 的返回值，句柄无处可 kill：server 每重启一次
-     * 就多一条永不退出的 logcat（旧的还继续写旧文件）。持有它是为了让
-     * {@link #destroy()} 能真正杀掉。
+     * 第30批把进程句柄从 static 改为**实例字段**：句柄必须与「哪一次 server 实例
+     * 启动了它」绑定，否则一个丢弃的实例无法回收自己那条 logcat。
      */
-    private static final Object sLock = new Object();
-    private static volatile Process sLogcat;
+    private final Object mLock = new Object();
 
-    /** 启动窗口段的 logcat；与主环形相互独立。 */
-    private static volatile Process sBootLogcat;
-    private static volatile ScheduledFuture<?> sBootStopFuture;
+    /** 主环形通道的 logcat；非 null 即「按配置应当运行且正在运行」。 */
+    private Process mLogProcess;
 
-    /** 单线程守护调度器：只负责 60 秒后停掉启动段，不创建额外常驻线程池。 */
-    private static final ScheduledExecutorService sBootScheduler =
+    /** 崩溃通道的 logcat。 */
+    private Process mCrashLogProcess;
+
+    /** 启动窗口段的 logcat；60 秒后由 [BOOT_SCHEDULER] 停掉并置 null。 */
+    private Process mBootLogProcess;
+    private ScheduledFuture<?> mBootStopFuture;
+
+    /**
+     * 单线程守护调度器：只负责 60 秒后停掉启动段，不创建额外常驻线程池。
+     *
+     * 保持 static：它是纯粹的定时器，不持有任何实例状态，也不阻止进程退出
+     * （daemon 线程）。
+     */
+    private static final ScheduledExecutorService BOOT_SCHEDULER =
             Executors.newSingleThreadScheduledExecutor(r -> {
                 final Thread thread = new Thread(r, "cleaner-boot-log-stop");
                 thread.setDaemon(true);
@@ -95,10 +154,11 @@ public class AutoLogging {
     }
 
     /**
-     * 目录内的日志文件名判定：环形基名、其数字分片、启动窗口段，以及旧版本的时间戳 `*.log`。
+     * 目录内的日志文件名判定：主环形基名、其数字分片、崩溃通道、启动窗口段，
+     * 以及旧版本的时间戳 `*.log`。
      *
-     * 诊断归档也用它，避免两处口径漂移 —— 否则 `cleaner.log.1 … .7` 会被
-     * `endsWith(".log")` 漏掉，归档里只剩正在写的那一个文件。
+     * 诊断归档也用它，避免两处口径漂移 —— 否则 `cleaner.log.1 … .7` 会因
+     * `endsWith(".log")` 不成立而被漏掉，归档里只剩正在写的那一个文件。
      */
     public static boolean isLogFileName(final String name) {
         if (name == null) {
@@ -109,13 +169,27 @@ public class AutoLogging {
             return true;
         }
         if (name.endsWith(".log")) {
-            // 环形基名 cleaner.log + 旧版 createTempFile 生成的 <ts>-<rand>.log
+            // 主环形基名 / 崩溃通道基名 / 旧版 createTempFile 生成的 <ts>-<rand>.log
             return true;
         }
-        if (!name.startsWith(LOG_BASE_NAME + ".")) {
+        // 两条固定基名通道的轮转分片
+        return isRingShardOf(name, LOG_BASE_NAME)
+                || isRingShardOf(name, CRASH_LOG_BASE_NAME);
+    }
+
+    /**
+     * `"<base>.N"`（N 为纯数字、非空）形式的轮转分片判定。
+     *
+     * 单独抽出来是因为第30批新增了崩溃通道：只有 `cleaner.log.N` 一种分片时，
+     * 靠一个 `startsWith(LOG_BASE_NAME + ".")` 分支就够了；两条通道共用后必须
+     * 参数化，否则 `cleaner-crash.log.1` 会静默漏出归档。
+     */
+    private static boolean isRingShardOf(final String name, final String base) {
+        final String prefix = base + ".";
+        if (!name.startsWith(prefix)) {
             return false;
         }
-        final String suffix = name.substring(LOG_BASE_NAME.length() + 1);
+        final String suffix = name.substring(prefix.length());
         if (suffix.isEmpty()) {
             return false;
         }
@@ -133,6 +207,11 @@ public class AutoLogging {
         return name != null && name.startsWith(BOOT_LOG_PREFIX);
     }
 
+    /** 是否为崩溃通道文件（诊断归档把它与主环形一同按首尾两段取用）。 */
+    public static boolean isCrashLogFileName(final String name) {
+        return name != null && name.startsWith(CRASH_LOG_BASE_NAME);
+    }
+
     private static File prepareLogsDir() throws IOException {
         final var path = sLogsDir.toPath();
         if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) &&
@@ -146,15 +225,15 @@ public class AutoLogging {
     }
 
     /**
-     * 预创建环形基名文件并收紧权限。
+     * 预创建固定基名文件并收紧权限。
      *
      * `logcat -f` 由 logcat 自己打开文件，所以这里必须先建好并 chmod 0600；
-     * 目录本身是 0700，双重保护。轮转产生的 `cleaner.log.N` 由 logcat 创建，
+     * 目录本身是 0700，双重保护。轮转产生的 `<base>.N` 由 logcat 创建，
      * 权限受目录 0700 兜底。
      */
-    private static File prepareRingFile() throws IOException {
+    private static File prepareRingFile(final String baseName) throws IOException {
         final var dir = prepareLogsDir();
-        final var logFile = new File(dir, LOG_BASE_NAME);
+        final var logFile = new File(dir, baseName);
         final Path path = logFile.toPath();
         if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) &&
                 (Files.isSymbolicLink(path) ||
@@ -180,52 +259,141 @@ public class AutoLogging {
     }
 
     /**
-     * 启动环形采集 + 启动窗口段。
+     * 按当前配置对账日志采集的**实际**状态：应启用而未运行则启动，应停用则停止。
      *
-     * 关键点：`-f` 让 logcat 直接写文件，`-r 4096 -n 8` 让 logcat 自己轮转并
-     * 覆盖最旧分片，因此**不需要**再 `redirectOutput` 到同一个文件（那会和
-     * logcat 的写入 FD 打架）。stdout/stderr 一律 DISCARD，避免无人读取的
-     * 管道把子进程写阻塞。
+     * 幂等：状态已一致时为无操作；可在任意线程调用（含 Binder 线程）。
+     * 这是「日志开关」唯一生效点 —— 旧实现只在 {@code initialize()} 读一次配置。
+     *
+     * 结算顺序很关键：先把「句柄在但进程已死」的情况结算掉，否则会把死引用
+     * 误判成「仍在运行」而永不重启（自愈失效）。
      */
-    private void grabLogs() {
-        synchronized (sLock) {
-            // 幂等：先回收上一轮残留。grabLogs 只有一个调用点，真出现并发/异常重启时
-            // 这一步保证同一时刻至多一条 logcat 被本类持有。
-            stopLocked();
-            pruneLocked();
-            final File logFile;
-            try {
-                logFile = prepareRingFile();
-            } catch (final IOException e) {
-                Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "grabLogs failed", e);
+    public void reconcileWithPreferences() {
+        final boolean desired = ServicePreferences.INSTANCE.getAutoLogging();
+        synchronized (mLock) {
+            mLogProcess = settleIfExited(mLogProcess, "logcat");
+            mCrashLogProcess = settleIfExited(mCrashLogProcess, "logcat crash");
+            mBootLogProcess = settleIfExited(mBootLogProcess, "logcat boot");
+            if (!desired) {
+                shutdownAllLocked("disabled by preference");
                 return;
             }
-            try {
-                sLogcat = new ProcessBuilder(buildLogcatCommand(logFile.getAbsolutePath()))
-                        // `Redirect.DISCARD` 是 Java 9 API，Android 上没有；
-                        // 用 /dev/null 等价地丢弃 stdout/stderr，避免无人读取的管道阻塞子进程。
-                        .redirectOutput(new File("/dev/null"))
-                        .redirectError(new File("/dev/null"))
-                        .start();
-            } catch (final IOException e) {
-                Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "grabLogs failed", e);
+            if (mLogProcess != null || mCrashLogProcess != null || mBootLogProcess != null) {
+                // 任一路径活着 ⇒ 整体视为运行中。这里必须返回而不是"重新拉起一轮"：
+                // 本方法会被每次偏好变更调用，重启会让启动窗口段反复生成新文件。
+                // 之所以不只看主通道：主通道可能因磁盘满/权限被拒而启动失败，
+                // 此时 crash 与启动段仍在正常工作 —— 只看主通道会导致每次偏好变更
+                // 都把它们连带重启一遍。
+                return;
             }
-            startBootLogLocked();
+            // 主通道不在（首次启动，或上一轮意外死亡）：清掉可能残留的分支通道，
+            // 再完整拉起一轮，避免两个 logcat 抢同一个 `-f` 文件。
+            shutdownAllLocked("restart");
+            startContinuousLoggingLocked();
+        }
+    }
+
+    /**
+     * 无条件停止日志采集，用于服务退出前回收子进程。
+     *
+     * 幂等：进程未运行时为无操作。**不等待**进程退出 —— 调用方紧接着
+     * {@code System.exit(0)}，在这里阻塞只会拖长退出路径；logcat 对 SIGTERM
+     * 是立即响应的，句柄在手就不会留下 PPID=1 的孤儿。
+     */
+    public void shutdown() {
+        synchronized (mLock) {
+            shutdownAllLocked("server exiting");
+        }
+    }
+
+    /**
+     * 结算死引用：进程已退出则返回 null（下次对账走启动分支自愈）。
+     *
+     * 只有「句柄非 null 且 isAlive() 为 false」才算异常退出。启动窗口段的
+     * 正常到点停止走的是 [stopBootProcess]，会先把句柄置 null，不会走到这里。
+     */
+    private static Process settleIfExited(final Process process, final String label) {
+        if (process == null || process.isAlive()) {
+            return process;
+        }
+        Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, label + " process exited unexpectedly");
+        return null;
+    }
+
+    /**
+     * 启动三个采集通道（调用方必须已持有 [mLock]）。
+     *
+     * 任何一个通道启动失败都不影响其它通道：主通道失败时 crash 与启动段仍然
+     * 有价值（它们恰好是"主通道为什么起不来"的证据来源）。
+     */
+    private void startContinuousLoggingLocked() {
+        pruneLocked();
+        Log.i(BuildConfig.LIBRARY_PACKAGE_NAME,
+                "auto logging: ring=" + ROTATE_COUNT + "x" + ROTATE_KBYTES + "KB"
+                        + " crash=" + CRASH_ROTATE_COUNT + "x" + CRASH_ROTATE_KBYTES + "KB"
+                        + " boot=" + BOOT_LOG_SECONDS + "s/"
+                        + BOOT_ROTATE_COUNT + "x" + BOOT_ROTATE_KBYTES + "KB"
+                        + " tags=" + LogTagFilter.INSTANCE.getFILTER_SPEC().split(" ").length);
+        mLogProcess = startRingChannel(
+                LOG_BASE_NAME, buildLogcatCommand(null), "auto logging");
+        mCrashLogProcess = startRingChannel(
+                CRASH_LOG_BASE_NAME, buildCrashLogcatCommand(null), "auto logging crash");
+        startBootLogLocked();
+    }
+
+    /**
+     * 预创建基名文件、把真实路径填进命令模板、启动 logcat。
+     *
+     * @param argvTemplate 命令模板；其中 {@link #PATH_PLACEHOLDER} 会被替换为真实路径
+     */
+    private Process startRingChannel(final String baseName, final String[] argvTemplate,
+                                     final String label) {
+        final File logFile;
+        try {
+            logFile = prepareRingFile(baseName);
+        } catch (final IOException e) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, label + " prepare failed", e);
+            return null;
+        }
+        final String[] argv = argvTemplate.clone();
+        for (int i = 0; i < argv.length; i++) {
+            if (PATH_PLACEHOLDER.equals(argv[i])) {
+                argv[i] = logFile.getAbsolutePath();
+            }
+        }
+        return startLogcat(argv, label + " -> " + baseName);
+    }
+
+    /**
+     * 拉起一个 logcat 采集进程。
+     *
+     * stdout/stderr 一律丢到 `/dev/null`：`Redirect.DISCARD` 是 Java 9 API，
+     * Android 上没有；而无人读取的管道会把子进程写阻塞。
+     */
+    private static Process startLogcat(final String[] argv, final String label) {
+        try {
+            final Process process = new ProcessBuilder(argv)
+                    .redirectOutput(new File("/dev/null"))
+                    .redirectError(new File("/dev/null"))
+                    .start();
+            Log.i(BuildConfig.LIBRARY_PACKAGE_NAME, label + " started");
+            return process;
+        } catch (final IOException e) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, label + " start failed", e);
+            return null;
         }
     }
 
     /**
      * 启动「启动窗口」段：独立文件、独立进程，跑满 [BOOT_LOG_SECONDS] 秒后自动停止。
      *
-     * 与主环形的区别：
-     * - 文件名带时间戳（每个 server 会话一份），归档按**头部**读取；
-     * - 只跑 60 秒，16 MB 上限足够覆盖启动 + 首分钟（峰值 ~265 KB/s 也不会被滚掉）；
-     * - 不参与主环形的固定基名轮转，避免把启动期日志挤掉。
+     * 这一段**不施加 tag 过滤**：它是"白名单漏登记"与"启动期崩溃"的兜底现场，
+     * 只跑 60 秒、最多 16 MB，代价可控。
      */
-    private static void startBootLogLocked() {
+    private void startBootLogLocked() {
         final File bootFile = new File(
                 sLogsDir, BOOT_LOG_PREFIX + System.currentTimeMillis() + ".log");
         try {
+            prepareLogsDir();
             if (!bootFile.createNewFile()) {
                 Log.w(BuildConfig.LIBRARY_PACKAGE_NAME,
                         "boot log already exists: " + bootFile);
@@ -237,36 +405,90 @@ public class AutoLogging {
                     .redirectOutput(new File("/dev/null"))
                     .redirectError(new File("/dev/null"))
                     .start();
-            sBootLogcat = process;
+            mBootLogProcess = process;
             // 捕获 process 本体：即使 cancel 与任务触发并发，也只会停掉这一条，
             // 不会误杀下一轮 server 启动新建的 boot logcat。
-            sBootStopFuture = sBootScheduler.schedule(
-                    () -> stopProcess(process), BOOT_LOG_SECONDS, TimeUnit.SECONDS);
+            mBootStopFuture = BOOT_SCHEDULER.schedule(
+                    () -> stopBootProcess(process), BOOT_LOG_SECONDS, TimeUnit.SECONDS);
             Log.i(BuildConfig.LIBRARY_PACKAGE_NAME,
-                    "boot log started: " + bootFile + " for " + BOOT_LOG_SECONDS + "s");
-        } catch (final IOException | RejectedExecutionException e) {
+                    "boot log started: " + bootFile.getName()
+                            + " for " + BOOT_LOG_SECONDS + "s");
+        } catch (final IOException e) {
             Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "boot log start failed", e);
-            stopBootLocked();
+            // 启动失败不得残留空文件：boot 段按时间戳命名，每次失败都会攒一个 0 字节
+            // 文件，而 pruneLocked 只在采集启动时按"最旧优先"淘汰，短时间内看不到效果
+            //（上游 b295b8f 对主通道的同类修复，这里对应到 boot 段）。
+            deleteIfEmpty(bootFile);
+        } catch (final RejectedExecutionException e) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "boot log schedule failed", e);
+            stopProcess(mBootLogProcess);
+            mBootLogProcess = null;
+            deleteIfEmpty(bootFile);
+        }
+    }
+
+    /** 只在文件确实为空时删除，避免把已经写进内容的现场证据一起删掉。 */
+    private static void deleteIfEmpty(final File file) {
+        try {
+            if (file.exists() && file.length() == 0L && !file.delete()) {
+                Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "cannot remove empty " + file.getName());
+            }
+        } catch (final Throwable t) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "cleanup empty log failed", t);
         }
     }
 
     /**
-     * 纯函数：构造环形采集命令。
+     * 启动窗口段的到点停止：先摘除句柄再 kill，保证 [settleIfExited] 不会把
+     * 「正常到点」误判成「异常退出」。
+     */
+    private void stopBootProcess(final Process process) {
+        synchronized (mLock) {
+            if (mBootLogProcess == process) {
+                mBootLogProcess = null;
+                mBootStopFuture = null;
+            }
+        }
+        stopProcess(process);
+        Log.i(BuildConfig.LIBRARY_PACKAGE_NAME, "boot log window closed");
+    }
+
+    /** 命令模板里代表"真实日志路径"的占位符，由 [startRingChannel] 替换。 */
+    static final String PATH_PLACEHOLDER = "<log-path>";
+
+    /**
+     * 纯函数：构造主环形采集命令。
      *
-     * 抽出来是为了让单测钉住三个不能丢的参数：
-     * `-f`（否则 `-r/-n` 不生效）、`-r`（单文件上限）、`-n`（环形文件数）。
-     * 少任何一个，日志都会退回无界增长。
+     * 抽出来是为了让单测钉住四组不能丢的参数：
+     * `-f`（否则 `-r/-n` 不生效）、`-r`（单文件上限）、`-n`（环形文件数）、
+     * 以及末尾必须存在的 `*:S`（否则 tag 过滤不生效，采集量回到 875 MB/天）。
+     *
+     * @param logPath 真实日志路径；传 {@code null} 时返回含 [PATH_PLACEHOLDER] 的模板
      */
     static String[] buildLogcatCommand(final String logPath) {
+        final String path = logPath == null ? PATH_PLACEHOLDER : logPath;
+        return concat(
+                new String[]{
+                        "/system/bin/logcat", "-b", "main,system",
+                        "-f", path,
+                        "-r", Integer.toString(ROTATE_KBYTES),
+                        "-n", Integer.toString(ROTATE_COUNT),
+                },
+                LogTagFilter.filterSpecArgs());
+    }
+
+    /** 纯函数：构造崩溃通道命令（`-b crash` 全量，无 tag 过滤）。 */
+    static String[] buildCrashLogcatCommand(final String logPath) {
+        final String path = logPath == null ? PATH_PLACEHOLDER : logPath;
         return new String[]{
-                "/system/bin/logcat", "-b", "main,system,crash",
-                "-f", logPath,
-                "-r", Integer.toString(ROTATE_KBYTES),
-                "-n", Integer.toString(ROTATE_COUNT),
+                "/system/bin/logcat", "-b", "crash",
+                "-f", path,
+                "-r", Integer.toString(CRASH_ROTATE_KBYTES),
+                "-n", Integer.toString(CRASH_ROTATE_COUNT),
         };
     }
 
-    /** 纯函数：构造启动窗口段命令（同样必须带 `-f/-r/-n`）。 */
+    /** 纯函数：构造启动窗口段命令（同样必须带 `-f/-r/-n`，且**不加** tag 过滤）。 */
     static String[] buildBootLogcatCommand(final String logPath) {
         return new String[]{
                 "/system/bin/logcat", "-b", "main,system,crash",
@@ -276,31 +498,36 @@ public class AutoLogging {
         };
     }
 
+    private static String[] concat(final String[] head, final String[] tail) {
+        final String[] out = Arrays.copyOf(head, head.length + tail.length);
+        System.arraycopy(tail, 0, out, head.length, tail.length);
+        return out;
+    }
+
     /**
-     * 停止当前的 logcat 采集；由 {@code CleanerServer.onDestroy()} 调用，可重复执行。
+     * 停止并回收全部采集进程（调用方必须已持有 [mLock]）。
+     *
+     * 先清引用再销毁：停止过程中的并发对账不会命中半完成状态。
      */
-    public static void destroy() {
-        synchronized (sLock) {
-            stopLocked();
-        }
-    }
-
-    private static void stopLocked() {
-        stopBootLocked();
-        final Process process = sLogcat;
-        sLogcat = null;
-        stopProcess(process);
-    }
-
-    private static void stopBootLocked() {
-        final ScheduledFuture<?> future = sBootStopFuture;
-        sBootStopFuture = null;
+    private void shutdownAllLocked(final String reason) {
+        final Process main = mLogProcess;
+        final Process crash = mCrashLogProcess;
+        final Process boot = mBootLogProcess;
+        final ScheduledFuture<?> future = mBootStopFuture;
+        mLogProcess = null;
+        mCrashLogProcess = null;
+        mBootLogProcess = null;
+        mBootStopFuture = null;
         if (future != null) {
             future.cancel(false);
         }
-        final Process process = sBootLogcat;
-        sBootLogcat = null;
-        stopProcess(process);
+        if (main == null && crash == null && boot == null) {
+            return;
+        }
+        Log.i(BuildConfig.LIBRARY_PACKAGE_NAME, "auto logging stopped: " + reason);
+        stopProcess(main);
+        stopProcess(crash);
+        stopProcess(boot);
     }
 
     private static void stopProcess(final Process process) {
@@ -386,16 +613,5 @@ public class AutoLogging {
             deleted++;
         }
         return deleted;
-    }
-
-    public void registerBootShutdownReceiver(int mode) {
-        if (mode == MODE_CONTINUOUSLY) {
-            Log.i(BuildConfig.LIBRARY_PACKAGE_NAME,
-                    "auto logging ring: " + ROTATE_COUNT + " x " + ROTATE_KBYTES
-                            + " KB -> " + new File(sLogsDir, LOG_BASE_NAME)
-                            + "; boot segment: " + BOOT_LOG_SECONDS + "s, "
-                            + BOOT_ROTATE_COUNT + " x " + BOOT_ROTATE_KBYTES + " KB");
-            grabLogs();
-        }
     }
 }

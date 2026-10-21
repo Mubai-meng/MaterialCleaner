@@ -9,10 +9,15 @@ package me.gm.cleaner.runtime.server
  *
  * logcat 过滤语义（实测确认，勿改）：
  * - filterSpec 只写 `<tag>:*` **不会**抑制其它 tag，必须以 `*:S` 结尾才真正过滤；
- * - 缺少 `*:S` 时会退化为全量输出，采集量将回到未过滤水平。
+ * - 缺少 `*:S` 时会退化为全量输出，采集量将回到未过滤水平；
+ * - 匹配是**精确字符串比较**，没有任何通配语义 —— `MC:*` 不会命中 `MC/Policy`，
+ *   `me.gm.cleaner:*` 也不会命中 `me.gm.cleaner.runtime.server`。
  *
- * 维护约定：新增本项目日志 tag 时必须同步登记到此清单，
- * 否则持续采集与诊断聚焦日志都会漏掉该 tag。
+ * 维护约定（第30批起强制）：新增本项目日志 tag 时必须同步登记到此清单，
+ * 否则持续采集与诊断聚焦日志都会**静默丢掉**该 tag。
+ * 清单由 [LogTagFilterTest] 与源码实际 tag 集合双向校验：清单里多出来的 tag
+ * 无害（只是多放行几条），漏掉的 tag 才是缺陷。改任何 `Log.x("...")` 字面量
+ * 或 `TAG = "..."` 常量时，务必回来看一眼这里。
  */
 object LogTagFilter {
     /**
@@ -23,24 +28,40 @@ object LogTagFilter {
      * MC_REDIRECT 等）、native 侧（me.gm.cleaner、xhook）以及启动器（starter）。
      */
     private val TAGS = listOf(
-        // 生命周期与状态机
+        // ── 生命周期与状态机 ──────────────────────────────────────────
         "MC_BOOT", "MC_EVENT", "MC_STATE", "MC_DIAG",
         "MC/Test", "MC/StateMachine", "MC/BootState", "MC/XposedState",
-        "MC/MoreOptions", "MC/Launcher",
-        // 重定向与挂载
-        "MC_REDIRECT",
-        // 组件级
-        "DataBus", "DiagnosticArchive", "CleanerService",
+        "MC/MoreOptions", "MC/Launcher", "MC/AppList", "MC/Policy", "MC_FsProbe",
+        "MC_PkgCache",
+        // ── 重定向与挂载 ─────────────────────────────────────────────
+        "MC_REDIRECT", "StorageRedirect", "VfsLayerController", "MountWizard",
+        "EditMountTemplate", "StoragePolicyChangeCoordinator", "StoragePolicyBatchEdit",
+        // ── server 侧组件 ────────────────────────────────────────────
+        "DataBus", "DataBusEventQuarantine", "DataBusEventWriter", "DataBusLease",
+        "DataBusPrune", "DataBusRecoveryLedger",
+        "DiagnosticArchive", "CleanerService", "CleanerServerCallback", "BinderSender",
         "LayerOrchestrator", "SnapshotPublisher", "HookRecoveryCoordinator",
         "MediaProviderRecoveryStrategy", "NativeHookStatus", "HookPolicyCache",
-        "FuseNativePolicyAdapter", "HookDataBusBridge", "EventConsumerScheduler",
-        "FileSystemEventConsumer", "RedirectNoticeConsumer", "QuerySessionLeaseConsumer",
-        "ActivityManagerLogsObserver", "AMLogs",
-        // server / app 进程
+        "HookPolicyRefreshScheduler", "FuseNativePolicyAdapter", "HookDataBusBridge",
+        "EventConsumerScheduler", "EventSignalCoalescer", "EventDeadLetter",
+        "FileSystemEventConsumer", "FileSystemObserver",
+        "RedirectNoticeConsumer", "QuerySessionLeaseConsumer", "QuerySessionCache",
+        "ActivityManagerLogsObserver", "AMLogs", "PackageInfoMapper", "PackageReceiver",
+        "BaseIntentObserver", "IntentReceiver",
+        "PlatformCapabilitiesDetector", "SecurityHelper", "ServicePreferences",
+        "PermissionUtils", "RootWorkerService",
+        "ClientErrorJournal", "AppLabelCache",
+        // ── Hook 侧（跑在 MediaProvider / 目标进程内）─────────────────
+        "MediaProvider", "HookBridgeRegistrar", "HooksBridge", "HooksBinderRetriever",
+        "BulkCursor", "ParceledListSlice", "IContentProviderKt",
+        // ── app 侧 UI / 通知 ────────────────────────────────────────
+        "NotificationService", "ServiceMoreOptions",
+        "OverridableDefaultItemAnimator", "SimpleListDiffer", "ThemeColorPreference",
+        // ── server / app 进程名当 tag 用的场合 ───────────────────────
         "me.gm.cleaner", "me.gm.cleaner.runtime.server", "cleaner_server",
-        // native 与启动器
+        // ── native 与启动器 ─────────────────────────────────────────
         "xhook", "starter",
-        // 仅 debug 构建产出
+        // ── 仅 debug 构建产出 ───────────────────────────────────────
         "CleanerTest",
     )
 
