@@ -203,6 +203,8 @@ object DiagnosticArchive {
         appendLine("  ⚠️ Both logs/logcat_* captures are capped by '-t' counted in RAW lines (~700–1500/s),")
         appendLine("  so they cover roughly the last 20–40 s only even with LOGCAT_TAIL_LINES=$LOGCAT_TAIL_LINES.")
         appendLine("- commands/media_provider_maps.txt and commands/media_provider_mountinfo.txt show MediaProvider process state.")
+        appendLine("- commands/dmesg_evidence.txt has kernel-side denials (SELinux avc, FUSE, mount, namespace).")
+        appendLine("- logs/logcat_crash_recent.txt and logs/logcat_media_provider_pid.txt cover crash and hook-host evidence.")
         appendLine("- ⚠️ This archive is NOT the full log: ring logs keep only the TAIL; boot logs")
         appendLine("  (cleaner-boot-*, first 60 s after server start) keep only the HEAD.")
         appendLine("  See the 'truncation=' line in manifest.txt, and note logcat itself drops lines under")
@@ -363,6 +365,8 @@ object DiagnosticArchive {
         appendLine("  ⚠️ logs/logcat_* 两份捕获的 `-t` 计的是**原始行数**（本机 ~700–1500 行/s），")
         appendLine("  即便上限已提到 $LOGCAT_TAIL_LINES 行，实际也只覆盖最近 20–40 秒。")
         appendLine("- commands/media_provider_maps.txt 与 commands/media_provider_mountinfo.txt：MediaProvider 进程状态。")
+        appendLine("- commands/dmesg_evidence.txt：内核侧拒绝证据（SELinux avc、FUSE、mount、namespace）。")
+        appendLine("- logs/logcat_crash_recent.txt 与 logs/logcat_media_provider_pid.txt：崩溃与 Hook 宿主进程证据。")
         appendLine("- ⚠️ 本归档**不是**完整日志：主环形每份只保留**尾部**；启动段 cleaner-boot-*")
         appendLine("  （server 启动后 60 秒）只保留**头部**。见 manifest.txt 的 'truncation=' 行；")
         appendLine("  且 logcat 本身会被 ColorOS LOG_FLOWCTRL 按进程限额丢弃。")
@@ -733,16 +737,30 @@ object DiagnosticArchive {
         addCommand(
             zip,
             "logs/logcat_material_cleaner_filtered.txt",
+            // 过滤串的唯一真相源在 LogTagFilter：持续采集与诊断导出共用同一份清单，
+            // 避免两处各持一份而随代码演进漂移（此前清单已遗漏 cleaner_server、
+            // me.gm.cleaner.runtime.server、MC/BootState、MC/XposedState 等实际在用的 tag）。
             "/system/bin/logcat -d -v threadtime -b main,system,crash -t $LOGCAT_TAIL_LINES " +
-                    "MC_BOOT:* MC_EVENT:* MC_STATE:* MC_DIAG:* MC_NATIVE:* " +
-                    "MC_REDIRECT:* DataBus:* DiagnosticArchive:* CleanerService:* " +
-                    "LayerOrchestrator:* SnapshotPublisher:* HookRecoveryCoordinator:* " +
-                    "MediaProviderRecoveryStrategy:* NativeHookStatus:* HookPolicyCache:* " +
-                    "FuseNativePolicyAdapter:* HookDataBusBridge:* EventConsumerScheduler:* " +
-                    "FileSystemEventConsumer:* RedirectNoticeConsumer:* QuerySessionLeaseConsumer:* " +
-                    "ActivityManagerLogsObserver:* AMLogs:* MC/Test:* MC/StateMachine:* " +
-                    "CleanerTest:* xhook:* starter:* " +
-                    "me.gm.cleaner:* *:S",
+                    LogTagFilter.FILTER_SPEC,
+        )
+        // 崩溃 buffer 独立取证：crash 的 tag 是崩溃进程名（或 AndroidRuntime），
+        // 无法用固定白名单穷举，故此处不加 tag 过滤；crash buffer 仅在崩溃时写入，体积可忽略。
+        addCommand(
+            zip,
+            "logs/logcat_crash_recent.txt",
+            "/system/bin/logcat -d -v threadtime -b crash -t 2000",
+        )
+        // 目标进程（MediaProvider）定向取证：Hook 住在该进程内，其自身 tag
+        //（FuseDaemon 等）不在本项目白名单内，只能按 pid 定向抓取。
+        addCommand(
+            zip,
+            "logs/logcat_media_provider_pid.txt",
+            "MPID=$(${'$'}(pidof com.android.providers.media.module " +
+                    "com.android.providers.media " +
+                    "com.google.android.providers.media.module 2>/dev/null | awk '{print ${'$'}1}')); " +
+                    "if [ -z \"${'$'}MPID\" ]; then " +
+                    "echo 'media provider process is not running (no pid found)'; " +
+                    "else /system/bin/logcat -d -v threadtime --pid=${'$'}MPID -t 2000; fi",
         )
     }
 
@@ -832,6 +850,11 @@ object DiagnosticArchive {
             "commands/stat_f_databus.txt" to "stat -f /data /data/local/tmp $rootDir 2>&1; echo '--- stat ---'; stat $rootDir ${DataBus.BUS_ROOT} 2>&1; echo '--- ls -d ---'; ls -ld /data /data/local /data/local/tmp $rootDir 2>&1",
             "commands/databus_tree.txt" to "ls -laR ${DataBus.BUS_ROOT} 2>&1 | head -400",
             "commands/auto_logs_tree.txt" to "ls -laR $AUTO_LOG_DIR 2>&1 | head -200",
+            // 内核侧拒绝证据：SELinux avc denied、FUSE 内核错误、mount/namespace 失败
+            // 只在内核日志可见。logcat 的 kernel buffer 在多数真机不可用（实测恒为空），
+            // 故必须走 dmesg 通道；tail 限制输出量，保留最近匹配。
+            "commands/dmesg_evidence.txt" to
+                    "dmesg 2>/dev/null | grep -iE 'avc|fuse|mount|namespace' | tail -2000",
         )
         for ((entry, command) in commands) {
             addCommand(zip, entry, command)
