@@ -23,9 +23,11 @@ import androidx.preference.SwitchPreferenceCompat
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.snackbar.Snackbar
 import com.topjohnwu.superuser.internal.Utils
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.gm.cleaner.R
@@ -60,6 +62,9 @@ class MoreOptionsFragment : BaseSettingsFragment() {
     private lateinit var importLauncher: ActivityResultLauncher<Array<String>>
     private val notifyPreferencesChangedListener: NotifyServerPreferenceChangeListener
         get() = NotifyServerPreferenceChangeListener()
+
+    private var logStatsPollingJob: kotlinx.coroutines.Job? = null
+    private var lastStatsAvailable: Boolean = true
 
     class PostNotificationRequesterFragment : RequesterFragment() {
         @SuppressLint("InlinedApi")
@@ -107,7 +112,7 @@ class MoreOptionsFragment : BaseSettingsFragment() {
         override fun onPreferenceChange(preference: Preference, newValue: Any?): Boolean = try {
             true
         } finally {
-            lifecycleScope.launch {
+            lifecycleScope.launch(Dispatchers.IO) {
                 delay(100)
                 preferenceManager.sharedPreferences?.edit(true) { }
                 CleanerClient.service?.notifyPreferencesChanged()
@@ -195,6 +200,145 @@ class MoreOptionsFragment : BaseSettingsFragment() {
         super.onDestroyView()
         shareLauncher.unregister()
         importLauncher.unregister()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        startLogStatsPolling()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopLogStatsPolling()
+    }
+
+    private fun startLogStatsPolling() {
+        if (logStatsPollingJob?.isActive == true) return
+        logStatsPollingJob = lifecycleScope.launch {
+            while (isActive) {
+                try {
+                    // 同步 Binder 调用及目录遍历放在 IO 线程，避免阻塞 UI 主线程。
+                    val stats = withContext(Dispatchers.IO) {
+                        CleanerClient.service?.getLogDirStats()
+                    }
+                    if (stats != null) {
+                        val available = stats.getBoolean("available")
+                        val totalBytes = stats.getLong("totalBytes")
+                        val fileCount = stats.getInt("fileCount")
+                        updateAutoLoggingSummary(available, totalBytes, fileCount)
+                        if (available != lastStatsAvailable) {
+                            Log.d("MC/MoreOptions", "Log stats available changed: $available")
+                            lastStatsAvailable = available
+                        }
+                    } else {
+                        // Cleaner service is not bound/running: show an actionable hint
+                        // instead of the generic "temporarily unavailable" message.
+                        updateAutoLoggingServiceUnavailable()
+                        if (lastStatsAvailable) {
+                            Log.w("MC/MoreOptions", "Cleaner service unavailable, cannot fetch log stats")
+                            lastStatsAvailable = false
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    // 页面离开或协程被取消，不应当作为统计故障处理
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("MC/MoreOptions", "Failed to fetch log stats", e)
+                    updateAutoLoggingSummary(false, 0L, 0)
+                    if (lastStatsAvailable) {
+                        lastStatsAvailable = false
+                    }
+                }
+                delay(10_000)
+            }
+        }
+    }
+
+    private fun stopLogStatsPolling() {
+        logStatsPollingJob?.cancel()
+        logStatsPollingJob = null
+    }
+
+    private fun updateAutoLoggingSummary(available: Boolean, totalBytes: Long, fileCount: Int) {
+        val autoLogging = findPreference<SwitchPreferenceCompat>(
+            getString(me.gm.cleaner.R.string.auto_logging_key)
+        ) ?: return
+
+        val baseSummary = getString(R.string.auto_logging_summary)
+        val statsLine = if (available) {
+            val sizeStr = android.text.format.Formatter.formatShortFileSize(
+                requireContext(), totalBytes
+            )
+            getString(R.string.auto_logging_stats_summary, sizeStr, fileCount)
+        } else {
+            getString(R.string.log_stats_unavailable)
+        }
+        autoLogging.summary = baseSummary + "\n" + statsLine
+    }
+
+    private fun updateAutoLoggingServiceUnavailable() {
+        val autoLogging = findPreference<SwitchPreferenceCompat>(
+            getString(me.gm.cleaner.R.string.auto_logging_key)
+        ) ?: return
+        val baseSummary = getString(R.string.auto_logging_summary)
+        autoLogging.summary = baseSummary + "\n" + getString(R.string.log_stats_service_unavailable)
+    }
+
+    /**
+     * 呈现手动检查更新的结果。
+     *
+     * 三种结局各自给出可见反馈：已是最新、检查失败、发现新版本（当场弹窗，
+     * 而不是把用户丢给通知栏）。
+     */
+    private fun showUpdateCheckResult(result: me.gm.cleaner.net.UpdateChecker.UpdateCheckResult) {
+        when (result) {
+            is me.gm.cleaner.net.UpdateChecker.UpdateCheckResult.UpToDate -> {
+                Snackbar.make(
+                    requireView(),
+                    getString(R.string.update_check_up_to_date, result.current),
+                    Snackbar.LENGTH_SHORT,
+                ).show()
+            }
+
+            is me.gm.cleaner.net.UpdateChecker.UpdateCheckResult.Failed -> {
+                Snackbar.make(
+                    requireView(),
+                    getString(R.string.update_check_failed),
+                    Snackbar.LENGTH_LONG,
+                ).show()
+            }
+
+            is me.gm.cleaner.net.UpdateChecker.UpdateCheckResult.Available -> {
+                val release = result.release
+                com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+                    .setTitle(getString(R.string.new_version_available, release.tagName))
+                    .setMessage(release.body?.take(600))
+                    .setPositiveButton(R.string.click_to_view_release) { _, _ ->
+                        openReleasePage(release.htmlUrl)
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+        }
+    }
+
+    /** 打开发布页；失败时提示而不抛出。 */
+    private fun openReleasePage(url: String) {
+        if (url.isBlank()) return
+        runCatching {
+            startActivity(
+                android.content.Intent(
+                    android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(url),
+                )
+            )
+        }.onFailure {
+            Snackbar.make(
+                requireView(),
+                getString(R.string.update_check_failed),
+                Snackbar.LENGTH_LONG,
+            ).show()
+        }
     }
 
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
@@ -419,8 +563,15 @@ class MoreOptionsFragment : BaseSettingsFragment() {
 
         val checkUpdate = findPreference<Preference>(getString(R.string.check_update_key))!!
         checkUpdate.onPreferenceClickListener = Preference.OnPreferenceClickListener {
+            // 手动检查：当场反馈结果，不受自动路径"已通知过"的去重约束——
+            // 用户主动询问时必须得到回答，否则与点击无响应无异。
+            checkUpdate.isEnabled = false
             lifecycleScope.launch(Dispatchers.IO) {
-                me.gm.cleaner.net.UpdateChecker.checkAndNotify(requireContext())
+                val result = me.gm.cleaner.net.UpdateChecker.check()
+                withContext(Dispatchers.Main) {
+                    checkUpdate.isEnabled = true
+                    showUpdateCheckResult(result)
+                }
             }
             true
         }

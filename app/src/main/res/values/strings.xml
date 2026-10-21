@@ -237,7 +237,6 @@
 
     <!-- Service -->
     <string name="no_root_access">Can\'t access root</string>
-    <string name="confirm_exit_restart">RESTART</string>
     <string name="service_need_upgrade">SERVICE NEED UPGRADE</string>
     <string name="service_need_reboot">Update installed, please reboot your phone</string>
     <string name="service_exception_logcat_shutdown">The logcat is shutdown, please restart the Cleaner service.</string>
@@ -373,4 +372,11 @@
     <string name="open_project_url">Open project</string>
     <string name="cancel">Cancel</string>
 
+    <!-- 批 D：日志目录统计 / 手动检查更新反馈 / 重启服务文案 -->
+    <string name="auto_logging_stats_summary">Logs: %1$s across %2$d files</string>
+    <string name="log_stats_unavailable">Log stats temporarily unavailable</string>
+    <string name="log_stats_service_unavailable">Cleaner service not running. Please start the service.</string>
+    <string name="update_check_up_to_date">Current version %s is up to date</string>
+    <string name="update_check_failed">Failed to check for updates. Check your network and try again.</string>
+    <string name="confirm_restart_service">Restart Cleaner service</string>
 </resources>

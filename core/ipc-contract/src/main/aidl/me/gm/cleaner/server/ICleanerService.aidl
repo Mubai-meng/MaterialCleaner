@@ -1,5 +1,6 @@
 package me.gm.cleaner.server;
 
+import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import me.gm.cleaner.browser.IRootFileService;
 import me.gm.cleaner.browser.IRootWorkerService;
@@ -80,4 +81,10 @@ interface ICleanerService {
     OrchestratedStatus getOrchestratedStatus() = 30;
 
     ParcelFileDescriptor openDiagnosticsArchive() = 31;
+
+    // 日志目录统计（只读，不创建/不删除任何文件）。
+    // 返回 Bundle{totalBytes: long, fileCount: int, available: boolean}。
+    // available=false 表示**统计不可用**（目录读不了 / 遍历中途失败），
+    // 与「目录不存在 ⇒ available=true 且 0/0」是两种不同事实，调用方必须区分。
+    Bundle getLogDirStats() = 32;
 }

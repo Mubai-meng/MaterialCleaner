@@ -1,5 +1,6 @@
 package me.gm.cleaner.runtime.server;
 
+import android.os.Bundle;
 import android.util.Log;
 
 import java.io.Closeable;
@@ -7,7 +8,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.concurrent.Executors;
@@ -467,25 +470,30 @@ public class AutoLogging {
      */
     static String[] buildLogcatCommand(final String logPath) {
         final String path = logPath == null ? PATH_PLACEHOLDER : logPath;
+        // buffer 选择与过滤串都取自 [LogTagFilter]：两处各自硬编码「-b main,system」
+        // 在改动时会静默漂移 —— 单测断言的是 LogTagFilter，实际下发的是本方法，
+        // 不同源就等于门禁只守住了一半（上游 344de9d 的原始动机）。
         return concat(
                 new String[]{
-                        "/system/bin/logcat", "-b", "main,system",
+                        "/system/bin/logcat",
                         "-f", path,
                         "-r", Integer.toString(ROTATE_KBYTES),
                         "-n", Integer.toString(ROTATE_COUNT),
                 },
-                LogTagFilter.filterSpecArgs());
+                LogTagFilter.mainChannelArgs());
     }
 
     /** 纯函数：构造崩溃通道命令（`-b crash` 全量，无 tag 过滤）。 */
     static String[] buildCrashLogcatCommand(final String logPath) {
         final String path = logPath == null ? PATH_PLACEHOLDER : logPath;
-        return new String[]{
-                "/system/bin/logcat", "-b", "crash",
-                "-f", path,
-                "-r", Integer.toString(CRASH_ROTATE_KBYTES),
-                "-n", Integer.toString(CRASH_ROTATE_COUNT),
-        };
+        return concat(
+                new String[]{
+                        "/system/bin/logcat",
+                        "-f", path,
+                        "-r", Integer.toString(CRASH_ROTATE_KBYTES),
+                        "-n", Integer.toString(CRASH_ROTATE_COUNT),
+                },
+                LogTagFilter.crashChannelArgs());
     }
 
     /** 纯函数：构造启动窗口段命令（同样必须带 `-f/-r/-n`，且**不加** tag 过滤）。 */
@@ -613,5 +621,90 @@ public class AutoLogging {
             deleted++;
         }
         return deleted;
+    }
+
+    /**
+     * 日志目录的只读统计（总字节 + 文件数），供设置页展示。
+     *
+     * <p><b>三种事实必须分开表达，绝不把「读不到」伪装成「零占用」</b>：
+     * <ul>
+     *   <li>目录不存在 ⇒ {@code available=true, 0 B, 0 个}：开关从未开过，是真的零占用；</li>
+     *   <li>目录存在但读不了 / 不是目录 / 遍历中途出错 ⇒ {@code available=false}：
+     *       设置页显示「统计暂不可用」，同时明确提示服务未运行或权限异常；</li>
+     *   <li>正常 ⇒ {@code available=true} + 实际值。</li>
+     * </ul>
+     *
+     * <p>统计口径与 {@link #pruneLocked()} 一致：只认 {@link #isLogFileName(String)}
+     * 认定的本类日志文件（含 {@code cleaner.log.N} / {@code cleaner-crash.log.N}
+     * 轮转分片与启动段），目录里若混入其它文件则不计入 —— 否则「显示 0 B 但目录非空」
+     * 会让排障者误判成统计坏了。
+     *
+     * <p>本方法**不创建、不删除、不修改**任何文件，也不启动/停止任何子进程，
+     * 因此可以安全地在 Binder 线程直接被调用（设置页那侧仍需放在 IO 线程，
+     * 避免主线程同步 Binder 卡顿）。
+     */
+    public Bundle getLogDirStats() {
+        final var result = new Bundle();
+        result.putLong("totalBytes", 0L);
+        result.putInt("fileCount", 0);
+        result.putBoolean("available", false);
+
+        final Path path = sLogsDir.toPath();
+        final BasicFileAttributes dirAttrs;
+        try {
+            dirAttrs = Files.readAttributes(path, BasicFileAttributes.class,
+                    LinkOption.NOFOLLOW_LINKS);
+        } catch (final NoSuchFileException e) {
+            // 目录明确不存在：真零占用，不是故障
+            result.putBoolean("available", true);
+            return result;
+        } catch (final Exception e) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "getLogDirStats: 目录状态不可读", e);
+            return result;
+        }
+        if (!dirAttrs.isDirectory()) {
+            // 路径被换成普通文件/符号链接（例如被其它工具占位），无法按目录统计
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "getLogDirStats: 日志路径不是目录");
+            return result;
+        }
+
+        long totalBytes = 0L;
+        int fileCount = 0;
+        try (var stream = Files.list(path)) {
+            final var iterator = stream.iterator();
+            while (iterator.hasNext()) {
+                final Path file = iterator.next();
+                final Path fileName = file.getFileName();
+                if (fileName == null || !isLogFileName(fileName.toString())) {
+                    continue;
+                }
+                try {
+                    final var attrs = Files.readAttributes(file, BasicFileAttributes.class,
+                            LinkOption.NOFOLLOW_LINKS);
+                    if (!attrs.isRegularFile()) {
+                        continue;
+                    }
+                    totalBytes += attrs.size();
+                    fileCount++;
+                } catch (final NoSuchFileException e) {
+                    // 遍历期间被 logcat 轮转或 pruneLocked 删掉：跳过，不算故障
+                } catch (final Exception e) {
+                    // 单个文件读不到 ⇒ 结果不完整，宁可报不可用也不给半份数字
+                    result.putLong("totalBytes", totalBytes);
+                    result.putInt("fileCount", fileCount);
+                    return result;
+                }
+            }
+        } catch (final Exception e) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "getLogDirStats: 目录遍历失败", e);
+            result.putLong("totalBytes", totalBytes);
+            result.putInt("fileCount", fileCount);
+            return result;
+        }
+
+        result.putLong("totalBytes", totalBytes);
+        result.putInt("fileCount", fileCount);
+        result.putBoolean("available", true);
+        return result;
     }
 }
