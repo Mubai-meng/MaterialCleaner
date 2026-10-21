@@ -13,8 +13,11 @@ import java.lang.reflect.Method;
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
+import me.gm.cleaner.core.common.err.ErrorCodes;
 import me.gm.cleaner.runtime.mediaprovider.hook.bootstrap.MediaProviderRuntime;
+import me.gm.cleaner.runtime.mediaprovider.hook.err.HookErrorJournal;
 import me.gm.cleaner.runtime.mediaprovider.hook.media.MediaProviderHooksService;
+import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeHookStatus;
 import me.gm.cleaner.runtime.mediaprovider.hook.xp.HookInstall;
 import me.gm.cleaner.runtime.mediaprovider.hook.xp.XpCompat;
 
@@ -126,6 +129,11 @@ public class MediaProviderHookModule extends XposedModule {
         if (mediaProviderClass == null) {
             Log.e(TAG, "[XposedInit] Cannot resolve " + MEDIA_PROVIDER_CLASS +
                     " in " + packageName + "; only the base-class hook is active");
+            NativeHookStatus.INSTANCE.markHookError(
+                    ErrorCodes.INSTANCE.HOOK_JAVA_LOAD_CLASS_NOT_FOUND,
+                    "stage=resolve_media_provider_class, package=" + packageName
+                            + ", class=" + MEDIA_PROVIDER_CLASS,
+                    "MediaProviderHookModule", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
             return;
         }
 
@@ -145,6 +153,11 @@ public class MediaProviderHookModule extends XposedModule {
             Log.i(TAG, "[XposedInit] " + MEDIA_PROVIDER_CLASS + ".attachInfo hook installed");
         } catch (Throwable t) {
             Log.w(TAG, "[XposedInit] " + MEDIA_PROVIDER_CLASS + ".attachInfo hook not installed", t);
+            NativeHookStatus.INSTANCE.markHookError(
+                    ErrorCodes.INSTANCE.HOOK_JAVA_LOAD_FAILED,
+                    "stage=install_attach_info_hook, package=" + packageName
+                            + ", failureType=" + t.getClass().getSimpleName(),
+                    "MediaProviderHookModule", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
         }
 
         try {
@@ -164,6 +177,11 @@ public class MediaProviderHookModule extends XposedModule {
             Log.i(TAG, "[XposedInit] " + MEDIA_PROVIDER_CLASS + ".onCreate fallback hook installed");
         } catch (Throwable t) {
             Log.w(TAG, "[XposedInit] " + MEDIA_PROVIDER_CLASS + ".onCreate hook not installed", t);
+            NativeHookStatus.INSTANCE.markHookError(
+                    ErrorCodes.INSTANCE.HOOK_JAVA_LOAD_FAILED,
+                    "stage=install_oncreate_fallback_hook, package=" + packageName
+                            + ", failureType=" + t.getClass().getSimpleName(),
+                    "MediaProviderHookModule", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
         }
     }
 
@@ -223,6 +241,11 @@ public class MediaProviderHookModule extends XposedModule {
             });
         } catch (Throwable t) {
             Log.w(TAG, "[XposedInit] ContentProvider.attachInfo base hook not installed", t);
+            NativeHookStatus.INSTANCE.markHookError(
+                    ErrorCodes.INSTANCE.HOOK_JAVA_LOAD_FAILED,
+                    "stage=install_base_attach_info_hook, package=" + packageName
+                            + ", failureType=" + t.getClass().getSimpleName(),
+                    "MediaProviderHookModule", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
         }
     }
 
@@ -237,6 +260,14 @@ public class MediaProviderHookModule extends XposedModule {
                     "ContentProvider.attachInfo) was missed. The Hook Binder will never be " +
                     "registered, so MEDIA_PROVIDER_JAVA_HOOK stays UNAVAILABLE and the server " +
                     "keeps trying to recover.");
+            // 看门狗告警是本项目自有通路（上游没有）：三条触发链全被错过时，
+            // 这行结构化事实是唯一不依赖 logcat 的证据。
+            NativeHookStatus.INSTANCE.markHookError(
+                    ErrorCodes.INSTANCE.HOOK_JAVA_LOAD_FAILED,
+                    "stage=bootstrap_watchdog, package=com.android.providers.media"
+                            + ", waitedMs=" + BOOTSTRAP_WATCHDOG_DELAY_MS
+                            + ", trigger=none_matched",
+                    "MediaProviderHookModule", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
         }, BOOTSTRAP_WATCHDOG_DELAY_MS);
     }
 }

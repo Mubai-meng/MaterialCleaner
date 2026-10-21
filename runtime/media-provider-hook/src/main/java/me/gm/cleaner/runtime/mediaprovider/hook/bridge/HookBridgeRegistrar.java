@@ -1,5 +1,7 @@
 package me.gm.cleaner.runtime.mediaprovider.hook.bridge;
 
+import me.gm.cleaner.core.common.err.ErrorCodes;
+import me.gm.cleaner.runtime.mediaprovider.hook.err.HookErrorJournal;
 import me.gm.cleaner.runtime.mediaprovider.hook.media.MediaProviderHooksService;
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeHookStatus;
 
@@ -47,6 +49,10 @@ public final class HookBridgeRegistrar {
                     result != null && result.containsKey(EXTRA_REGISTERED),
                     result != null && result.getBoolean(EXTRA_REGISTERED, false));
             if (!accepted) {
+                NativeHookStatus.INSTANCE.markHookError(
+                        ErrorCodes.INSTANCE.HOOK_JAVA_REG_FAILED,
+                        "stage=register_hooks_callback, reason=provider_acknowledged_false",
+                        "HookBridgeRegistrar", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
                 NativeHookStatus.INSTANCE.markBridgeFailed(
                         "provider acknowledged registered=false");
                 return false;
@@ -68,6 +74,10 @@ public final class HookBridgeRegistrar {
                 throw (ThreadDeath) e;
             }
             Log.e(TAG, "Failed to register hooks callback", e);
+            NativeHookStatus.INSTANCE.markHookError(
+                    ErrorCodes.INSTANCE.HOOK_JAVA_REG_FAILED,
+                    "stage=register_hooks_callback, failureType=" + e.getClass().getSimpleName(),
+                    "HookBridgeRegistrar", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
             NativeHookStatus.INSTANCE.markBridgeFailed(describeThrowable(e));
             return false;
         }
@@ -203,6 +213,10 @@ public final class HookBridgeRegistrar {
         }
         // 锁外触发：经既有重试门控合并，防止死亡风暴重启退避。
         Log.w(TAG, "Registry binder died, requesting re-register");
+        NativeHookStatus.INSTANCE.markHookError(
+                ErrorCodes.INSTANCE.HOOK_JAVA_BINDER_DEAD,
+                "stage=registry_binder_death, generation=" + generation,
+                "HookBridgeRegistrar", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
         MediaProviderHooksService.requestReRegister("registry died");
     }
 }

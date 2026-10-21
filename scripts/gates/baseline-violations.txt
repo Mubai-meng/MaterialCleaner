@@ -38,18 +38,14 @@ word:core/storage-redirect-domain/src/main/java/me/gm/cleaner/core/storage/redir
 word:core/storage-redirect-domain/src/test/java/me/gm/cleaner/core/storage/redirect/domain/RuntimeBehaviorPolicyTest.kt|denylist	1
 word:runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/bridge/HookPolicyRefreshScheduler.kt|configured_mount_points	1
 
-# 2026-10-21（批 B 追加）：DiagnosticArchive.kt 再增至 1129 行（auto_logs 改为首尾两段取用，+47）。
-# 2026-10-21：把上列 G2 行数同步到实际值。
-# 原因：合入上游 5.2.0 批 A（诊断包补 dmesg / crash / MediaProvider pid 取证）
-# 后 DiagnosticArchive.kt 增至 1082 行；同时 HEAD 上已有四处清单未跟上实际行数，
-# 门禁实际处于 FAIL。批 C 会按上游做法拆分 DiagnosticArchive 与 NativeHookStatus，
-# 拆分落地后应连同本段注释一并删除对应行。
 # 2026-10-10：同步上游 main（32 提交）+ 本适配线的实机诊断/守卫改动后，
+# 2026-10-21（批 C）：DiagnosticArchive.kt 拆为 DiagnosticArchive / DiagnosticFileSection / DiagnosticSummary
+# （1129 → 504/277/460 行）；NativeHookStatus.kt 按子域拆出 GuardedHookCircuitState /
+# FuseRedirectCounters / PolicyApplyState（993 → 659/84/70/338 行）。两者均已低于 800 行门槛，
+# 故删除其豁免行；其余四行仍是既有豁免，拆分后应逐行删除。
 # 这四个文件超过了 G2 的 800 行门槛。**有意接受**：拆文件会改动刚合并完、
 # 单测全绿但尚未上机验证的运行时代码，回归风险大于收益（行数不改变任何运行行为）。
 # 后续拆分（如 DiagnosticArchive 的 summary/redact 分文件）时应当**删除**对应行。
-runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/DiagnosticArchive.kt	1129
-runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/policy/NativeHookStatus.kt	993
 core/storage-redirect-databus/src/main/java/me/gm/cleaner/core/storage/redirect/databus/DataBus.kt	846
 runtime/media-provider-hook/src/main/java/me/gm/cleaner/runtime/mediaprovider/hook/fuse/FuseJavaGate.java	950
 runtime/cleaner-server/src/main/java/me/gm/cleaner/runtime/server/vfs/mount/Mounter.kt	834

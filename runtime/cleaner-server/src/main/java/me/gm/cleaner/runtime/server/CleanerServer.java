@@ -94,6 +94,8 @@ public class CleanerServer extends ContextWrapper {
         };
         SecurityHelper.INSTANCE.init(dpsContext);
         ServicePreferences.INSTANCE.init(dpsContext);
+        // 错误流水落盘需要设备保护存储：诊断包要在服务重启后仍能导出跨重启的根因流水。
+        me.gm.cleaner.runtime.server.orchestrator.ServerErrorJournal.INSTANCE.init(dpsContext);
         mPackageReceiver = new PackageReceiver(this);
         mAutoLogging = new AutoLogging(packageInfo);
         mCleanerServerCallback = new CleanerServerCallback();

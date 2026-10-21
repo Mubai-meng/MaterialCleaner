@@ -1,8 +1,10 @@
 package me.gm.cleaner.runtime.mediaprovider.hook.bootstrap;
 
+import me.gm.cleaner.core.common.err.ErrorCodes;
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.BridgeRegistrationRetryGate;
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.BridgeRegistrationRetryPolicy;
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.HookBridgeRegistrar;
+import me.gm.cleaner.runtime.mediaprovider.hook.err.HookErrorJournal;
 import me.gm.cleaner.runtime.mediaprovider.hook.fuse.FuseNativePolicyAdapter;
 import me.gm.cleaner.runtime.mediaprovider.hook.media.MediaProviderHook;
 import me.gm.cleaner.runtime.mediaprovider.hook.media.MediaProviderHooksService;
@@ -65,10 +67,22 @@ public final class MediaProviderRuntime {
                 Log.i(TAG, "[XposedInit] MediaProviderHook created successfully");
             } catch (XpCompat.ClassNotFoundError e) {
                 Log.e(TAG, "[XposedInit] MediaProvider hook setup FAILED", e);
+                // logcat 会被 ColorOS LOG_FLOWCTRL 按进程配额丢弃；同步写一条结构化
+                // 失败事实，否则 server 侧只能报一句笼统的 "MediaProvider Hook unavailable"。
+                NativeHookStatus.INSTANCE.markHookError(
+                        ErrorCodes.INSTANCE.HOOK_JAVA_LOAD_CLASS_NOT_FOUND,
+                        "stage=bootstrap_media_provider_hook, package=" + packageName
+                                + ", failureType=ClassNotFoundError",
+                        "MediaProviderRuntime", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
             } catch (Throwable t) {
                 // 除 ClassNotFoundError 外的失败此前会一路冒泡出 handleLoadPackage 的调用方，
                 // 现场表现为"什么都没有发生"；这里显式记录，保证失败可见且不留下半初始化状态。
                 Log.e(TAG, "[XposedInit] MediaProvider hook setup FAILED", t);
+                NativeHookStatus.INSTANCE.markHookError(
+                        ErrorCodes.INSTANCE.HOOK_JAVA_LOAD_FAILED,
+                        "stage=bootstrap_media_provider_hook, package=" + packageName
+                                + ", failureType=" + t.getClass().getSimpleName(),
+                        "MediaProviderRuntime", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
             }
         }
     }
@@ -77,6 +91,15 @@ public final class MediaProviderRuntime {
         if (sContext != null && sService != null) {
             return HookBridgeRegistrar.registerHooksCallback(sContext, sService);
         }
+        // 回调 binder 为空 ⇒ 注册被跳过：必须留痕，否则 server 侧只能看到一句
+        // 模糊的 "MediaProvider Hook unavailable"，无法区分是没走到 bootstrap
+        // 还是走到但拿不到 binder。
+        NativeHookStatus.INSTANCE.markHookError(
+                ErrorCodes.INSTANCE.HOOK_JAVA_REG_SERVICE_NULL,
+                "stage=register_hooks_callback, binder=" + (sService == null ? "null" : "present")
+                        + ", context=" + (sContext == null ? "null" : "present")
+                        + ", registration=skipped",
+                "MediaProviderRuntime", HookErrorJournal.SEVERITY_WARN, 0, 0L);
         return false;
     }
 
@@ -140,6 +163,17 @@ public final class MediaProviderRuntime {
                             "re-register attempt " + attempts[0] + " failed");
                 }
                 if (isCooldownProbe || BridgeRegistrationRetryPolicy.isBurstExhausted(attempts[0])) {
+                    if (!isCooldownProbe
+                            && BridgeRegistrationRetryPolicy.isBurstExhausted(attempts[0])) {
+                        // 只在「转入冷却的那一次」留痕，后续冷却探针不重复记录，
+                        // 避免把 50 个流水槽位刷满。
+                        NativeHookStatus.INSTANCE.markHookError(
+                                ErrorCodes.INSTANCE.HOOK_JAVA_REG_EXHAUSTED,
+                                "stage=bridge_register_retry, attempts=" + attempts[0]
+                                        + ", cooldownMs="
+                                        + BridgeRegistrationRetryPolicy.COOLDOWN_MILLIS,
+                                "MediaProviderRuntime", HookErrorJournal.SEVERITY_WARN, 0, 0L);
+                    }
                     cooldownProbe[0] = true;
                     NativeHookStatus.INSTANCE.markBridgeRetryScheduled(attempts[0]);
                     retryGate.markWaiting();

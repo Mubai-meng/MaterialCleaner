@@ -34,8 +34,8 @@ class DiagnosticArchiveRedactTest {
 
     @Test
     fun `同一 token 必得同一别名`() {
-        val a = hexAliases(DiagnosticArchive.redact("""{"redirectRevision":"$revisionA"}"""))
-        val b = hexAliases(DiagnosticArchive.redact("""{"readOnlyRevision":"$revisionA"}"""))
+        val a = hexAliases(redact("""{"redirectRevision":"$revisionA"}"""))
+        val b = hexAliases(redact("""{"readOnlyRevision":"$revisionA"}"""))
         assertEquals(1, a.size)
         assertEquals(a, b)
     }
@@ -43,7 +43,7 @@ class DiagnosticArchiveRedactTest {
     @Test
     fun `不同 token 必得不同别名`() {
         val aliases = hexAliases(
-            DiagnosticArchive.redact("""{"a":"$revisionA","b":"$revisionB"}"""),
+            redact("""{"a":"$revisionA","b":"$revisionB"}"""),
         )
         assertEquals(2, aliases.size)
         assertNotEquals(aliases[0], aliases[1])
@@ -53,7 +53,7 @@ class DiagnosticArchiveRedactTest {
     fun `configured 与 applied 相等时可判定相等`() {
         // 这正是旧实现做不到的事：三值全等时无法区分"已收敛"与"未收敛"。
         val aliases = hexAliases(
-            DiagnosticArchive.redact(
+            redact(
                 """{"configured":"$revisionA","published":"$revisionA","applied":"$revisionA"}""",
             ),
         )
@@ -64,7 +64,7 @@ class DiagnosticArchiveRedactTest {
     @Test
     fun `configured 与 applied 不等时可判定不等`() {
         val aliases = hexAliases(
-            DiagnosticArchive.redact(
+            redact(
                 """{"configured":"$revisionA","published":"$revisionA","applied":"$revisionB"}""",
             ),
         )
@@ -76,10 +76,10 @@ class DiagnosticArchiveRedactTest {
     fun `别名跨运行稳定且不泄露原值`() {
         // 盐是编译期常量 ⇒ 别名只由 token 决定，两次独立导出可比。
         // 下面两个期望值是常量契约：若它们变了，跨归档比对就断了。
-        assertEquals(listOf("3379ff4a"), hexAliases(DiagnosticArchive.redact(revisionA)))
-        assertEquals(listOf("bf32a314"), hexAliases(DiagnosticArchive.redact(revisionB)))
+        assertEquals(listOf("3379ff4a"), hexAliases(redact(revisionA)))
+        assertEquals(listOf("bf32a314"), hexAliases(redact(revisionB)))
 
-        val out = DiagnosticArchive.redact("""{"redirectRevision":"$revisionA"}""")
+        val out = redact("""{"redirectRevision":"$revisionA"}""")
         assertFalse("别名里不得残留原 token", out.contains(revisionA))
         assertTrue("必须保留 <hex-id 前缀，否则既有 grep 工具会失效", out.contains("<hex-id:"))
     }
@@ -89,15 +89,15 @@ class DiagnosticArchiveRedactTest {
         // 模式是 ≥24 位；短串（uid / flags / generation）必须原样保留，
         // 否则会把大量正常字段一起糊掉。
         val input = """{"uid":10438,"flags":1073742080,"generation":3}"""
-        assertEquals(input, DiagnosticArchive.redact(input))
+        assertEquals(input, redact(input))
     }
 
     @Test
     fun `data app 路径不再整段塌成同一字面量`() {
-        val a = DiagnosticArchive.redact(
+        val a = redact(
             "/data/app/~~AAAABBBBCCCCDDDD==/me.gm.cleaner-EEEEFFFFGGGGHHHH==/base.apk",
         )
-        val b = DiagnosticArchive.redact(
+        val b = redact(
             "/data/app/~~ZZZZYYYYXXXXWWWW==/com.other-EEEEFFFFGGGGHHHH==/base.apk",
         )
         assertTrue(a.startsWith("/data/app/<id:"))
@@ -112,8 +112,8 @@ class DiagnosticArchiveRedactTest {
         // 这是 §3.5 那个证据缺口的回归护栏：EMBEDDED 模式下
         // "libinline.so 来自本模块自己的 base.apk" 只能靠别名同源来证明。
         val dir = "/data/app/~~AAAABBBBCCCCDDDD==/me.gm.cleaner-EEEEFFFFGGGGHHHH=="
-        val manifest = DiagnosticArchive.redact("sourceDir=$dir/base.apk")
-        val log = DiagnosticArchive.redact("Load $dir/base.apk!/lib/arm64-v8a/libinline.so")
+        val manifest = redact("sourceDir=$dir/base.apk")
+        val log = redact("Load $dir/base.apk!/lib/arm64-v8a/libinline.so")
 
         val inManifest = appAlias.find(manifest)?.groupValues?.get(1)
         val inLog = appAlias.find(log)?.groupValues?.get(1)

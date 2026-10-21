@@ -23,7 +23,7 @@ object NativeHookStatus {
     private const val SCHEMA_VERSION = 7
 
     /** 快照内受控文本（错误详情等）的最大长度，超出截断。 */
-    private const val MAX_TEXT_LENGTH = 200
+    internal const val MAX_TEXT_LENGTH = 200
 
     /**
      * `hookErrors.entries` 的导出条数上限。
@@ -38,7 +38,7 @@ object NativeHookStatus {
      * （[publishSnapshotFromPoll]，≤ [HEARTBEAT_REFRESH_MIN_INTERVAL_MILLIS]）顺带带出，
      * 避免快照通道风暴。
      */
-    private const val SWALLOWED_PUBLISH_INTERVAL_MILLIS = 30_000L
+    internal const val SWALLOWED_PUBLISH_INTERVAL_MILLIS = 30_000L
 
     /**
      * [publishSnapshot] 的前沿合并窗口。
@@ -91,19 +91,6 @@ object NativeHookStatus {
     private const val BRIDGE_STATE_REGISTERED = "REGISTERED"
     private const val BRIDGE_STATE_RETRYING = "RETRYING"
     private const val BRIDGE_STATE_FAILED = "FAILED"
-
-    // 策略状态只描述“配置到执行器”的进度，不代表底层行为已经被探针证明。
-    private const val POLICY_STATE_NO_RULE = "NO_RULE"
-    private const val POLICY_STATE_PENDING = "PENDING"
-    private const val POLICY_STATE_APPLYING = "APPLYING"
-    private const val POLICY_STATE_APPLIED = "APPLIED"
-    private const val POLICY_STATE_STALE = "STALE"
-    private const val POLICY_STATE_UNSUPPORTED = "UNSUPPORTED"
-    private const val REDIRECT_EXECUTOR = "MEDIA_PROVIDER_JAVA_HOOK"
-    private const val READ_ONLY_EXECUTOR = "MEDIA_PROVIDER_JAVA_HOOK"
-    private const val MOUNT_POINTS_EXECUTOR = "FUSE_NATIVE_HOOK"
-
-    @Volatile
     private var mediaProviderHookLoaded = false
     @Volatile
     private var mediaProviderPackageName = ""
@@ -111,6 +98,11 @@ object NativeHookStatus {
     private var policyCacheInitialized = false
     @Volatile
     private var policyCacheInitializedAt = 0L
+
+    // ── 子状态：各自负责一个观测域的字段与序列化，本对象只做聚合与发布 ──
+    private val guarded = GuardedHookCircuitState()
+    private val fuse = FuseRedirectCounters()
+    private val policy = PolicyApplyState()
 
     /** [publishSnapshot] / [publishSnapshotFromPoll] 共用的放行闸门。 */
     private val publishGate = NativeHookPublishGate(
@@ -141,81 +133,6 @@ object NativeHookStatus {
     private var nativeStatus = NativeStatusSnapshot()
 
     @Volatile
-    private var lastMountPointsApplySuccess = false
-    @Volatile
-    private var mountPointsGeneration = 0L
-    @Volatile
-    private var mountPointsAppliedEpoch = ""
-    @Volatile
-    private var lastMountPointsApplyAt = 0L
-    @Volatile
-    private var lastMountPointsApplyGeneration = 0L
-    @Volatile
-    private var lastMountPointsApplyCount = 0
-    @Volatile
-    private var lastMountPointsApplyError = ""
-    @Volatile
-    private var mountPointsAppliedRevision = ""
-    @Volatile
-    private var mountPointsLastAttemptRevision = ""
-    @Volatile
-    private var mountPointsState = POLICY_STATE_PENDING
-    @Volatile
-    private var mountPointsConfiguredRevision = ""
-    @Volatile
-    private var mountPointsPublishedRevision = ""
-    @Volatile
-    private var mountPointsObservedAt = 0L
-
-    /**
-     * 最近一次 mountPoints 应用**尝试开始**时间（P2-1）。
-     * 与 lastMountPointsApplyAt（尝试完成时间）分离：epoch 变更后，
-     * "上一次成功应用" 反映的是旧 epoch 的活动，不能当作新 epoch 的进展证据；
-     * 而"尝试开始时间"能证明同步机制正在处理当前配置，无论成败。
-     */
-    @Volatile
-    private var lastMountPointsAttemptAt = 0L
-
-    /**
-     * 最近一次 attempt 的目标身份（P2，与 attemptAt 配套）。
-     * 仅记录时间无法区分该次尝试服务的是旧 epoch 还是当前配置，
-     * 必须连同 generation 一起记录，消费侧才能判断"正在处理当前配置"。
-     */
-    @Volatile
-    private var lastMountPointsAttemptEpoch = ""
-    @Volatile
-    private var lastMountPointsAttemptGeneration = 0L
-
-    @Volatile
-    private var redirectAppliedRevision = ""
-    @Volatile
-    private var redirectAppliedGeneration = 0L
-    @Volatile
-    private var redirectPolicyState = POLICY_STATE_PENDING
-    @Volatile
-    private var redirectConfiguredRevision = ""
-    @Volatile
-    private var redirectPublishedRevision = ""
-    @Volatile
-    private var redirectLastError = ""
-    @Volatile
-    private var redirectObservedAt = 0L
-    @Volatile
-    private var readOnlyAppliedRevision = ""
-    @Volatile
-    private var readOnlyAppliedGeneration = 0L
-    @Volatile
-    private var readOnlyPolicyState = POLICY_STATE_PENDING
-    @Volatile
-    private var readOnlyConfiguredRevision = ""
-    @Volatile
-    private var readOnlyPublishedRevision = ""
-    @Volatile
-    private var readOnlyLastError = ""
-    @Volatile
-    private var readOnlyObservedAt = 0L
-
-    @Volatile
     private var fuseJavaGateStatus = FuseJavaGateStatus()
 
     /**
@@ -225,19 +142,6 @@ object NativeHookStatus {
      * 下一个 10s 心跳的 [publishSnapshot] 会把它带进快照，因此诊断归档里的
      * `fuseJavaGate.dedupedEvents` 能直接证明该机制在生效。
      */
-    @Volatile
-    private var fuseEventDedupedCount = 0L
-
-    // ── FUSE 重定向命中/未命中观测（见 [recordFuseRedirect]）──
-    private val fuseRedirectEvaluated = java.util.concurrent.atomic.AtomicLong(0L)
-    private val fuseRedirectRedirected = java.util.concurrent.atomic.AtomicLong(0L)
-    private val fuseRedirectMissed = java.util.concurrent.atomic.AtomicLong(0L)
-    @Volatile
-    private var fuseRedirectLastMissPackage = ""
-    @Volatile
-    private var fuseRedirectLastMissPrefix = ""
-
-    // ── policyCache 失败语义（错误码引用 ErrorCodes.HOOK_JAVA_CACHE_*） ──
     @Volatile
     private var policyCacheLastFailureCode = ""
     @Volatile
@@ -256,24 +160,6 @@ object NativeHookStatus {
     private var bridgeAttemptCount = 0
     @Volatile
     private var bridgeLastAttemptAt = 0L
-
-    // ── 受防护 hook（AbstractGuardedHook 子类）熔断观测 ──
-    @Volatile
-    private var guardedCircuitOpenCount = 0
-    @Volatile
-    private var guardedLastFailedHook = ""
-    @Volatile
-    private var guardedLastFailedMethod = ""
-    @Volatile
-    private var guardedLastFailureType = ""
-    @Volatile
-    private var guardedTotalOpenTransitions = 0L
-    @Volatile
-    private var guardedRecoveredCount = 0L
-    @Volatile
-    private var guardedSwallowedHostExceptions = 0L
-    @Volatile
-    private var guardedSwallowedLastPublishAt = 0L
 
     fun markMediaProviderHookLoaded(packageName: String) {
         mediaProviderHookLoaded = true
@@ -398,7 +284,7 @@ object NativeHookStatus {
         inlineDisabledByPlatform = false
         lastInlineError = ""
         nativeStatus = NativeStatusSnapshot()
-        mountPointsState = POLICY_STATE_PENDING
+        policy.resetToPending()
         publishSnapshot()
     }
 
@@ -422,158 +308,6 @@ object NativeHookStatus {
         inlineState == STATE_HOOK_READY_FULL ||
                 inlineState == STATE_HOOK_READY_CORE ||
                 inlineState == STATE_HOOK_DEGRADED
-
-    fun markMountPointsApplySucceeded(
-        generation: Long,
-        count: Int,
-        redirectRevision: String,
-        publisherEpoch: String,
-    ) {
-        lastMountPointsApplySuccess = true
-        mountPointsGeneration = generation
-        // 已应用代次确认：仅成功路径更新；失败/不支持路径绝不碰它，
-        // 否则会把尚未成功应用的配置误判为正常。
-        mountPointsAppliedEpoch = publisherEpoch
-        lastMountPointsApplyAt = System.currentTimeMillis()
-        lastMountPointsApplyGeneration = generation
-        lastMountPointsApplyCount = count
-        lastMountPointsApplyError = ""
-        mountPointsAppliedRevision = redirectRevision
-        mountPointsLastAttemptRevision = redirectRevision
-        mountPointsConfiguredRevision = redirectRevision
-        mountPointsPublishedRevision = redirectRevision
-        mountPointsObservedAt = System.currentTimeMillis()
-        mountPointsState = when {
-            count == 0 -> POLICY_STATE_NO_RULE
-            redirectRevision.isBlank() -> POLICY_STATE_PENDING
-            else -> POLICY_STATE_APPLIED
-        }
-        publishSnapshot()
-    }
-
-    fun markMountPointsApplyStarted(
-        generation: Long,
-        redirectRevision: String,
-        publisherEpoch: String,
-    ) {
-        mountPointsLastAttemptRevision = redirectRevision
-        mountPointsConfiguredRevision = redirectRevision
-        mountPointsPublishedRevision = redirectRevision
-        mountPointsObservedAt = System.currentTimeMillis()
-        // 每次 attempt 必经入口：记录开始时间与目标身份，
-        // 作为"当前配置正在同步"的可验证证据（无身份的时间戳不可作为证据）。
-        lastMountPointsAttemptAt = mountPointsObservedAt
-        lastMountPointsAttemptEpoch = publisherEpoch
-        lastMountPointsAttemptGeneration = generation
-        mountPointsState = POLICY_STATE_APPLYING
-        publishSnapshot()
-    }
-
-    fun markMountPointsApplyUnsupported(
-        redirectRevision: String,
-        count: Int,
-        error: Throwable,
-    ) {
-        lastMountPointsApplySuccess = false
-        lastMountPointsApplyAt = System.currentTimeMillis()
-        lastMountPointsApplyGeneration = 0L
-        lastMountPointsApplyCount = count
-        lastMountPointsApplyError = describe(error)
-        mountPointsLastAttemptRevision = redirectRevision
-        mountPointsConfiguredRevision = redirectRevision
-        mountPointsPublishedRevision = redirectRevision
-        mountPointsObservedAt = System.currentTimeMillis()
-        mountPointsState = POLICY_STATE_UNSUPPORTED
-        publishSnapshot()
-    }
-
-    fun markMountPointsApplyFailed(
-        generation: Long,
-        count: Int,
-        redirectRevision: String,
-        error: Throwable,
-    ) {
-        if (mountPointsState == POLICY_STATE_UNSUPPORTED) {
-            // 平台明确不支持时，适配器和上层消费器可能各自记录一次失败；
-            // 保留 UNSUPPORTED，不能被通用异常路径降级成普通 PENDING。
-            return
-        }
-        lastMountPointsApplySuccess = false
-        lastMountPointsApplyAt = System.currentTimeMillis()
-        lastMountPointsApplyGeneration = generation
-        lastMountPointsApplyCount = count
-        lastMountPointsApplyError = describe(error)
-        mountPointsLastAttemptRevision = redirectRevision
-        mountPointsConfiguredRevision = redirectRevision
-        mountPointsPublishedRevision = redirectRevision
-        mountPointsObservedAt = System.currentTimeMillis()
-        mountPointsState = if (mountPointsAppliedRevision.isNotBlank()) {
-            POLICY_STATE_STALE
-        } else {
-            POLICY_STATE_PENDING
-        }
-        publishSnapshot()
-    }
-
-    /** Java Hook 已接受重定向正文；这不是行为层面的 EFFECTIVE 证明。 */
-    fun markRedirectPolicyApplied(revision: String, generation: Long, hasRules: Boolean) {
-        val observedAt = System.currentTimeMillis()
-        redirectConfiguredRevision = revision
-        redirectPublishedRevision = revision
-        redirectAppliedRevision = revision
-        redirectAppliedGeneration = generation
-        redirectLastError = ""
-        redirectObservedAt = observedAt
-        redirectPolicyState = when {
-            !hasRules -> POLICY_STATE_NO_RULE
-            revision.isBlank() -> POLICY_STATE_PENDING
-            else -> POLICY_STATE_APPLIED
-        }
-        publishSnapshot()
-    }
-
-    fun markRedirectPolicyFailed(revision: String, error: String) {
-        redirectConfiguredRevision = revision
-        redirectPublishedRevision = revision
-        redirectObservedAt = System.currentTimeMillis()
-        redirectLastError = error.take(MAX_TEXT_LENGTH)
-        redirectPolicyState = if (redirectAppliedRevision.isNotBlank()) {
-            POLICY_STATE_STALE
-        } else {
-            POLICY_STATE_PENDING
-        }
-        publishSnapshot()
-    }
-
-    /** Java Hook 已接受只读正文；这不是行为层面的 EFFECTIVE 证明。 */
-    fun markReadOnlyPolicyApplied(revision: String, generation: Long, hasRules: Boolean) {
-        val observedAt = System.currentTimeMillis()
-        readOnlyConfiguredRevision = revision
-        readOnlyPublishedRevision = revision
-        readOnlyAppliedRevision = revision
-        readOnlyAppliedGeneration = generation
-        readOnlyLastError = ""
-        readOnlyObservedAt = observedAt
-        readOnlyPolicyState = when {
-            !hasRules -> POLICY_STATE_NO_RULE
-            revision.isBlank() -> POLICY_STATE_PENDING
-            else -> POLICY_STATE_APPLIED
-        }
-        publishSnapshot()
-    }
-
-    fun markReadOnlyPolicyFailed(revision: String, error: String) {
-        readOnlyConfiguredRevision = revision
-        readOnlyPublishedRevision = revision
-        readOnlyObservedAt = System.currentTimeMillis()
-        readOnlyLastError = error.take(MAX_TEXT_LENGTH)
-        readOnlyPolicyState = if (readOnlyAppliedRevision.isNotBlank()) {
-            POLICY_STATE_STALE
-        } else {
-            POLICY_STATE_PENDING
-        }
-        publishSnapshot()
-    }
 
     fun markFuseJavaGateScanned(
         discoveredCount: Int,
@@ -617,6 +351,87 @@ object NativeHookStatus {
         publishSnapshot()
     }
 
+    /** 挂载点（FUSE native）策略应用成功。 */
+    fun markMountPointsApplySucceeded(
+        generation: Long,
+        count: Int,
+        redirectRevision: String,
+        publisherEpoch: String,
+    ) {
+        policy.markMountPointsApplySucceeded(generation, count, redirectRevision, publisherEpoch)
+        publishSnapshot()
+    }
+
+    /** 挂载点策略应用开始（每次 attempt 必经入口）。 */
+    fun markMountPointsApplyStarted(generation: Long, redirectRevision: String, publisherEpoch: String) {
+        policy.markMountPointsApplyStarted(generation, redirectRevision, publisherEpoch)
+        publishSnapshot()
+    }
+
+    /** 挂载点策略被平台判定为不支持。 */
+    fun markMountPointsApplyUnsupported(redirectRevision: String, count: Int, error: Throwable) {
+        policy.markMountPointsApplyUnsupported(redirectRevision, count, error)
+        publishSnapshot()
+    }
+
+    /** 挂载点策略应用失败。 */
+    fun markMountPointsApplyFailed(
+        generation: Long,
+        count: Int,
+        redirectRevision: String,
+        error: Throwable,
+    ) {
+        policy.markMountPointsApplyFailed(generation, count, redirectRevision, error)
+        publishSnapshot()
+    }
+
+    /** Java Hook 已接受重定向正文；这不是行为层面的 EFFECTIVE 证明。 */
+    fun markRedirectPolicyApplied(revision: String, generation: Long, hasRules: Boolean) {
+        policy.markRedirectPolicyApplied(revision, generation, hasRules)
+        publishSnapshot()
+    }
+
+    fun markRedirectPolicyFailed(revision: String, error: String) {
+        policy.markRedirectPolicyFailed(revision, error)
+        publishSnapshot()
+    }
+
+    /** Java Hook 已接受只读正文；这不是行为层面的 EFFECTIVE 证明。 */
+    fun markReadOnlyPolicyApplied(revision: String, generation: Long, hasRules: Boolean) {
+        policy.markReadOnlyPolicyApplied(revision, generation, hasRules)
+        publishSnapshot()
+    }
+
+    fun markReadOnlyPolicyFailed(revision: String, error: String) {
+        policy.markReadOnlyPolicyFailed(revision, error)
+        publishSnapshot()
+    }
+
+    /**
+     * 受防护 hook 熔断打开（进入冷却）。
+     * [failureType] 为触发异常的类简名；打开计数与历史转换数同步递增。
+     */
+    fun markGuardedCircuitOpened(hookName: String, method: String, failureType: String) {
+        guarded.markCircuitOpened(hookName, method, failureType)
+        publishSnapshot()
+    }
+
+    /** 受防护 hook 半开探针成功、熔断恢复闭合。 */
+    fun markGuardedCircuitRecovered(hookName: String) {
+        guarded.markCircuitRecovered()
+        publishSnapshot()
+    }
+
+    /**
+     * 宿主抛出的预期异常被静默吞掉：仅递增计数并按最小间隔发布快照，
+     * 不改变任何控制流。
+     */
+    fun markGuardedHostExceptionSwallowed() {
+        if (guarded.markHostExceptionSwallowed()) {
+            publishSnapshot()
+        }
+    }
+
     /** hooks callback binder 桥注册开始。 */
     fun markBridgeRegistering() {
         bridgeState = BRIDGE_STATE_REGISTERING
@@ -652,42 +467,6 @@ object NativeHookStatus {
         bridgeLastError = error.take(MAX_TEXT_LENGTH)
         bridgeLastAttemptAt = System.currentTimeMillis()
         publishSnapshot()
-    }
-
-    /**
-     * 受防护 hook 熔断打开（进入冷却）。
-     * [failureType] 为触发异常的类简名；打开计数与历史转换数同步递增。
-     */
-    fun markGuardedCircuitOpened(hookName: String, method: String, failureType: String) {
-        guardedCircuitOpenCount += 1
-        guardedTotalOpenTransitions += 1
-        guardedLastFailedHook = hookName
-        guardedLastFailedMethod = method
-        guardedLastFailureType = failureType.take(MAX_TEXT_LENGTH)
-        publishSnapshot()
-    }
-
-    /** 受防护 hook 半开探针成功、熔断恢复闭合。 */
-    fun markGuardedCircuitRecovered(hookName: String) {
-        if (guardedCircuitOpenCount > 0) {
-            guardedCircuitOpenCount -= 1
-        }
-        guardedRecoveredCount += 1
-        publishSnapshot()
-    }
-
-    /**
-     * 宿主抛出的预期异常被静默吞掉（如 query 对特定参数抛出的
-     * IllegalArgumentException）：仅递增计数并按最小间隔发布快照，
-     * 不改变任何控制流。
-     */
-    fun markGuardedHostExceptionSwallowed() {
-        guardedSwallowedHostExceptions += 1
-        val now = System.currentTimeMillis()
-        if (now - guardedSwallowedLastPublishAt >= SWALLOWED_PUBLISH_INTERVAL_MILLIS) {
-            guardedSwallowedLastPublishAt = now
-            publishSnapshot()
-        }
     }
 
     /**
@@ -769,6 +548,13 @@ object NativeHookStatus {
         }
     }
 
+    /** 记录 FUSE 事件前置去重的累计抑制条数（绝对值，非增量）。 */
+    fun setFuseEventDedupedCount(total: Long) = fuse.setDedupedCount(total)
+
+    /** 记录一次 FUSE 路径重定向评估的结果（热路径：只有原子自增与 volatile 写）。 */
+    fun recordFuseRedirect(packageName: String, path: String, redirected: Boolean) =
+        fuse.record(packageName, path, redirected)
+
     fun toJson(): String {
         return JSONObject().apply {
             put("schemaVersion", SCHEMA_VERSION)
@@ -786,23 +572,7 @@ object NativeHookStatus {
                 put("lastFailureGeneration", policyCacheLastFailureGeneration)
                 put("lastError", policyCacheLastError)
                 put("lastGoodGeneration", policyCacheLastGoodGeneration)
-                put("applicationState", aggregatePolicyState())
-                put("redirectState", redirectPolicyState)
-                put("readOnlyState", readOnlyPolicyState)
-                put("redirectConfiguredRevision", redirectConfiguredRevision)
-                put("redirectPublishedRevision", redirectPublishedRevision)
-                put("redirectAppliedRevision", redirectAppliedRevision)
-                put("redirectAppliedGeneration", redirectAppliedGeneration)
-                put("redirectExecutor", REDIRECT_EXECUTOR)
-                put("redirectLastError", redirectLastError)
-                put("redirectObservedAt", redirectObservedAt)
-                put("readOnlyConfiguredRevision", readOnlyConfiguredRevision)
-                put("readOnlyPublishedRevision", readOnlyPublishedRevision)
-                put("readOnlyAppliedRevision", readOnlyAppliedRevision)
-                put("readOnlyAppliedGeneration", readOnlyAppliedGeneration)
-                put("readOnlyExecutor", READ_ONLY_EXECUTOR)
-                put("readOnlyLastError", readOnlyLastError)
-                put("readOnlyObservedAt", readOnlyObservedAt)
+                policy.appendToPolicyCache(this)
             })
             put("bridgeRegistration", JSONObject().apply {
                 put("state", bridgeState)
@@ -810,15 +580,7 @@ object NativeHookStatus {
                 put("attemptCount", bridgeAttemptCount)
                 put("lastAttemptAt", bridgeLastAttemptAt)
             })
-            put("guardedHooks", JSONObject().apply {
-                put("circuitOpenCount", guardedCircuitOpenCount)
-                put("lastFailedHook", guardedLastFailedHook)
-                put("lastFailedMethod", guardedLastFailedMethod)
-                put("lastFailureType", guardedLastFailureType)
-                put("totalOpenTransitions", guardedTotalOpenTransitions)
-                put("recoveredCount", guardedRecoveredCount)
-                put("swallowedHostExceptions", guardedSwallowedHostExceptions)
-            })
+            put("guardedHooks", JSONObject().apply { guarded.appendTo(this) })
             put("inline", JSONObject().apply {
                 put("state", inlineState)
                 put("loaded", inlineLibraryLoaded)
@@ -831,38 +593,10 @@ object NativeHookStatus {
                 put("lastError", lastInlineError)
             })
             put("native", nativeStatus.toJson())
-            put("policy", JSONObject().apply {
-                put("mountPointsGeneration", mountPointsGeneration)
-                put("appliedPublisherEpoch", mountPointsAppliedEpoch)
-                put("lastApplySuccess", lastMountPointsApplySuccess)
-                put("appliedToExecutor", lastMountPointsApplySuccess)
-                put("applicationState", mountPointsState)
-                put("state", mountPointsState)
-                put("configuredRevision", mountPointsConfiguredRevision)
-                put("publishedRevision", mountPointsPublishedRevision)
-                put("appliedRedirectRevision", mountPointsAppliedRevision)
-                put("executor", MOUNT_POINTS_EXECUTOR)
-                put("lastError", lastMountPointsApplyError)
-                put("observedAt", mountPointsObservedAt)
-                put("lastAttemptRedirectRevision", mountPointsLastAttemptRevision)
-                put("lastApplyAt", lastMountPointsApplyAt)
-                put("lastApplyGeneration", lastMountPointsApplyGeneration)
-                put("lastAttemptAt", lastMountPointsAttemptAt)
-                put("lastAttemptEpoch", lastMountPointsAttemptEpoch)
-                put("lastAttemptGeneration", lastMountPointsAttemptGeneration)
-                put("lastApplyCount", lastMountPointsApplyCount)
-                put("lastApplyError", lastMountPointsApplyError)
-            })
+            put("policy", JSONObject().apply { policy.appendToPolicy(this) })
             put("fuseJavaGate", fuseJavaGateStatus.toJson())
-            put("dedupedEvents", fuseEventDedupedCount)
-            put("fuseRedirect", JSONObject().apply {
-                put("evaluated", fuseRedirectEvaluated.get())
-                put("redirected", fuseRedirectRedirected.get())
-                put("missed", fuseRedirectMissed.get())
-                put("lastMissPackage", fuseRedirectLastMissPackage)
-                put("lastMissPrefix", fuseRedirectLastMissPrefix)
-                put("prefixSegments", FuseRedirectStats.DEFAULT_PREFIX_SEGMENTS)
-            })
+            put("dedupedEvents", fuse.dedupedEvents)
+            put("fuseRedirect", JSONObject().apply { fuse.appendRedirectTo(this) })
             put("readOnlyEval", JSONObject().apply {
                 ReadOnlyEvalStats.snapshot().forEach { (k, v) -> put(k, v) }
             })
@@ -890,74 +624,6 @@ object NativeHookStatus {
                 })
             })
         }.toString()
-    }
-
-    /**
-     * 记录 FUSE 事件前置去重的累计抑制条数（绝对值，非增量）。
-     *
-     * 由 `FuseJavaGate.dispatchFileSystemEvent` 在抑制时调用，热路径上只做一次
-     * volatile 写；发布交给既有的 10s 心跳，避免每条事件触发一次快照落盘。
-     */
-    fun setFuseEventDedupedCount(total: Long) {
-        fuseEventDedupedCount = total
-    }
-
-    /**
-     * 记录一次 FUSE 路径重定向评估的结果。
-     *
-     * **为什么需要它**：`redirected:` 日志只在**确实改写**时才打，
-     * 未命中的路径上没有任何日志也没有任何计数。于是「hook 没工作」与
-     * 「目标 app 触碰的路径根本不在任何已配置 target 之下」在产物里无法区分 ——
-     * 连续三批实机材料都因此只能给出无法证伪的结论（实测：deepseek 58 次访问
-     * 全部落在 `/storage/emulated/0` 根目录，而其 target 是
-     * `/storage/emulated/0/Download`，一次都不该命中）。
-     *
-     * **性能约束**：本方法跑在 FUSE 热路径上，**只做原子自增与 volatile 写，
-     * 不发布快照**（交给既有 8s 心跳）、不做字符串拼接（前缀只在变化时重算）。
-     * 调用方必须先自己确认该包在重定向配置里（[HookPolicyCache.hasRedirectRules]），
-     * 否则等于给所有包的文件操作都加了一次开销。
-     */
-    fun recordFuseRedirect(packageName: String, path: String, redirected: Boolean) {
-        fuseRedirectEvaluated.incrementAndGet()
-        if (redirected) {
-            fuseRedirectRedirected.incrementAndGet()
-            return
-        }
-        fuseRedirectMissed.incrementAndGet()
-        if (fuseRedirectLastMissPackage != packageName ||
-            fuseRedirectLastMissPrefix.isEmpty()
-        ) {
-            fuseRedirectLastMissPackage = packageName
-            fuseRedirectLastMissPrefix = FuseRedirectStats.prefixOf(path)
-        } else {
-            val prefix = FuseRedirectStats.prefixOf(path)
-            if (prefix != fuseRedirectLastMissPrefix) {
-                fuseRedirectLastMissPrefix = prefix
-                fuseRedirectLastMissPackage = packageName
-            }
-        }
-    }
-
-    private fun aggregatePolicyState(): String = when {
-        mountPointsState == POLICY_STATE_APPLYING ||
-                redirectPolicyState == POLICY_STATE_APPLYING ||
-                readOnlyPolicyState == POLICY_STATE_APPLYING -> POLICY_STATE_APPLYING
-        mountPointsState == POLICY_STATE_STALE -> POLICY_STATE_STALE
-        redirectPolicyState == POLICY_STATE_STALE || readOnlyPolicyState == POLICY_STATE_STALE ->
-            POLICY_STATE_STALE
-        mountPointsState == POLICY_STATE_UNSUPPORTED ||
-                redirectPolicyState == POLICY_STATE_UNSUPPORTED ||
-                readOnlyPolicyState == POLICY_STATE_UNSUPPORTED -> POLICY_STATE_UNSUPPORTED
-        mountPointsState == POLICY_STATE_NO_RULE &&
-                redirectPolicyState == POLICY_STATE_NO_RULE &&
-                readOnlyPolicyState == POLICY_STATE_NO_RULE -> POLICY_STATE_NO_RULE
-        mountPointsState == POLICY_STATE_PENDING ||
-                redirectPolicyState == POLICY_STATE_PENDING ||
-                readOnlyPolicyState == POLICY_STATE_PENDING -> POLICY_STATE_PENDING
-        mountPointsState == POLICY_STATE_APPLIED ||
-                redirectPolicyState == POLICY_STATE_APPLIED ||
-                readOnlyPolicyState == POLICY_STATE_APPLIED -> POLICY_STATE_APPLIED
-        else -> POLICY_STATE_PENDING
     }
 
     private fun deriveInlineState(status: NativeStatusSnapshot): String = when {

@@ -155,6 +155,10 @@ public abstract class AbstractGuardedHook implements XposedInterface.Hooker {
             if (circuitBreaker.onSuccess(permit) ==
                     HookHandlerCircuitBreaker.SuccessOutcome.RECOVERED) {
                 onCircuitRecovered();
+                NativeHookStatus.INSTANCE.markHookError(
+                        ErrorCodes.INSTANCE.HOOK_JAVA_GUARD_CIRCUIT_RECOVERED,
+                        "hook=" + tag + ", method=" + methodName,
+                        tag, HookErrorJournal.SEVERITY_WARN, 0, 0L);
                 Log.i(LOG_TAG, "[" + tag + "] handler circuit recovered");
             }
         } catch (final Throwable t) {
@@ -172,6 +176,11 @@ public abstract class AbstractGuardedHook implements XposedInterface.Hooker {
             final String detail = message + ", type=" + failureTypeOf(t);
             if (outcome == HookHandlerCircuitBreaker.FailureOutcome.OPENED) {
                 onCircuitOpened(failedAt + HookHandlerCircuitBreaker.COOLDOWN_MILLIS, t);
+                NativeHookStatus.INSTANCE.markHookError(
+                        ErrorCodes.INSTANCE.HOOK_JAVA_GUARD_CIRCUIT_OPENED,
+                        "hook=" + tag + ", method=" + methodName
+                                + ", failureType=" + failureTypeOf(t),
+                        tag, HookErrorJournal.SEVERITY_ERROR, 0, 0L);
                 Log.e(LOG_TAG, message + ", circuit cooldown="
                         + circuitBreaker.remainingCooldownMillis(failedAt) + "ms", t);
                 // logcat 会被 ColorOS LOG_FLOWCTRL 按进程配额丢弃，
