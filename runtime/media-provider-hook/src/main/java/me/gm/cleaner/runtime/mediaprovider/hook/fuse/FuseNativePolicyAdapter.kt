@@ -367,6 +367,23 @@ object FuseNativePolicyAdapter {
     /** native 库在本进程内是否已确定不可达（重启进程前不会再尝试加载）。 */
     fun isInlineLibraryUnavailable(): Boolean = inlineLibrary.isUnavailable()
 
+    /**
+     * 启动期入口（bootstrap/MediaProviderRuntime）的失败分流。
+     *
+     * 库不可达时只留一次性说明；其余失败返回 false，调用方照旧打完整堆栈。
+     * 抽成方法而不是让 Java 侧直接判断异常类型：异常类是 internal，
+     * 且降噪口径必须与 apply / due 两条路径共用同一处实现。
+     *
+     * @return true 表示已按「库不可达」降噪，调用方不要再打堆栈。
+     */
+    fun handleInlineInitFailure(t: Throwable): Boolean {
+        if (t !is InlineLibraryUnavailableException) {
+            return false
+        }
+        logLibraryUnavailableOnce(t)
+        return true
+    }
+
     /** 库不可达的一次性说明；调用方在失败路径上用它替代完整堆栈。 */
     private fun logLibraryUnavailableOnce(t: Throwable) {
         if (!inlineLibrary.consumeLogAllowance()) {

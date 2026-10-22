@@ -115,7 +115,13 @@ public final class MediaProviderRuntime {
             Log.i("MC_REDIRECT", "[XposedInit] libinline loaded and xhook initialized");
         } catch (Throwable e) {
             NativeHookStatus.INSTANCE.markInlineLoadFailed(e);
-            Log.e("MC_REDIRECT", "[XposedInit] Failed to load inline library, FUSE native hook disabled", e);
+            // 库在本进程内不可达（覆盖安装后旧 base.apk 路径失效）是稳定事实，不是新故障：
+            // 说明由 adapter 的一次性闸门承载，这里不打 26 行完整堆栈。
+            // 本方法被 onPackageLoaded 与 hookMediaProviderClass 两条入口各调用一次，
+            // 实测一次安装窗口 2 x 26 = 52 行 E。
+            if (!FuseNativePolicyAdapter.INSTANCE.handleInlineInitFailure(e)) {
+                Log.e("MC_REDIRECT", "[XposedInit] Failed to load inline library, FUSE native hook disabled", e);
+            }
         }
     }
 
