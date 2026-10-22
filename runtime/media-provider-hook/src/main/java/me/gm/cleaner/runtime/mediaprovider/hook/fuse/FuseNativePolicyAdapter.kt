@@ -76,6 +76,14 @@ object FuseNativePolicyAdapter {
                 throw unsupportedError
             }
             if (!retryInlineHookInitialization()) {
+                // 库不可达必须抛专用类型：上层按类型分流，只有它会被降噪成一次性说明。
+                // 抛 IllegalStateException 会让本方法的 catch 与 HookPolicyCache 的 catch
+                // 都走 Log.e + 完整堆栈，每轮刷新各打一份（实测 59 轮）。
+                inlineLibrary.reason()?.let { reason ->
+                    throw InlineLibraryUnavailableException(
+                        "libinline.so unavailable in this process: $reason"
+                    )
+                }
                 throw IllegalStateException(
                     "Native hook not ready, state=" + NativeHookStatus.currentInlineState()
                 )
@@ -150,7 +158,12 @@ object FuseNativePolicyAdapter {
         } catch (t: Throwable) {
             NativeHookStatus.markInlineLoadFailed(t)
             val delay = scheduleNextInlineRetry(now, retryCount)
-            Log.w(TAG, "retryInlineHookInitializationIfDue failed, nextRetry=${delay}ms", t)
+            if (t is InlineLibraryUnavailableException) {
+                // 库不可达：说明由首次标记处的一次性闸门承载，这里不再重复整栈。
+                logLibraryUnavailableOnce(t)
+            } else {
+                Log.w(TAG, "retryInlineHookInitializationIfDue failed, nextRetry=${delay}ms", t)
+            }
         }
     }
 
