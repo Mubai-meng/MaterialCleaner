@@ -35,3 +35,6 @@ build_tmp_mainjar/
 .project
 .settings/
 /.archify/
+
+# JVM 崩溃日志（Gradle 守护进程被强杀时落在仓库根）
+hs_err_pid*.log
