@@ -30,11 +30,28 @@ import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeHookStatus
  */
 object FuseNativePolicyAdapter {
     private const val TAG = "FuseNativePolicyAdapter"
+
+    /**
+     * libinline.so 在本进程内不可达；**不可恢复**，重试无意义。
+     *
+     * 与 IllegalArgumentException / IllegalStateException（"not ready"）区分开，
+     * 让上层能对这类失败只记一行、不重复排程，而不是当成暂态再重试。
+     */
+    internal class InlineLibraryUnavailableException(message: String) : IllegalStateException(message)
     private const val MAX_INLINE_RETRY_COUNT = 10
     private val RETRY_DELAYS_MS = longArrayOf(5_000L, 10_000L, 30_000L, 60_000L)
 
     @Volatile
     private var inlineLibraryLoaded = false
+
+    /**
+     * libinline.so 在本进程内的可用性 + 一次性日志闸门。
+     *
+     * 「已确定不可达」必须是**永久**标记：`System.loadLibrary` 的结果在同一进程内确定，
+     * APK 被覆盖安装后旧进程持有的 base.apk 路径已消失，重试只会重复同一个
+     * UnsatisfiedLinkError（判定与现场依据见 [InlineLibraryAvailability]）。
+     */
+    private val inlineLibrary = InlineLibraryAvailability()
 
     fun applyConfiguredMountPoints(
         points: Array<String>,
@@ -86,13 +103,27 @@ object FuseNativePolicyAdapter {
                     t,
                 )
             }
-            Log.e(TAG, "applyConfiguredMountPoints failed: count=${points.size}, generation=$generation", t)
+            if (t is InlineLibraryUnavailableException) {
+                // 库不可达是**每轮刷新都会重现的稳定事实**，不是新故障：状态已由上面的
+                // markMountPointsApplyFailed 记录，这里只在首轮打一行说明，不再刷堆栈。
+                logLibraryUnavailableOnce(t)
+            } else {
+                Log.e(
+                    TAG,
+                    "applyConfiguredMountPoints failed: count=${points.size}, generation=$generation",
+                    t,
+                )
+            }
             throw t
         }
     }
 
     fun retryInlineHookInitializationIfDue() {
         if (disableInlineIfUnsupportedByPlatform()) {
+            return
+        }
+        // 库在本进程内不可达 ⇒ 定时重试同样没有意义（结果与首轮完全相同）。
+        if (isInlineLibraryUnavailable()) {
             return
         }
         val now = System.currentTimeMillis()
@@ -258,19 +289,47 @@ object FuseNativePolicyAdapter {
         if (inlineLibraryLoaded) {
             return
         }
-        System.loadLibrary("inline")
-        inlineLibraryLoaded = true
+        // 已确定不可达：不再调用 loadLibrary（同进程内结果确定，调用只会重复抛错）。
+        inlineLibrary.reason()?.let { reason ->
+            throw InlineLibraryUnavailableException(
+                "libinline.so unavailable in this process: $reason"
+            )
+        }
+        try {
+            System.loadLibrary("inline")
+            inlineLibraryLoaded = true
+        } catch (e: UnsatisfiedLinkError) {
+            // 注意：UnsatisfiedLinkError 是 Error 不是 Exception，必须显式接住，
+            // 否则上层 catch (Throwable) 只能拿到一个"暂时未就绪"的语义。
+            inlineLibrary.markUnavailable(e.message)
+            // 首轮打一行并给出可操作结论；同一进程内不再重复（后续轮次由上层状态承载）。
+            if (inlineLibrary.consumeLogAllowance()) {
+                Log.w(
+                    TAG,
+                    "libinline.so unavailable in this process, native hook disabled until process " +
+                            "restart (APK replaced? old base.apk path is gone): " +
+                            inlineLibrary.reason(),
+                )
+            }
+            throw InlineLibraryUnavailableException(
+                "libinline.so unavailable in this process: " + inlineLibrary.reason()
+            )
+        }
     }
 
     private fun retryInlineHookInitialization(): Boolean {
         if (NativeHookStatus.isInlinePolicyBridgeAvailable()) {
             return true
         }
+        // 库在本进程内不可达：直接失败，不排程也不打堆栈（原因已在首次标记时打过）。
+        if (isInlineLibraryUnavailable()) {
+            return false
+        }
+        val now = System.currentTimeMillis()
         return try {
             val nativeStatus = initializeInlineHook()
             NativeHookStatus.markInlineLoadSucceeded(nativeStatus)
             if (!NativeHookStatus.isInlinePolicyBridgeAvailable()) {
-                val now = System.currentTimeMillis()
                 if (NativeHookStatus.shouldRetryInlineInitialization(now)) {
                     scheduleNextInlineRetry(now, NativeHookStatus.currentInlineRetryCount())
                 }
@@ -278,10 +337,33 @@ object FuseNativePolicyAdapter {
             NativeHookStatus.isInlinePolicyBridgeAvailable()
         } catch (t: Throwable) {
             NativeHookStatus.markInlineLoadFailed(t)
-            scheduleNextInlineRetry(System.currentTimeMillis(), NativeHookStatus.currentInlineRetryCount())
-            Log.w(TAG, "retryInlineHookInitialization failed", t)
+            if (t is InlineLibraryUnavailableException) {
+                // 不可恢复：把状态直接落到「不可用」，避免状态页长期停在「等待中」。
+                NativeHookStatus.markInlineRetryExhausted(
+                    t.message ?: "libinline.so unavailable"
+                )
+                logLibraryUnavailableOnce(t)
+            } else {
+                scheduleNextInlineRetry(now, NativeHookStatus.currentInlineRetryCount())
+                Log.w(TAG, "retryInlineHookInitialization failed", t)
+            }
             false
         }
+    }
+
+    /** native 库在本进程内是否已确定不可达（重启进程前不会再尝试加载）。 */
+    fun isInlineLibraryUnavailable(): Boolean = inlineLibrary.isUnavailable()
+
+    /** 库不可达的一次性说明；调用方在失败路径上用它替代完整堆栈。 */
+    private fun logLibraryUnavailableOnce(t: Throwable) {
+        if (!inlineLibrary.consumeLogAllowance()) {
+            return
+        }
+        Log.w(
+            TAG,
+            "native hook unavailable in this process: ${t.message} " +
+                    "(further attempts suppressed until this process restarts)",
+        )
     }
 
     private fun disableInlineIfUnsupportedByPlatform(): Boolean {

@@ -538,7 +538,13 @@ object HookPolicyCache {
             NativeHookStatus.markPolicyCacheHealthy(mountPoints.generation)
             return true
         } catch (e: Throwable) {
-            Log.e(TAG, "loadConfiguredMountPoints: failed", e)
+            if (e is FuseNativePolicyAdapter.InlineLibraryUnavailableException) {
+                // 库不可达是稳定事实（每轮刷新都会重现），状态由下面的 mark* 记录；
+                // 这里不再重复打 11 行堆栈（实测 26 轮 = 286 行）。
+                Log.w(TAG, "loadConfiguredMountPoints: skipped, ${e.message}")
+            } else {
+                Log.e(TAG, "loadConfiguredMountPoints: failed", e)
+            }
             NativeHookStatus.markMountPointsApplyFailed(
                 extractSnapshotGeneration(json),
                 0,
