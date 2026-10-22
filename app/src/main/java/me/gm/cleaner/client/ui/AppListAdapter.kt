@@ -69,11 +69,12 @@ class AppListAdapter(
                 summary += fragment.getString(R.string.enabled_read_only_count, model.readOnlyCount)
             }
             if (summary.isNotEmpty()) {
+                // 副标题可用宽度有限：两类规则并存时用「、」连接会被拦腰折断
+                // （实测「已启用 1 条挂载规则、2 条 / 只读」），改为直接换行，
+                // 让只读规则整体落在第二行；只有一类规则时仍是单行。
+                val separator = if (summary.size > 1) "\n" else ""
                 activity.buildStyledTitle(
-                    fragment.getString(
-                        R.string.enabled,
-                        summary.joinToString(fragment.getString(R.string.delimiter))
-                    )
+                    fragment.getString(R.string.enabled, summary.joinToString(separator))
                 )
             } else {
                 model.packageInfo.packageName
