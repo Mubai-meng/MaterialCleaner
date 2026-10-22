@@ -40,7 +40,7 @@ object LogTagFilter {
         "DataBus", "DataBusEventQuarantine", "DataBusEventWriter", "DataBusLease",
         "DataBusPrune", "DataBusRecoveryLedger",
         "DiagnosticArchive", "CleanerService", "CleanerServerCallback", "BinderSender",
-        "LayerOrchestrator", "SnapshotPublisher", "HookRecoveryCoordinator",
+        "LayerOrchestrator", "RuntimeStatusAggregator", "SnapshotPublisher", "HookRecoveryCoordinator",
         "MediaProviderRecoveryStrategy", "NativeHookStatus", "HookPolicyCache",
         "HookPolicyRefreshScheduler", "FuseNativePolicyAdapter", "HookDataBusBridge",
         "EventConsumerScheduler", "EventSignalCoalescer", "EventDeadLetter",
