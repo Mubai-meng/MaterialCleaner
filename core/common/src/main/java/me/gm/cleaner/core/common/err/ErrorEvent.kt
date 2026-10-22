@@ -13,6 +13,9 @@ import org.json.JSONObject
  *     使错误事件可以安全进入快照与诊断包；明文路径仅允许出现在 debug 日志。
  * - [atElapsed] 必须取自单调时钟（SystemClock.elapsedRealtime 或等价物），
  *     规避墙钟回拨导致的事件排序错乱。
+ * - [atWallMillis] 只用于**跨重启归属**：持久层流水跨多次开机累积，单调时钟
+ *     在每次开机都从 0 重来，没有墙钟就无法判断某条属于哪一次会话
+ *     （第32批实测：56 条流水跨多个 boot，分析时无法排序）。不参与任何超时判定。
  */
 data class ErrorEvent(
     /** [ErrorCodes] 注册表常量，机器可读的分类键。 */
@@ -29,6 +32,13 @@ data class ErrorEvent(
     val atElapsed: Long,
     /** 受控自由文本补充（规则 source→target、失败下标列表等）。 */
     val detail: String? = null,
+    /**
+     * 墙钟时间戳（毫秒）；0 表示调用方未提供，由 [ErrorJournal.record] 统一补齐。
+     *
+     * 与 [atElapsed] 并存而不是替换：单调时钟用于超时/顺序判定，墙钟用于
+     * 跨重启归属与"这件事发生在几点"。
+     */
+    val atWallMillis: Long = 0L,
 ) {
     init {
         require(code.isNotEmpty()) { "error code must not be empty" }
@@ -58,6 +68,7 @@ data class ErrorEvent(
     fun toJson(): String = JSONObject().apply {
         put("code", code)
         put("atElapsed", atElapsed)
+        if (atWallMillis > 0L) put("atWall", atWallMillis)
         if (errno != 0) put("errno", errno)
         subject?.let { put("subject", it) }
         pathDigest?.let { put("pathDigest", it) }

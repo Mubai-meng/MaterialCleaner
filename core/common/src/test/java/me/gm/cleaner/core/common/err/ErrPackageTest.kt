@@ -74,6 +74,22 @@ class ErrorJournalTest {
         assertEquals(1, taken.size)
         assertEquals(0, journal.snapshot().size)
     }
+
+    @Test
+    fun `record 补齐墙钟戳且尊重显式值`() {
+        val journal = ErrorJournal(capacity = 2)
+        val before = System.currentTimeMillis()
+        journal.record(ErrorEvent(code = ErrorCodes.BUS_QUEUE_FULL, atElapsed = 1L))
+        journal.record(
+            ErrorEvent(code = ErrorCodes.BUS_QUEUE_FULL, atElapsed = 2L, atWallMillis = 42L),
+        )
+
+        val snapshot = journal.snapshot()
+        assertTrue(snapshot[0].atWallMillis in before..System.currentTimeMillis())
+        assertEquals(42L, snapshot[1].atWallMillis)
+        // 注：这里不断言 toJson() —— core:common 的单测没有 org.json 实现
+        // （"Method put in org.json.JSONObject not mocked"），JSON 键由产物级检查覆盖。
+    }
 }
 
 class ErrorLogThrottleTest {

@@ -110,6 +110,90 @@ public class CleanerService extends ICleanerService.Stub {
         }
     }
 
+    /** 停滞旁路探针的节流窗口：空闲期每 60s 最多 fork 一次。 */
+    private static final long STALL_PROBE_INTERVAL_MS = 60_000L;
+
+    /** 上一次探针针对的 lastReadAt（心跳前进即失效，必须重探）。 */
+    private volatile long mStallProbeForReadAtMs = -1L;
+    /** 上一次探针的时刻（elapsedRealtime），用于节流。 */
+    private volatile long mStallProbeAtMs = 0L;
+    /** 上一次探针的结论：true = 过滤流里确有更新的行（真停滞）。 */
+    private volatile boolean mStallProbeFresh = false;
+
+    /**
+     * 停滞旁路探针：过滤流里是否存在比 {@code lastReadAtMs} 更新的 ActivityManager 行。
+     *
+     * <p>为什么不能只看 logd：{@link #probeLogdResponsive()} 证明的是"logd 能给出行"，
+     * 而观察器的 tail 只订阅 ActivityManager 一个 tag —— 设备空闲时这个 tag 本来就没有
+     * 输出，logd 完全正常也会读到"停滞"。第32批现场实测：仅凭心跳停滞判死，
+     * 一个会话里触发了 48 次 server 强杀重启，全部落在空闲期。
+     *
+     * <p>探针是 {@code logcat -d -t 1}（不阻塞、立即退出），按 60s 节流，结果按
+     * lastReadAt 缓存：心跳一旦前进就失效重探。探针自身失败一律按"无证据"处理
+     * （返回 false ⇒ 不杀），宁可漏杀也不误杀。
+     */
+    private boolean probeFilteredStreamFresh(final long lastReadAtMs) {
+        final long nowElapsed = android.os.SystemClock.elapsedRealtime();
+        if (mStallProbeForReadAtMs == lastReadAtMs
+                && nowElapsed - mStallProbeAtMs < STALL_PROBE_INTERVAL_MS) {
+            return mStallProbeFresh;
+        }
+        long lineEpochMs = -1L;
+        java.lang.Process process = null;
+        try {
+            process = Runtime.getRuntime().exec(new String[]{
+                    "/system/bin/logcat", "-d", "-t", "1",
+                    "-s", "ActivityManager:V", "-v", "epoch"});
+            final boolean exited = process.waitFor(
+                    ObserverStallPolicy.LOGD_PROBE_TIMEOUT_MS,
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (exited) {
+                try (var reader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(process.getInputStream()))) {
+                    // `-d` 会先打 `--------- beginning of ...` 分隔行，逐行解析取最大值，
+                    // 不能读第一行就放弃（那样恒判"没有行"，等于永久关掉停滞检测）。
+                    for (int i = 0; i < 8; i++) {
+                        final var line = reader.readLine();
+                        if (line == null) {
+                            break;
+                        }
+                        final long parsed = ObserverStallPolicy.INSTANCE.parseEpochMillis(line);
+                        if (parsed > lineEpochMs) {
+                            lineEpochMs = parsed;
+                        }
+                    }
+                }
+            }
+        } catch (final Throwable t) {
+            android.util.Log.w("CleanerService", "stall probe failed, skip kill", t);
+            lineEpochMs = -1L;
+        } finally {
+            if (process != null) {
+                for (final java.io.Closeable stream : new java.io.Closeable[]{
+                        process.getInputStream(), process.getErrorStream(),
+                        process.getOutputStream()}) {
+                    try {
+                        stream.close();
+                    } catch (final Throwable ignored) {
+                        // 关闭失败无副作用：子进程退出后 ProcessManager 会兜底回收。
+                    }
+                }
+                process.destroy();
+            }
+        }
+        // Kotlin 默认参数在 Java 侧不生成重载，松弛值必须显式传。
+        final boolean fresh = ObserverStallPolicy.INSTANCE.isProbeLineFresh(
+                lineEpochMs,
+                System.currentTimeMillis(),
+                nowElapsed,
+                lastReadAtMs,
+                ObserverStallPolicy.PROBE_SLACK_MS);
+        mStallProbeForReadAtMs = lastReadAtMs;
+        mStallProbeAtMs = nowElapsed;
+        mStallProbeFresh = fresh;
+        return fresh;
+    }
+
     @Override
     public int getServerVersion() {
         if (RuntimeFileUtils.INSTANCE.toAppId(Binder.getCallingUid()) != mManagerAid) {
@@ -136,12 +220,27 @@ public class CleanerService extends ICleanerService.Stub {
                         activityManagerObserver.getLastReadAtMs())) {
                     // 疑似假活：先确认 logd 本身响应，排除 logd wedged 导致的误杀
                     //（logd 死了杀 server 也没用，新 tail 照样读不到行）。
-                    if (probeLogdResponsive()) {
-                        return 2;
+                    if (!probeLogdResponsive()) {
+                        android.util.Log.w("CleanerService",
+                                "observer stall suspected but logd wedged, skip kill");
+                        return 0;
+                    }
+                    // logd 活着 ≠ 我们该读到行：tail 只订阅 ActivityManager 一个 tag，
+                    // 空闲期（夜间、无进程启动）本来就没有输出。必须确认过滤流里确实存在
+                    // 比 lastRead 更新的行，才能判"我们漏读了"。
+                    // 第32批现场：仅凭心跳停滞判死，一个会话里 48 次强杀重启 server，
+                    // 且没有任何 logcat 真死证据 —— 全是空闲误判。
+                    final long lastReadAtMs = activityManagerObserver.getLastReadAtMs();
+                    if (!probeFilteredStreamFresh(lastReadAtMs)) {
+                        android.util.Log.d("CleanerService",
+                                "observer silent but filtered stream has no fresher line:"
+                                        + " idle, skip kill (lastReadAtMs=" + lastReadAtMs + ")");
+                        return 0;
                     }
                     android.util.Log.w("CleanerService",
-                            "observer stall suspected but logd wedged, skip kill");
-                    return 0;
+                            "observer stalled with fresher ActivityManager line: kill server"
+                                    + " (lastReadAtMs=" + lastReadAtMs + ")");
+                    return 2;
                 }
                 if (!activityManagerObserver.hasAmStart()) {
                     return 3;

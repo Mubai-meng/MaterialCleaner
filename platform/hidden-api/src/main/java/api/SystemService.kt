@@ -274,10 +274,13 @@ object SystemService {
                 return pm.getInstalledPackages(flags, userId)
             } catch (e: NoSuchMethodError) {
                 directGetInstalledPackagesUsable = false
+                // 一行即可：这是 API 37 的**预期**签名变化，反射回退随后立即生效。
+                // 带 throwable 会在主环形日志里留 20 行栈，把真正的告警淹没
+                // （第32批实测：每次 server 启动 21 行 W，占该 tag 全部 W 的 95%）。
                 LOGGER.w(
-                    e,
                     "IPackageManager.getInstalledPackages(long,int) descriptor mismatch " +
-                            "(API 37 returns PackageInfoList), switching to reflection"
+                            "(API 37 returns PackageInfoList, " + e.javaClass.simpleName + "), " +
+                            "switching to reflection"
                 )
             }
         }

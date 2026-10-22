@@ -27,17 +27,27 @@ class ErrorJournal(
     private val lock = Any()
     private val buffer = ArrayDeque<ErrorEvent>(capacity)
 
-    /** 记录一条错误事件；满容量时静默淘汰最旧条目。 */
+    /**
+     * 记录一条错误事件；满容量时静默淘汰最旧条目。
+     *
+     * 墙钟戳在这里统一补齐（而不是要求每个调用点自己传）：持久层跨重启累积，
+     * 只有单调时钟的条目无法归属到具体会话。调用点显式给出时尊重原值。
+     */
     fun record(event: ErrorEvent) {
+        val stamped = if (event.atWallMillis == 0L) {
+            event.copy(atWallMillis = System.currentTimeMillis())
+        } else {
+            event
+        }
         synchronized(lock) {
             if (buffer.size >= capacity) {
                 buffer.removeFirst()
             }
-            buffer.addLast(event)
+            buffer.addLast(stamped)
         }
         // 持久化输出在缓冲锁之外执行：文件 IO 不占用锁，也不阻塞并发 record。
         try {
-            sink?.invoke(event)
+            sink?.invoke(stamped)
         } catch (t: Throwable) {
             // 持久化失败不影响内存留痕与业务流程。
         }
