@@ -60,30 +60,49 @@ class LayerOrchestrator(
      * 执行服务器启动编排。
      */
     fun initialize() {
+        val startedAt = System.currentTimeMillis()
+        var checkpoint = startedAt
+        // 分步耗时：开机后「策略快照何时可见」直接决定兼容层多久从 RECOVERING 转 HEALTHY。
+        // 2026-10-22 22:06 重启实测：initialize start(22:06:29.830) → 首份 redirect_policy
+        // 快照(22:07:02.884) 相隔 33 秒，且这段时间 ColorOS LOG_FLOWCTRL 丢了 2700+ 行，
+        // 无法定位卡在哪一步。这里把每一步的耗时汇总成一行，稳态只输出一次，不刷屏。
+        fun lap(): Long {
+            val now = System.currentTimeMillis()
+            val cost = now - checkpoint
+            checkpoint = now
+            return cost
+        }
         Log.i(TAG, "initialize start")
 
         MediaProviderHookGateway.start(server)
+        val gatewayMs = lap()
 
         ObserverManager.startAllObservers(server)
+        val observersMs = lap()
 
         server.mPackageReceiver.registerPackageReceiver()
+        val packageReceiverMs = lap()
 
         // 日志采集按配置对账（不是"启动时读一次"）：应启用而未运行则启动，
         // 应停用则保持未运行。关闭开关的生效点分别在
         // StoragePolicyChangeCoordinator.onPreferencesChanged() 与本方法。
         server.mAutoLogging.reconcileWithPreferences()
+        val autoLoggingMs = lap()
 
         val dataBusReady = SnapshotPublisher.publishAll()
+        val publishMs = lap()
+        if (!dataBusReady) {
+            Log.w(TAG, "DataBus unavailable during initialize, snapshots will be published on reconnect")
+        }
 
         // 启动即收敛：publish 只更新快照，不管存量进程命名空间；
         // 不在这里 remountAll 的话，重启前挂上的进程将永久失 cover，
         // 直到下一次规则变更（挂载 decay 的根因之一）。
         ObserverManager.getObserver(BaseProcessObserver::class.java)?.remountAll()
+        val remountMs = lap()
 
         MediaProviderHookGateway.registerAndRefreshFromDataBus(server)
-        if (!dataBusReady) {
-            Log.w(TAG, "DataBus unavailable during initialize, snapshots will be published on reconnect")
-        }
+        val hookRefreshMs = lap()
 
         val mountObserver = ObserverManager.getObserver(StorageMountObserver::class.java)
         if (mountObserver != null) {
@@ -94,12 +113,20 @@ class LayerOrchestrator(
         BinderSender.register(server.cleanerService)
 
         server.sendBinderToManger(server.cleanerService)
+        val binderMs = lap()
 
         eventConsumerScheduler.prepare()
         eventConsumerScheduler.pollOnce()
         eventConsumerScheduler.start()
+        val schedulerMs = lap()
 
-        Log.i(TAG, "initialize done")
+        Log.i(
+            TAG,
+            "initialize done in ${checkpoint - startedAt}ms" +
+                " (gateway=${gatewayMs}, observers=${observersMs}, pkgReceiver=${packageReceiverMs}," +
+                " autoLogging=${autoLoggingMs}, publishAll=${publishMs}, remount=${remountMs}," +
+                " hookRefresh=${hookRefreshMs}, binder=${binderMs}, scheduler=${schedulerMs})",
+        )
     }
 
     /**

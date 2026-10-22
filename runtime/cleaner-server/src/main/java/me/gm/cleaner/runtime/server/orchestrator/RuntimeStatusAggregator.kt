@@ -1,11 +1,13 @@
 package me.gm.cleaner.runtime.server.orchestrator
 
+import android.util.Log
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.runtime.server.CleanerServer
 import me.gm.cleaner.runtime.server.hookbridge.MediaProviderHookGateway
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import me.gm.cleaner.model.LayerStatus as IpcLayerStatus
 import me.gm.cleaner.model.OrchestratedStatus as IpcOrchestratedStatus
 import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
@@ -19,8 +21,21 @@ class RuntimeStatusAggregator(
         RuntimeRecoverySnapshot()
     },
 ) {
+    private companion object {
+        private const val TAG = "RuntimeStatusAggregator"
+    }
+
     private val statusGeneration = AtomicLong(0)
     private val layerStartedAt = ConcurrentHashMap<LayerId, Long>()
+
+    /**
+     * 兼容层首次进入「初始化态」（RECOVERING / UNINITIALIZED）的时刻，0 表示当前不在该状态。
+     * 用于 [OrchestratedStatus.STARTING_GRACE_MS] 的宽限判定。
+     */
+    private val compatInitializingSince = AtomicLong(0L)
+
+    /** 上一次观测到的整体健康，仅在变化时打一行日志（补齐「health 何时变」的观测缺口）。 */
+    private val lastHealth = AtomicReference<OverallHealth?>(null)
 
     /** 上次落盘的语义指纹；null 表示尚未落盘过。 */
     private var lastPublishedSemanticKey: String? = null
@@ -178,12 +193,66 @@ class RuntimeStatusAggregator(
             recovery = recoverySnapshot,
         )
 
-        return OrchestratedStatus.evaluate(
+        val compatInitializingMs = compatInitializingMs(now, hookReport, nativeReport)
+        val status = OrchestratedStatus.evaluate(
             vfs = recordLayerStarted(vfsReport),
             mediaProviderJavaHook = recordLayerStarted(hookReport),
             fuseNativeHook = recordLayerStarted(nativeReport),
             dataBus = recordLayerStarted(busReport),
             controlPlane = recordLayerStarted(controlReport),
+            compatInitializingMs = compatInitializingMs,
+        )
+        logHealthTransition(status, hookReport, nativeReport, compatInitializingMs)
+        return status
+    }
+
+    /**
+     * 兼容层已持续处于初始化态的时长（毫秒）；0 表示当前不在初始化态。
+     *
+     * 并发安全：多个调用方（IPC / 心跳 / 诊断）会同时采集。用 CAS 保证「首次进入时刻」
+     * 只被写入一次，避免后到的线程把起点往后推、把宽限期无限续期。
+     */
+    private fun compatInitializingMs(
+        now: Long,
+        hookReport: LayerReport,
+        nativeReport: LayerReport,
+    ): Long {
+        val initializing = hookReport.state == LayerState.RECOVERING ||
+                hookReport.state == LayerState.UNINITIALIZED ||
+                nativeReport.state == LayerState.RECOVERING ||
+                nativeReport.state == LayerState.UNINITIALIZED
+        if (!initializing) {
+            compatInitializingSince.set(0L)
+            return 0L
+        }
+        val since = compatInitializingSince.get()
+        if (since == 0L) {
+            if (compatInitializingSince.compareAndSet(0L, now)) return 1L
+            return (now - compatInitializingSince.get()).coerceAtLeast(1L)
+        }
+        return (now - since).coerceAtLeast(1L)
+    }
+
+    /**
+     * 整体健康变化时留一行痕（只打 transition，稳态不刷屏）。
+     *
+     * 此前 health 变化完全不落日志 —— 排查「开机后先显示降级、过一会正常」时
+     * 只能靠快照体积变化反推时点，且 ColorOS 按进程丢日志（LOG_FLOWCTRL）后连这点线索都没有。
+     */
+    private fun logHealthTransition(
+        status: OrchestratedStatus,
+        hookReport: LayerReport,
+        nativeReport: LayerReport,
+        compatInitializingMs: Long,
+    ) {
+        val previous = lastHealth.getAndSet(status.health)
+        if (previous == status.health) return
+        Log.i(
+            TAG,
+            "overall health ${previous?.name ?: "?"} -> ${status.health.name}" +
+                " (vfs=${status.vfs.state}, mp=${hookReport.state}, fuse=${nativeReport.state}," +
+                " compatInitializing=${compatInitializingMs}ms," +
+                " graceMs=${OrchestratedStatus.STARTING_GRACE_MS})",
         )
     }
 

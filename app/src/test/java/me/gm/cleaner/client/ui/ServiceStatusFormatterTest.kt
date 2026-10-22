@@ -45,6 +45,11 @@ class ServiceStatusFormatterTest {
             R.drawable.ic_baseline_check_circle_24 to android.R.color.holo_green_dark,
             ServiceStatusFormatter.statusIconRes("HEALTHY")
         )
+        // STARTING 必须与 DEGRADED 视觉可区分：蓝色循环箭头，不是错误图标
+        assertEquals(
+            R.drawable.ic_outline_autorenew_24 to android.R.color.holo_blue_light,
+            ServiceStatusFormatter.statusIconRes("STARTING")
+        )
         assertEquals(
             R.drawable.ic_baseline_error_24 to android.R.color.holo_orange_dark,
             ServiceStatusFormatter.statusIconRes("DEGRADED")
@@ -52,6 +57,28 @@ class ServiceStatusFormatterTest {
         assertEquals(
             R.drawable.ic_baseline_error_24 to android.R.color.holo_red_dark,
             ServiceStatusFormatter.statusIconRes("CRITICAL")
+        )
+    }
+
+    @Test
+    fun `orchestratedTitle 把 STARTING 与 DEGRADED 分开`() {
+        // 开机后兼容层收敛期必须显示「正在启动」，不能报「降级运行」
+        assertEquals(
+            "starting_title",
+            ServiceStatusFormatter.orchestratedTitle(fake, "STARTING", configured = 3),
+        )
+        assertEquals(
+            "degraded_title",
+            ServiceStatusFormatter.orchestratedTitle(fake, "DEGRADED", configured = 3),
+        )
+        assertEquals(
+            "healthy_title",
+            ServiceStatusFormatter.orchestratedTitle(fake, "HEALTHY", configured = 3),
+        )
+        // 未配置规则时 HEALTHY 走「已就绪」
+        assertEquals(
+            "ready_title",
+            ServiceStatusFormatter.orchestratedTitle(fake, "HEALTHY", configured = 0),
         )
     }
 
@@ -307,6 +334,7 @@ class ServiceStatusFormatterTest {
             R.string.runtime_state_disabled to "disabled",
             R.string.service_status_summary_healthy to "healthy_summary",
             R.string.service_status_summary_ready_no_rules to "ready_no_rules",
+            R.string.service_status_summary_starting to "starting_summary",
             R.string.service_status_summary_degraded to "degraded_summary",
             R.string.service_status_summary_unavailable to "unavailable_summary",
             R.string.storage_redirect_no_mount_rules to "no_rules",

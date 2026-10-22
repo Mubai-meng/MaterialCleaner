@@ -144,6 +144,7 @@
     <string name="service_status_summary_healthy">主重定向和兼容层均可用</string>
     <string name="service_status_summary_ready_no_rules">服务已就绪，尚未配置挂载规则</string>
     <string name="service_status_summary_degraded">请检查下方各层状态，确认核心能力是否可用</string>
+    <string name="service_status_summary_starting">兼容层正在初始化，稍后自动就绪；当前规则仍在生效</string>
     <string name="service_status_summary_unavailable">核心重定向不可用，请查看下方问题。</string>
     <string name="service_status_configured_apps">%d 个应用</string>
     <string name="service_status_mounted_packages">%d 个已处理</string>

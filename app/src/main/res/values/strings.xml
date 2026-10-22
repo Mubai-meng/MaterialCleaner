@@ -171,6 +171,7 @@
     <string name="service_status_summary_healthy">Main redirect and compatibility layers are available</string>
     <string name="service_status_summary_ready_no_rules">Service is ready, no mount rules configured yet</string>
     <string name="service_status_summary_degraded">Check the layer states below to confirm main capability availability</string>
+    <string name="service_status_summary_starting">Compatibility layers are initializing and will be ready shortly; current rules stay in effect</string>
     <string name="service_status_summary_unavailable">Core redirect is unavailable. See the issue below.</string>
     <string name="service_status_configured_apps">%d apps</string>
     <string name="service_status_mounted_packages">%d handled</string>

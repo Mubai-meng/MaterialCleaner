@@ -51,6 +51,9 @@ object ServiceStatusFormatter {
 
     fun statusIconRes(health: String): Pair<Int, Int> = when (health) {
         "HEALTHY" -> R.drawable.ic_baseline_check_circle_24 to android.R.color.holo_green_dark
+        // STARTING 用「循环箭头 + 蓝色」：表示正在推进，而不是出了错。
+        // 若沿用 DEGRADED 的红色/橙色错误图标，用户看到的第一印象仍是「坏了」。
+        "STARTING" -> R.drawable.ic_outline_autorenew_24 to android.R.color.holo_blue_light
         "DEGRADED" -> R.drawable.ic_baseline_error_24 to android.R.color.holo_orange_dark
         else -> R.drawable.ic_baseline_error_24 to android.R.color.holo_red_dark
     }
@@ -77,6 +80,8 @@ object ServiceStatusFormatter {
             } else {
                 s.get(R.string.service_status_summary_ready_no_rules)
             }
+            // STARTING：兼容层还在收敛（旧策略仍生效），不提示用户「去检查」
+            "STARTING" -> s.get(R.string.service_status_summary_starting)
             "DEGRADED" -> s.get(R.string.service_status_summary_degraded)
             else -> s.get(R.string.service_status_summary_unavailable)
         }
@@ -311,6 +316,9 @@ object ServiceStatusFormatter {
         } else {
             s.get(R.string.service_status_ready_title)
         }
+        // STARTING：初始化/收敛中，不是「降级」。开机后 native 侧要等策略下发完成一次 apply，
+        // 实测约 26 秒窗口；这段时间显示「降级运行」与实际能力（旧策略仍生效）不符。
+        "STARTING" -> s.get(R.string.service_status_starting_title)
         "DEGRADED" -> s.get(R.string.service_status_degraded_title)
         else -> s.get(R.string.service_status_unavailable_title)
     }

@@ -28,7 +28,39 @@ data class OrchestratedStatus(
 ) {
     companion object {
         /**
+         * 「初始化中」宽限期（毫秒）。
+         *
+         * 兼容层处于 RECOVERING / UNINITIALIZED 且持续时间在此以内时，整体健康报
+         * [OverallHealth.STARTING] 而不是 [OverallHealth.DEGRADED]。
+         *
+         * 依据：开机后 native 侧要等 server 下发策略快照并完成一次 apply，
+         * 期间 nativeGen 落后于 snapshotGen ⇒ [NativeSyncPolicy] 判 CONVERGING
+         * ⇒ FUSE 层 RECOVERING。实测该窗口约 26 秒（2026-10-22 22:06 开机）。
+         * 这段时间重定向能力是完整的（旧策略仍在生效），却显示「降级运行」。
+         *
+         * 超过本阈值仍处于初始化态 ⇒ 真的卡住了，仍报 DEGRADED，避免掩盖故障。
+         */
+        const val STARTING_GRACE_MS = 30_000L
+
+        /** 兼容层的「真故障」态：出现即降级。 */
+        private val COMPAT_FAILURE_STATES = setOf(
+            LayerState.DEGRADED,
+            LayerState.UNAVAILABLE,
+            LayerState.STALE,
+            LayerState.DISABLED,
+        )
+
+        /** 初始化/收敛态：宽限期内算「启动中」。 */
+        private val INITIALIZING_STATES = setOf(
+            LayerState.RECOVERING,
+            LayerState.UNINITIALIZED,
+        )
+
+        /**
          * 根据各层报告计算整体健康状态。
+         *
+         * @param compatInitializingMs 兼容层已持续处于初始化态的时长（毫秒）。
+         *   `0` 表示未知/不启用宽限（调用方未提供时保持历史上「初始化态即降级」的行为）。
          */
         @JvmStatic
         fun evaluate(
@@ -37,27 +69,25 @@ data class OrchestratedStatus(
             fuseNativeHook: LayerReport,
             dataBus: LayerReport,
             controlPlane: LayerReport,
+            compatInitializingMs: Long = 0L,
         ): OrchestratedStatus {
+            val compat = listOf(mediaProviderJavaHook, fuseNativeHook)
             val health = when {
                 vfs.state == LayerState.UNAVAILABLE || vfs.state == LayerState.DISABLED ->
                     OverallHealth.CRITICAL
-                vfs.state == LayerState.HEALTHY || vfs.state == LayerState.DEGRADED -> {
-                    val compatLayersDegraded = listOf(
-                        mediaProviderJavaHook,
-                        fuseNativeHook,
-                    ).any {
-                        it.state in setOf(
-                            LayerState.DEGRADED,
-                            LayerState.UNAVAILABLE,
-                            LayerState.RECOVERING,
-                            LayerState.STALE,
-                            LayerState.DISABLED,
-                        )
-                    }
-                    if (compatLayersDegraded) OverallHealth.DEGRADED
-                    else OverallHealth.HEALTHY
+                vfs.state == LayerState.HEALTHY || vfs.state == LayerState.DEGRADED -> when {
+                    // 真故障优先：任何一层 DEGRADED/UNAVAILABLE/STALE/DISABLED 都不算「启动中」
+                    compat.any { it.state in COMPAT_FAILURE_STATES } -> OverallHealth.DEGRADED
+                    compat.any { it.state in INITIALIZING_STATES } ->
+                        if (compatInitializingMs in 1..STARTING_GRACE_MS) {
+                            OverallHealth.STARTING
+                        } else {
+                            OverallHealth.DEGRADED
+                        }
+                    else -> OverallHealth.HEALTHY
                 }
-                // VFS 尚未就绪（STARTING/UNINITIALIZED/RECOVERING/STALE）
+                // VFS 自己尚未就绪：同样是「启动中」，不是降级
+                vfs.state in INITIALIZING_STATES -> OverallHealth.STARTING
                 else -> OverallHealth.DEGRADED
             }
 
