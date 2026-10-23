@@ -9,6 +9,7 @@ import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.model.PackageStatus
 import me.gm.cleaner.runtime.server.process.BaseProcessObserver
 import me.gm.cleaner.runtime.server.process.PackageInfoMapper
+import me.gm.cleaner.runtime.server.process.ProcessIdentity
 import me.gm.cleaner.runtime.server.vfs.CensusEntry
 import me.gm.cleaner.runtime.server.vfs.CensusIsolationPolicy
 import me.gm.cleaner.runtime.server.vfs.CensusVerdict
@@ -108,6 +109,8 @@ class VfsLayerController {
         val uidMappingReady = VfsRuntimePolicy.getStorageRedirectPackages()
             .contains(packageName) && PackageInfoMapper.isMappingReady()
 
+        // 先固定本轮身份快照，遍历中途的 pid 复用才可被 PidInstanceFreshness 识别。
+        val instanceSnapshot = captureInstanceSnapshot(processes.asSequence().map { it.pid })
         processes
             .asSequence()
             .sortedBy { it.pid }
@@ -117,6 +120,7 @@ class VfsLayerController {
                 // 对全部进程先做一次（实测 ~120 个 pid）纯属浪费；而归属不到重定向包的
                 // 隔离进程本来就会被上面这行过滤掉，延后判定不改变任何计数。
                 if (isExcludedForCensus(procInfo.pid)) return@forEach
+                if (skipStaleInstance(procInfo.pid, packageName, instanceSnapshot)) return@forEach
                 val userId = procInfo.uid.toUserId()
                 pids.add(procInfo.pid)
                 pidFlags.add(buildPidFlag(
@@ -180,6 +184,8 @@ class VfsLayerController {
         val entries = mutableListOf<CensusEntry>()
         var unattributed = 0
 
+        // 与 getPackageStatus 同口径：先固定身份快照，避免陈旧 pid 混入分母。
+        val instanceSnapshot = captureInstanceSnapshot(processes.asSequence().map { it.pid })
         processes
             .asSequence()
             .sortedBy { it.pid }
@@ -195,6 +201,7 @@ class VfsLayerController {
                 // 被排除的隔离进程既不进 entries 也不计入 unattributed，
                 // 与「过滤前置」时的行为完全一致。
                 if (isExcludedForCensus(procInfo.pid)) return@forEach
+                if (skipStaleInstance(procInfo.pid, packageName, instanceSnapshot)) return@forEach
                 val userId = procInfo.uid.toUserId()
                 val flag = buildPidFlag(
                     procInfo.pid,
@@ -344,6 +351,29 @@ class VfsLayerController {
     }
 
     /**
+     * 采集本轮普查的 pid → 进程实例身份（starttime）快照，作为**局部值**返回。
+     *
+     * 刻意不做成实例字段：`getPackageStatus` 是 Binder 接口，可被 app 侧并发调用；
+     * 共享字段会出现「A 的调用覆盖 B 的快照」，导致 B 把正常进程误判成 pid 复用
+     * 而跳过（或反过来放过陈旧 pid）。每轮一个局部快照即无此问题。
+     *
+     * 用途：识别 PID 复用。`/proc/<pid>` 存在并不代表还是原来那个进程 ——
+     * 目标进程退出后内核可能把同一个 pid 分给新进程，此时 `check_mounts`
+     * 读到的是**别人的** mountinfo，空数组会被误判成 NOT_MOUNTED。
+     * 第 38 批实测即此形态（`vfsNotMountedPids=3`，UI 同时显示「已挂载」）。
+     */
+    private fun captureInstanceSnapshot(pids: Sequence<Int>): Map<Int, Long> {
+        val snapshot = HashMap<Int, Long>()
+        pids.forEach { pid ->
+            val startTime = runCatching {
+                ProcessIdentity.currentInstance(pid)?.startTime
+            }.getOrNull() ?: return@forEach
+            snapshot[pid] = startTime
+        }
+        return snapshot
+    }
+
+    /**
      * 该 pid 是否应从 VFS 普查中排除（隔离进程 / uid 不可读）。
      *
      * 注意默认值：**读不到 uid 时排除，而不是放行**。
@@ -363,6 +393,21 @@ class VfsLayerController {
         return verdict != CensusVerdict.INCLUDE
     }
 
+    /** 陈旧 pid 的告警限频：理由同上，且它们是正常进程更替的产物，不该看起来像故障。 */
+    private object StaleInstanceWarn {
+        private const val INTERVAL_MS = 60_000L
+
+        @Volatile
+        private var lastAt = 0L
+
+        fun warn(message: String) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastAt < INTERVAL_MS) return
+            lastAt = now
+            android.util.Log.i("VfsLayerController", message)
+        }
+    }
+
     /** uid 不可读的告警限频：普查每 30s 一轮，逐 pid 刷屏会淹没其他信号。 */
     private object UnreadableUidWarn {
         private const val INTERVAL_MS = 60_000L
@@ -376,6 +421,24 @@ class VfsLayerController {
             lastAt = now
             android.util.Log.w("VfsLayerController", message)
         }
+    }
+
+    /**
+     * 陈旧实例的统一出口：判定 + 限频留痕。
+     *
+     * 单独抽出来是为了两处调用点口径完全一致，且日志不会逐 pid 刷屏
+     * （普查 30s 一轮 × 每轮每个陈旧 pid 一行 = 噪声）。限频但**不静默**：
+     * 第 38 批的教训正是「跳过」若不留痕，下次排查会重新怀疑判据。
+     */
+    private fun skipStaleInstance(
+        pid: Int,
+        packageName: String,
+        snapshot: Map<Int, Long>,
+    ): Boolean {
+        if (!PidInstanceFreshness.isStale(pid, snapshot)) return false
+        StaleInstanceWarn.warn("census: skip stale pid=$pid pkg=$packageName " +
+                "(process gone or pid reused, excluded from VFS stats)")
+        return true
     }
 
     private fun buildPidFlag(
@@ -444,5 +507,50 @@ class VfsLayerController {
             status.userIds = userIds.toIntArray()
             return status
         }
+    }
+}
+
+/**
+ * PID 实例新鲜度判定（5.5.7 P2，纯函数）。
+ *
+ * 为什么单独成 object：`VfsLayerController` 的 companion 是 `private`，
+ * 放在里面的函数测试不可见；而这段逻辑是全模块最容易出错、最需要边界单测的部分
+ * （直接决定普查分母是否可信），所以独立出来。
+ *
+ * 与 [me.gm.cleaner.runtime.server.process.ProcessIdentity.isAlive] 的关系：
+ * `isAlive` 只能识别「进程完全消失」，挡不住 PID 复用 —— 后者恰恰是第 38 批
+ * 假告警的真凶（pid 被复用后读到新进程的 mountinfo ⇒ 空数组 ⇒ NOT_MOUNTED）。
+ *
+ * 与 `Mounter.bindMountLocked()` 的关系：挂载侧只需避开「已消失」（打错地方才是灾难）；
+ * 普查侧还必须避开「已换成别人」（会被读成假告警）。所以这里更严。
+ */
+internal object PidInstanceFreshness {
+
+    /**
+     * 该 pid 是否已不是快照时刻的那个进程实例。
+     *
+     * 判为陈旧（返回 true）的三种情形，全部保守处理为「不采样」：
+     * 1. 进程已消失（`/proc/<pid>` 不存在）；
+     * 2. `/proc/<pid>/stat` 读不到（进程在竞态中退出，无法证明身份未变）；
+     * 3. starttime 与快照不一致 ⇒ pid 已被内核复用。
+     *
+     * 注意「保守」的方向：这里宁可漏采一个活进程，也不把别人的挂载状态算到目标头上。
+     * 漏采的代价是分母少一个（可自愈：下一轮普查重新采集）；错采的代价是假告警
+     * 误导排查方向（第 38 批为此花了整整一轮）。
+     *
+     * @param snapshot 遍历开始前采集的 pid → starttime 快照
+     * @param alive 注入式存活判定，默认真实 `/proc` 探测
+     * @param startTimeOf 注入式 starttime 读取，默认真实 `/proc/<pid>/stat` 解析
+     */
+    fun isStale(
+        pid: Int,
+        snapshot: Map<Int, Long>,
+        alive: (Int) -> Boolean = { ProcessIdentity.isAlive(it) },
+        startTimeOf: (Int) -> Long? = { ProcessIdentity.currentInstance(it)?.startTime },
+    ): Boolean {
+        if (!alive(pid)) return true
+        val current = startTimeOf(pid) ?: return true
+        val known = snapshot[pid] ?: return false
+        return current != known
     }
 }

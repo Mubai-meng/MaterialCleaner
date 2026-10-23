@@ -69,10 +69,15 @@ ext {
     // D 日志统计与通知体系）全部合入，按用户决定统一到 5.5.0 / 550。
     // 2026-10-22：5.5.1 / 551 = 第32批看门狗修复（停滞判定必须有「过滤流确有新行」
     // 的证据，此前单 tag tail 空闲期必被误杀；实测 48 次无证据强杀）。
-    // 上一版 5.0.1 / 501 = 2026-10-20 主界面「已配置应用」加载提速那次。
+    // 2026-10-23：5.5.7 / 557 = 第38批 P2 修复。普查侧 `VfsLayerController.buildPidFlag`
+    // 此前直接拿 pid 读 /proc/<pid>/mountinfo，无存活校验；进程退出且 pid 被复用后
+    // 会读到**新进程**的 mountinfo（空数组）⇒ 误判 NOT_MOUNTED（实测 3 个夸克进程，
+    // 同时 UI 显示「已挂载」）。修法：采集 starttime 快照 + 三元判定（已消失 /
+    // stat 不可读 / starttime 不一致）后跳过，不进 managed 分母。
+    // 上一版 5.5.6 / 556 = 第37批白名单修复。
     // 若要切回上游口径，把下面一行改回 `versionCode = gitCommitCount` 即可。
-    versionCode = 556
-    versionName = '5.5.6'
+    versionCode = 557
+    versionName = '5.5.7'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 
