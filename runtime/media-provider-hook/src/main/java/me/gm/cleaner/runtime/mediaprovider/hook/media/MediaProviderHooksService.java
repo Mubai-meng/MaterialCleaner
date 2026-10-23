@@ -35,10 +35,14 @@ public class MediaProviderHooksService extends IMediaProviderHooksService.Stub {
     private final IBinder.DeathRecipient mCleanerServerDeathRecipient = () -> {
         mCleanerServerBinder = null;
         HookDataBusBridge.INSTANCE.setCallback(null);
+        // severity 用 W 而非 E：触发者是 **cleaner-server 进程退出**（重启 / 被系统回收），
+        // server 侧 binder 随之死亡是必然结果，紧接着 requestReRegister 重注册即可恢复。
+        // 与 registry death 同类：属设计内恢复路径，不是故障。
+        // 真正的故障是下面 setCleanerServerBinder 里 linkToDeath 抛异常的两条 E。
         NativeHookStatus.INSTANCE.markHookError(
                 ErrorCodes.INSTANCE.HOOK_JAVA_BINDER_DEAD,
                 "stage=server_callback_death, binder=cleaner_server_callback",
-                "MediaProviderHooksService", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
+                "MediaProviderHooksService", HookErrorJournal.SEVERITY_WARN, 0, 0L);
         requestReRegister("server callback died");
     };
 

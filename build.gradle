@@ -76,8 +76,8 @@ ext {
     // stat 不可读 / starttime 不一致）后跳过，不进 managed 分母。
     // 上一版 5.5.6 / 556 = 第37批白名单修复。
     // 若要切回上游口径，把下面一行改回 `versionCode = gitCommitCount` 即可。
-    versionCode = 558
-    versionName = '5.5.8'
+    versionCode = 559
+    versionName = '5.5.9'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 

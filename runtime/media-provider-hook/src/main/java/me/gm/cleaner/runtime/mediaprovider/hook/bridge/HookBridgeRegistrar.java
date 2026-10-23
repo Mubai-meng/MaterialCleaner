@@ -213,10 +213,16 @@ public final class HookBridgeRegistrar {
         }
         // 锁外触发：经既有重试门控合并，防止死亡风暴重启退避。
         Log.w(TAG, "Registry binder died, requesting re-register");
+        // severity 用 W 而非 E：本回调的触发者是 **app 进程退出**（被划掉 / 回收 /
+        // 覆盖安装），此时 registry binder 死亡是**必然且预期**的，紧接着就 requestReRegister
+        // 重注册。第 33 批出现 3 次、第 40 批 2 次，每次都对应一次 app pid 变更、
+        // 每次都在 gen 递增后恢复 —— 从未指向真实故障。
+        // 真正的故障是「linkToDeath 抛异常」（下面 watchRegistryBinder 里的两条 E），
+        // 那才代表连监听都建立不起来。降级只改字面量，不新增任何运行时路径。
         NativeHookStatus.INSTANCE.markHookError(
                 ErrorCodes.INSTANCE.HOOK_JAVA_BINDER_DEAD,
                 "stage=registry_binder_death, generation=" + generation,
-                "HookBridgeRegistrar", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
+                "HookBridgeRegistrar", HookErrorJournal.SEVERITY_WARN, 0, 0L);
         MediaProviderHooksService.requestReRegister("registry died");
     }
 }
