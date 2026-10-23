@@ -16,6 +16,7 @@ import me.gm.cleaner.runtime.server.vfs.CensusVerdict
 import me.gm.cleaner.runtime.server.vfs.PidMountClassifier
 import me.gm.cleaner.runtime.server.vfs.VfsProcessCensus
 import me.gm.cleaner.runtime.server.vfs.VfsProcessCensusBuilder
+import me.gm.cleaner.runtime.server.vfs.VfsReportKeys
 import me.gm.cleaner.runtime.server.lifecycle.ObserverManager
 import me.gm.cleaner.runtime.server.storage.StorageEventListenerDelegate
 import me.gm.cleaner.runtime.server.orchestrator.LayerId
@@ -103,7 +104,7 @@ class VfsLayerController {
         val userIds = mutableListOf<Int>()
         val startUpAwarePids = observer.getStartUpAwarePids(packageName)
         val mountFailedPids = observer.getMountFailedPids()
-        val mkdir = observer.getMountedPackages().contains(packageName)
+        val mkdir = observer.getPreparedPackages().contains(packageName)
         // 只有已配置重定向的包才走 uid 权威判定，非重定向包保持 pkgList 语义，
         // 避免把不在重定向配置中的查询误判成没有进程。
         val uidMappingReady = VfsRuntimePolicy.getStorageRedirectPackages()
@@ -175,7 +176,7 @@ class VfsLayerController {
             ?: return empty
         val startUpAwarePids = observer.getAllStartUpAwarePids()
         val mountFailedPids = observer.getMountFailedPids()
-        val mountedPackages = observer.getMountedPackages()
+        val preparedPackages = observer.getPreparedPackages()
         val srPackages = VfsRuntimePolicy.getStorageRedirectPackages()
         val processes = selectProcesses(flags, startUpAwarePids)
         // 映射就绪用 uid 权威归属，未就绪保守回退 pkgList，绝不直接返回空。
@@ -209,7 +210,7 @@ class VfsLayerController {
                     userId,
                     startUpAwarePids,
                     mountFailedPids,
-                    mountedPackages.contains(packageName),
+                    preparedPackages.contains(packageName),
                 )
                 val status = statuses.getOrPut(packageName) { MutablePackageStatus() }
                 status.pids.add(procInfo.pid)
@@ -224,7 +225,7 @@ class VfsLayerController {
     fun collectReport(generation: Long, now: Long): LayerReport {
         val observer = ObserverManager.getObserver(BaseProcessObserver::class.java)
         return if (observer != null) {
-            val mountedPackages = observer.getMountedPackages().size
+            val preparedPackages = observer.getPreparedPackages().size
             val recordedPids = observer.getAllStartUpAwarePids().size
             val mountFailedPids = observer.getMountFailedPids().size
             val mountTotalAttempts = observer.getTotalMountAttempts()
@@ -252,11 +253,11 @@ class VfsLayerController {
                 },
                 metrics = mapOf(
                     "started" to "true",
-                    "configuredPackages" to VfsRuntimePolicy
+                    VfsReportKeys.CONFIGURED_PACKAGES to VfsRuntimePolicy
                         .getStorageRedirectPackages()
                         .size
                         .toString(),
-                    "mountedPackages" to mountedPackages.toString(),
+                    VfsReportKeys.PREPARED_PACKAGES to preparedPackages.toString(),
                     "recordedPids" to recordedPids.toString(),
                     "mountFailedPids" to mountFailedPids.toString(),
                     "mountTotalAttempts" to mountTotalAttempts.toString(),

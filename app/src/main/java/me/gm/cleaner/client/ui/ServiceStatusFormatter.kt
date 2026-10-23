@@ -94,14 +94,17 @@ object ServiceStatusFormatter {
         configured: Int,
     ): String {
         if (configured == 0) return s.get(R.string.storage_redirect_no_mount_rules)
-        val mountedPackages = layer.metrics["mountedPackages"]?.toIntOrNull() ?: 0
+        // 键名是 preparedPackages（原 mountedPackages）：语义为「目标目录已就绪的包数」，
+        // 不是挂载成功数（见 VfsReportKeys 的说明）。
+        val preparedPackages =
+            layer.metrics["preparedPackages"]?.toIntOrNull() ?: 0
         val recordedPids = layer.metrics["recordedPids"]?.toIntOrNull() ?: 0
         val failedPids = layer.metrics["mountFailedPids"]?.toIntOrNull() ?: 0
         val attempts = layer.metrics["mountTotalAttempts"]?.toIntOrNull() ?: 0
         val failures = layer.metrics["mountFailureCount"]?.toIntOrNull() ?: 0
         val parts = mutableListOf(s.get(R.string.service_status_configured_apps, configured))
-        if (mountedPackages > 0) {
-            parts += s.get(R.string.service_status_mounted_packages, mountedPackages)
+        if (preparedPackages > 0) {
+            parts += s.get(R.string.service_status_mounted_packages, preparedPackages)
         }
         if (recordedPids > 0) {
             parts += s.get(R.string.service_status_recorded_processes, recordedPids)

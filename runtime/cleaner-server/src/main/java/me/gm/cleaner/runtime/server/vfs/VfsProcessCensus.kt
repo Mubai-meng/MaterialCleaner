@@ -33,6 +33,14 @@ data class VfsProcessCensus(
     val detailShown: Int,
     val detailTotal: Int,
     val truncated: Boolean,
+    /**
+     * 本轮普查中**有进程在跑**的已配置包个数（按 packageName 去重）。
+     *
+     * 存在的唯一理由：`managedPids=0` 有两种完全相反的成因 —— 「目标应用没启动」
+     * （正常）与「判据失灵把所有目标进程漏掉」（故障）。第 39/40 批实测重启后
+     * 目标应用未启动时 managed 恒为 0，单看该值必然误判，故必须并列这个分母。
+     */
+    val packagesWithProcesses: Int = 0,
 ) {
     // ── 指标键契约（DiagnosticArchive 等消费方必须引用此处，不得另写字面量） ──
     companion object {
@@ -41,6 +49,7 @@ data class VfsProcessCensus(
         const val KEY_UNMANAGED = "vfsUnmanagedPids"
         const val KEY_SR_TOTAL = "srStatusTotal"
         const val KEY_SR_TRUNCATED = "srStatusTruncated"
+        const val KEY_PACKAGES_WITH_PROCESSES = "vfsPackagesWithProcesses"
     }
 
     fun toMetrics(): Map<String, String> = mapOf(
@@ -58,6 +67,7 @@ data class VfsProcessCensus(
         "srStatusShown" to detailShown.toString(),
         KEY_SR_TOTAL to detailTotal.toString(),
         KEY_SR_TRUNCATED to truncated.toString(),
+        KEY_PACKAGES_WITH_PROCESSES to packagesWithProcesses.toString(),
     )
 }
 
@@ -130,6 +140,10 @@ object VfsProcessCensusBuilder {
             detailShown = shown.size,
             detailTotal = entries.size,
             truncated = sorted.size > shown.size,
+            packagesWithProcesses = entries.asSequence()
+                .map { it.packageName }
+                .distinct()
+                .count(),
         )
     }
 }

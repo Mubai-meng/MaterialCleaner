@@ -339,16 +339,7 @@ object DiagnosticArchive {
         )
         // 目标进程（MediaProvider）定向取证：Hook 住在该进程内，其自身 tag
         //（FuseDaemon 等）不在本项目白名单内，只能按 pid 定向抓取。
-        addCommand(
-            zip,
-            "logs/logcat_media_provider_pid.txt",
-            "MPID=$(${'$'}(pidof com.android.providers.media.module " +
-                    "com.android.providers.media " +
-                    "com.google.android.providers.media.module 2>/dev/null | awk '{print ${'$'}1}')); " +
-                    "if [ -z \"${'$'}MPID\" ]; then " +
-                    "echo 'media provider process is not running (no pid found)'; " +
-                    "else /system/bin/logcat -d -v threadtime --pid=${'$'}MPID -t 2000; fi",
-        )
+        addCommand(zip, "logs/logcat_media_provider_pid.txt", mediaProviderPidLogcatCommand())
     }
 
     /**
@@ -454,6 +445,31 @@ object DiagnosticArchive {
             addCommand(zip, entry, command)
         }
     }
+
+    /**
+     * MediaProvider 定向 logcat 取证命令（`internal` 以支持 JVM 回归测试）。
+     *
+     * 这里的易错点只有一个，但代价很大：`$( )` **只能嵌套一层**。
+     * 历史缺陷用的是 `MPID=$($(pidof ...))` —— 外层 `$( )` 会先执行内层，
+     * 拿到 `9539` 这种字符串后再把它**当成命令**执行一次，于是：
+     *
+     * ```
+     * /system/bin/sh: 9539: inaccessible or not found
+     * media provider process is not running (no pid found)
+     * ```
+     *
+     * MPID 恒空 ⇒ 该文件长期误报「MediaProvider 没在跑」，而同一批的
+     * `media_provider_maps.txt` 用正确的 `for p in $(pidof ...)` 就能抓到 pid。
+     * 该文件是唯一能定向取到 Hook 宿主日志的通道（MediaProvider 自身 tag
+     * 不在 `LogTagFilter.TAGS` 白名单内），失效等于排查时丢失主要证据。
+     */
+    internal fun mediaProviderPidLogcatCommand(): String =
+            "MPID=$(pidof com.android.providers.media.module " +
+                    "com.android.providers.media " +
+                    "com.google.android.providers.media.module 2>/dev/null | awk '{print $1}'); " +
+                    "if [ -z \"${'$'}MPID\" ]; then " +
+                    "echo 'media provider process is not running (no pid found)'; " +
+                    "else /system/bin/logcat -d -v threadtime --pid=${'$'}MPID -t 2000; fi"
 
     private fun addCommand(zip: ZipOutputStream, entryName: String, command: String) {
         val result = DiagnosticCommandRunner.runCommand(command)

@@ -3,6 +3,7 @@ package me.gm.cleaner.runtime.server
 import me.gm.cleaner.runtime.server.orchestrator.MediaProviderHookLayerReporter
 import me.gm.cleaner.runtime.server.orchestrator.NativeHookLayerReporter
 import me.gm.cleaner.runtime.server.vfs.VfsProcessCensus
+import me.gm.cleaner.runtime.server.vfs.VfsReportKeys
 import org.json.JSONObject
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -29,6 +30,8 @@ class DiagnosticArchiveKeySignalsTest {
         unmanaged: Int = 2,
         srTotal: Int = 12,
         srTruncated: Boolean = false,
+        packagesWithProcesses: Int? = 2,
+        configuredPackages: Int? = 7,
     ): JSONObject {
         val epoch = if (epochConsistent) "epoch-a" else "epoch-b"
         return JSONObject().apply {
@@ -49,6 +52,12 @@ class DiagnosticArchiveKeySignalsTest {
                 put(VfsProcessCensus.KEY_UNMANAGED, unmanaged)
                 put(VfsProcessCensus.KEY_SR_TOTAL, srTotal)
                 put(VfsProcessCensus.KEY_SR_TRUNCATED, srTruncated)
+                if (packagesWithProcesses != null) {
+                    put(VfsProcessCensus.KEY_PACKAGES_WITH_PROCESSES, packagesWithProcesses)
+                }
+                if (configuredPackages != null) {
+                    put(VfsReportKeys.CONFIGURED_PACKAGES, configuredPackages)
+                }
             })
         }
     }
@@ -155,6 +164,68 @@ class DiagnosticArchiveKeySignalsTest {
         val empty = JSONObject()
         assertEquals("", renderEn(empty))
         assertEquals("", renderZh(empty))
+    }
+
+    // ── 第 40 批 P3-2：managed=0 的可解释性 ──────────────────────────────────
+
+    /**
+     * 第 39/40 批真实形态：目标应用一个都没启动 ⇒ managed=0、observ 全是非目标进程。
+     * 此时概览必须同时给出「有进程在跑的目标包数 0/7」并注明「无样本」，否则
+     * `managed=0, unmanaged=123` 会被读成「123 个进程失去接管」。
+     */
+    @Test
+    fun `无目标进程时明确标注非判据失灵`() {
+        val out = renderEn(statusJson(
+            fuseState = "HEALTHY", syncVerdict = "SYNCED",
+            epochConsistent = true, policySynced = true,
+            managed = 0, unmanaged = 123,
+            packagesWithProcesses = 0, configuredPackages = 7,
+        ))
+        assertTrue(out.contains("managed=0"))
+        assertTrue(out.contains("targetsRunning=0/7"))
+        assertTrue(out.contains("no target process running"))
+        assertTrue(out.contains("NOT a verdict failure"))
+    }
+
+    @Test
+    fun `中文概览同样标注无样本`() {
+        val out = renderZh(statusJson(
+            fuseState = "HEALTHY", syncVerdict = "SYNCED",
+            epochConsistent = true, policySynced = true,
+            managed = 0, unmanaged = 125,
+            packagesWithProcesses = 0, configuredPackages = 7,
+        ))
+        assertTrue(out.contains("有进程在跑=0/7"))
+        assertTrue(out.contains("目标应用均未运行"))
+        assertTrue(out.contains("不等于判据失灵"))
+    }
+
+    /** 有目标进程时必须真实透出，且不得出现「无样本」的免责话术。 */
+    @Test
+    fun `有目标进程时不出现无样本标注`() {
+        val out = renderEn(statusJson(
+            fuseState = "HEALTHY", syncVerdict = "SYNCED",
+            epochConsistent = true, policySynced = true,
+            managed = 5, unmanaged = 120,
+            packagesWithProcesses = 1, configuredPackages = 7,
+        ))
+        assertTrue(out.contains("managed=5"))
+        assertTrue(out.contains("targetsRunning=1/7"))
+        assertFalse(out.contains("no target process running"))
+    }
+
+    /** 缺新键时退回旧格式，不得崩、不得凭空断言「无样本」。 */
+    @Test
+    fun `缺少新键时退回旧格式`() {
+        val out = renderEn(statusJson(
+            fuseState = "HEALTHY", syncVerdict = "SYNCED",
+            epochConsistent = true, policySynced = true,
+            managed = 0, unmanaged = 10,
+            packagesWithProcesses = null, configuredPackages = null,
+        ))
+        assertTrue(out.contains("managed=0, unmanaged=10"))
+        assertFalse(out.contains("targetsRunning="))
+        assertFalse(out.contains("no target process running"))
     }
 
     private fun assertEquals(expected: String, actual: String) {

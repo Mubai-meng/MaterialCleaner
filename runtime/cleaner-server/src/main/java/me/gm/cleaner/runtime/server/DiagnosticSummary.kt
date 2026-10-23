@@ -10,6 +10,7 @@ import me.gm.cleaner.runtime.server.orchestrator.MediaProviderHookLayerReporter
 import me.gm.cleaner.runtime.server.orchestrator.NativeHookLayerReporter
 import me.gm.cleaner.runtime.server.orchestrator.ServerErrorJournal
 import me.gm.cleaner.runtime.server.vfs.VfsProcessCensus
+import me.gm.cleaner.runtime.server.vfs.VfsReportKeys
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -212,11 +213,27 @@ internal fun StringBuilder.appendKeySignals(status: JSONObject) {
         appendLine("- MediaProvider recovery: state=${mp.optString("state", "UNKNOWN")}, " +
                 "wakeOnly=$wakeOnly, destructiveAttempts=$rounds/3")
     }
-    // VFS 分母
+    // VFS 分母。必须并列「有几个目标包真的有进程在跑」：
+    // managed=0 的两种成因（目标应用没启动 / 判据失灵）单看计数无法区分，
+    // 第 39/40 批都因此把「没样本」误读成「接管失效」。
     val unmanaged = vfs.optInt(VfsProcessCensus.KEY_UNMANAGED, -1)
     val managed = vfs.optInt(VfsProcessCensus.KEY_MANAGED, -1)
     if (unmanaged >= 0 && managed >= 0) {
-        appendLine("- VFS pids: managed=$managed, unmanaged=$unmanaged")
+        val withProcs = vfs.optInt(VfsProcessCensus.KEY_PACKAGES_WITH_PROCESSES, -1)
+        val configured = vfs.optInt(VfsReportKeys.CONFIGURED_PACKAGES, -1)
+        val ctx = if (withProcs >= 0 && configured >= 0) {
+            ", targetsRunning=$withProcs/$configured"
+        } else if (withProcs >= 0) {
+            ", targetsRunning=$withProcs"
+        } else {
+            ""
+        }
+        appendLine("- VFS pids: managed=$managed, unmanaged=$unmanaged" +
+                ctx + if (managed == 0 && withProcs == 0) {
+            " (no target process running — managed=0 is expected, NOT a verdict failure)"
+        } else {
+            ""
+        })
     }
     // srStatus 截断
     val truncated = vfs.optBoolean(VfsProcessCensus.KEY_SR_TRUNCATED, false)
@@ -248,11 +265,25 @@ internal fun StringBuilder.appendKeySignalsZhCn(status: JSONObject) {
         appendLine("- MediaProvider 恢复：状态=${mp.optString("state", "UNKNOWN")}，" +
                 "仅唤醒=$wakeOnly，破坏性尝试=$rounds/3")
     }
-    // VFS 分母
+    // VFS 分母（同英文版：必须并列目标包中"有进程在跑"的个数）
     val unmanaged = vfs.optInt(VfsProcessCensus.KEY_UNMANAGED, -1)
     val managed = vfs.optInt(VfsProcessCensus.KEY_MANAGED, -1)
     if (unmanaged >= 0 && managed >= 0) {
-        appendLine("- VFS 进程：已管理=$managed，未接管=$unmanaged")
+        val withProcs = vfs.optInt(VfsProcessCensus.KEY_PACKAGES_WITH_PROCESSES, -1)
+        val configured = vfs.optInt(VfsReportKeys.CONFIGURED_PACKAGES, -1)
+        val ctx = if (withProcs >= 0 && configured >= 0) {
+            "，有进程在跑=$withProcs/$configured"
+        } else if (withProcs >= 0) {
+            "，有进程在跑=$withProcs"
+        } else {
+            ""
+        }
+        appendLine("- VFS 进程：已管理=$managed，未接管=$unmanaged" + ctx +
+                if (managed == 0 && withProcs == 0) {
+                    "（目标应用均未运行，无样本 —— 不等于判据失灵）"
+                } else {
+                    ""
+                })
     }
     // srStatus 截断
     val truncated = vfs.optBoolean(VfsProcessCensus.KEY_SR_TRUNCATED, false)

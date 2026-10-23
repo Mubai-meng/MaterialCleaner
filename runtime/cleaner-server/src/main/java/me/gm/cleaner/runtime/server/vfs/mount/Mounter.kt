@@ -699,7 +699,15 @@ class Mounter {
         mountFailedPids.toSet()
     }
 
-    fun getMountedPackages(): Set<String> = synchronized(lock) {
+    /**
+     * 目标目录（mkdir）已就绪的包集合。
+     *
+     * 语义边界：`mkdirRecords` 只在 `RuntimeFileUtils.auto_prepare_dirs()` **成功**时
+     * 写入，所以这里回答的是「目录建好了没」，**不能**用来判断挂载是否成功
+     * （挂载成功看 `check_mounts` / `vfsMountedPids`）。原名 getMountedPackages
+     * 已在第 38、40 两批把排查方向带偏。
+     */
+    fun getPreparedPackages(): Set<String> = synchronized(lock) {
         mkdirRecords.keySet().toSet()
     }
 

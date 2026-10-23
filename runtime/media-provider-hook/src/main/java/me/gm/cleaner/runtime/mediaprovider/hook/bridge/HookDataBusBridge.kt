@@ -52,9 +52,22 @@ object HookDataBusBridge {
     @Volatile
     private var fallbackDisabledUntilElapsed = 0L
 
+    /**
+     * 是否**曾经**拿到过 server 注入的回调。
+     *
+     * 用于把「启动竞态」与「桥接断开」分开：MediaProvider 进程往往比 server 先起来
+     * （第 40 批实测写事件发生在 elapsed=33.6s，而 server 注入回调在 35.5s），
+     * 此时 `callback==null` 且文件兜底被 SELinux 拒绝，属于设计内必然失败，
+     * 不该进 hook_errors（否则每次开机都固定多一条 W，淹没真信号）。
+     * 反过来，**曾经有过回调而后来丢了**，那才是真异常，仍需留痕。
+     */
+    @Volatile
+    private var everHadCallback = false
+
     fun setCallback(value: ICleanerServerCallback?) {
         callback = value
         if (value != null) {
+            everHadCallback = true
             // server 重新注册回调：把断开期间暂存的事件补写回去。
             drainPending(value)
         }
@@ -129,11 +142,15 @@ object HookDataBusBridge {
         val seq = DataBus.writeEvent(queue, content)
         if (seq < 0L) {
             fallbackDisabledUntilElapsed = SystemClock.elapsedRealtime() + FALLBACK_COOLDOWN_MS
-            reportBridgeFailure(
-                ErrorCodes.HOOK_JAVA_BUS_WRITE_FAILED,
-                "writeEvent fallback returned $seq: $queue, cooling down " +
-                        "${FALLBACK_COOLDOWN_MS}ms",
-            )
+            // 判定见 FallbackFailurePolicy：启动竞态（从未有回调）不入库，
+            // 桥接真断（曾有过回调）必须留痕。
+            if (FallbackFailurePolicy.shouldReport(everHadCallback)) {
+                reportBridgeFailure(
+                    ErrorCodes.HOOK_JAVA_BUS_WRITE_FAILED,
+                    "writeEvent fallback returned $seq: $queue, cooling down " +
+                            "${FALLBACK_COOLDOWN_MS}ms",
+                )
+            }
             // 兜底也写不进去：暂存而不是丢弃，等 Binder 恢复后补写。
             bufferPending(queue, content)
         }

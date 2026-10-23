@@ -67,4 +67,40 @@ class VfsProcessCensusBuilderTest {
         assertEquals("", census.detail)
         assertFalse(census.truncated)
     }
+
+    /**
+     * 第 40 批 P3-2：`managedPids=0` 必须能被区分成「没目标进程」而非「判据失灵」。
+     * packagesWithProcesses 是唯一的并列分母 —— 按 packageName 去重，同包多进程只算一个。
+     */
+    @Test
+    fun `packagesWithProcesses 按包去重`() {
+        val census = VfsProcessCensusBuilder.build(
+            sampledAt = 1L,
+            entries = listOf(
+                entry("a", 1, PackageStatus.PID_FLAG_MOUNTED),
+                entry("a", 2, PackageStatus.PID_FLAG_MOUNTED),
+                entry("a", 3, PackageStatus.PID_FLAG_MOUNTED),
+                entry("b", 4, PackageStatus.PID_FLAG_MOUNTED),
+            ),
+            unattributedPids = 120,
+        )
+        // 4 个进程分布在 2 个包
+        assertEquals(4, census.managedPids)
+        assertEquals(2, census.packagesWithProcesses)
+        assertEquals("2", census.toMetrics()[VfsProcessCensus.KEY_PACKAGES_WITH_PROCESSES])
+    }
+
+    @Test
+    fun `没有目标进程时 packagesWithProcesses 为 0 且指标键始终存在`() {
+        // 第 40 批现场形态：125 个进程全部不属于重定向包
+        val census = VfsProcessCensusBuilder.build(
+            sampledAt = 1L, entries = emptyList(), unattributedPids = 125,
+        )
+        assertEquals(0, census.managedPids)
+        assertEquals(125, census.unmanagedPids)
+        assertEquals(0, census.packagesWithProcesses)
+        // 键必须始终存在：摘要靠它区分「无样本」与「判据失灵」，
+        // 缺失会被 optInt 的默认值 -1 掩盖成「不知道」。
+        assertEquals("0", census.toMetrics()[VfsProcessCensus.KEY_PACKAGES_WITH_PROCESSES])
+    }
 }

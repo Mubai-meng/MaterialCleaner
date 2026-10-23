@@ -87,7 +87,8 @@ abstract class BaseProcessObserver : BaseObserver() {
 
     fun getMountFailedPids(): Set<Int> = mounter.getMountFailedPids()
 
-    fun getMountedPackages(): Set<String> = mounter.getMountedPackages()
+    /** 语义：目标目录（mkdir）已就绪的包，**不是**挂载成功的包。 */
+    fun getPreparedPackages(): Set<String> = mounter.getPreparedPackages()
 
     fun getTotalMountAttempts(): Int = mounter.getTotalAttempts()
 

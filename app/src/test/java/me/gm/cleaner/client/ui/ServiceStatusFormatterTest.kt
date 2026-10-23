@@ -107,7 +107,7 @@ class ServiceStatusFormatterTest {
         val layer = OrchestratedLayerStatus(
             state = "HEALTHY",
             metrics = mapOf(
-                "mountedPackages" to "3",
+                "preparedPackages" to "3",
                 "recordedPids" to "5",
                 "mountFailedPids" to "1",
                 "mountFailureCount" to "2",
