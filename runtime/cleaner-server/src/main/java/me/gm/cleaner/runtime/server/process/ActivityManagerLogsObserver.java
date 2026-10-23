@@ -359,6 +359,14 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
         for (int i = 0; i < 0x14; ++i) {
             phantomProcessRecord[i] ^= (i + 0x14) % 19;
         }
+        // 每行解析都要用到这三个常量。旧实现在**每行**里做 `new String(char[])`，
+        // 而本通道实测 700–1500 行/s（见类注释），等于每秒上千次解码 + 上千个短命
+        // String —— 纯属把 server 进程的 GC 压力抬上去。语义完全不变，只是把解码
+        // 提到循环外，三个变量此后只读（lambda 捕获 safely）。
+        final String amStartProcText = new String(amStartProc);
+        final String amKillingText = new String(amKilling);
+        final String phantomProcessRecordText = new String(phantomProcessRecord);
+
         mExecutor.execute(() -> {
             Process process = null;
             try {
@@ -395,7 +403,7 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                         // 时 readLine 不返回，心跳停滞，看门狗据此判假活（区别于 executor 关闭的真死）。
                         mLastReadAtMs = android.os.SystemClock.elapsedRealtime();
                         try {
-                            final var parsedStart = parseStartProcLine(line, new String(amStartProc));
+                            final var parsedStart = parseStartProcLine(line, amStartProcText);
                             if (parsedStart != null) {
                                 if (!mHasAmStart) {
                                     mHasAmStart = true;
@@ -480,7 +488,7 @@ public class ActivityManagerLogsObserver extends BaseProcessObserver {
                                 }
                             } else {
                                 final var parsedKilling = parseKillingLine(
-                                        line, new String(amKilling), new String(phantomProcessRecord));
+                                        line, amKillingText, phantomProcessRecordText);
                                 if (parsedKilling == null) {
                                     continue;
                                 }

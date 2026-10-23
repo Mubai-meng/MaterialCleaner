@@ -10,6 +10,7 @@ import me.gm.cleaner.runtime.server.orchestrator.HookRecoveryCoordinator
 import me.gm.cleaner.runtime.server.orchestrator.MediaProviderRecoveryStrategy
 import me.gm.cleaner.runtime.server.orchestrator.RuntimeStatusAggregator
 import me.gm.cleaner.runtime.server.orchestrator.RuntimeRecoverySnapshot
+import me.gm.cleaner.runtime.server.orchestrator.StartupTiming
 
 /**
  * 三层编排器。
@@ -120,12 +121,34 @@ class LayerOrchestrator(
         eventConsumerScheduler.start()
         val schedulerMs = lap()
 
+        // 九段耗时先落**内存事实**再打日志：ColorOS LOG_FLOWCTRL 按进程限额丢日志，
+        // 这行汇总连续两批（第41、42批）整行丢失，而 initialize 显然已跑完
+        // ⇒ 只靠日志无法回答「启动花了多久、卡在哪一步」。StartupTiming 的快照由
+        // RuntimeStatusAggregator 渲染进 orchestrated_status.json 与诊断包，
+        // 走的是实时内存值，不受日志是否被丢弃影响。
+        val segments = linkedMapOf(
+            StartupTiming.KEY_GATEWAY to gatewayMs,
+            StartupTiming.KEY_OBSERVERS to observersMs,
+            StartupTiming.KEY_PACKAGE_RECEIVER to packageReceiverMs,
+            StartupTiming.KEY_AUTO_LOGGING to autoLoggingMs,
+            StartupTiming.KEY_PUBLISH_ALL to publishMs,
+            StartupTiming.KEY_REMOUNT to remountMs,
+            StartupTiming.KEY_HOOK_REFRESH to hookRefreshMs,
+            StartupTiming.KEY_BINDER to binderMs,
+            StartupTiming.KEY_SCHEDULER to schedulerMs,
+        )
+        val elapsedMs = checkpoint - startedAt
+        StartupTiming.record(
+            startedAtWallMillis = startedAt,
+            elapsedMs = elapsedMs,
+            segmentsMs = segments,
+        )
+        // 日志行格式与历史完全一致（同一批键、同一顺序、同样一次 Log.i 调用），
+        // 现由 segments 单源生成，避免日志与快照两处各自硬编码而漂移。
         Log.i(
             TAG,
-            "initialize done in ${checkpoint - startedAt}ms" +
-                " (gateway=${gatewayMs}, observers=${observersMs}, pkgReceiver=${packageReceiverMs}," +
-                " autoLogging=${autoLoggingMs}, publishAll=${publishMs}, remount=${remountMs}," +
-                " hookRefresh=${hookRefreshMs}, binder=${binderMs}, scheduler=${schedulerMs})",
+            "initialize done in ${elapsedMs}ms (" +
+                segments.entries.joinToString(", ") { "${it.key}=${it.value}" } + ")",
         )
     }
 

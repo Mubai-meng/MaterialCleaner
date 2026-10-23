@@ -49,20 +49,51 @@ object FuseRedirectStats {
         // 否则 `/storage/emulated/0/Download/` 会被压成 `/storage/emulated/0`，
         // 恰好把"是否落在 target 子目录下"这个唯一要回答的问题抹掉。
         val isDirectory = end < path.length
-        val trimmed = path.substring(0, end)
-        if (isDirectory) return capSegments(trimmed, maxSegments)
-        val cut = trimmed.lastIndexOf('/')
-        val dir = if (cut <= 0) trimmed else trimmed.substring(0, cut)
-        return capSegments(dir, maxSegments)
+        // 不切 substring：直接把「有效区间终点」传给 capSegments。
+        // 旧实现在这里产生 1–2 个中间 String（trimmed / dir），纯属给 FUSE 热路径
+        // 添垃圾（见 capSegments 的注释）。
+        val dirEnd = if (isDirectory) {
+            end
+        } else {
+            val cut = path.lastIndexOf('/', end - 1)
+            if (cut <= 0) end else cut
+        }
+        return capSegments(path, dirEnd, maxSegments)
     }
 
-    /** 段数上限：超出即截断。顺带把重复斜杠规范化掉。 */
-    private fun capSegments(path: String, maxSegments: Int): String {
-        val absolute = path.startsWith("/")
-        val parts = path.split('/').filter { it.isNotEmpty() }
-        if (parts.isEmpty()) return "/"
-        val kept = if (parts.size <= maxSegments) parts else parts.take(maxSegments)
-        return (if (absolute) "/" else "") + kept.joinToString("/")
+    /**
+     * 取 `path[0, end)` 的前 [maxSegments] 段，并把重复斜杠规范化掉。
+     *
+     * **零中间分配的扫描实现**。旧实现是
+     * `path.split('/').filter { … }.take(n).joinToString("/")` —— 对一条
+     * `/storage/emulated/0/Download/a.apk` 会先切出 6 个段字符串 + 2 个 List
+     * + 1 个结果串，**单次十余个短命对象**。而本函数唯一的调用方
+     * [FuseRedirectCounters.record] 跑在 FUSE 热路径上（每个未命中路径一次），
+     * 相册/媒体扫描时可达上千次/秒，等于每秒上万个垃圾对象压给 MediaProvider 进程。
+     *
+     * 现在的开销固定为「1 个结果 String + 1 个可增长缓冲」，且输出与原实现逐字相同
+     * （[FuseRedirectStatsTest] 的 8 组用例含空路径 / 纯斜杠 / 连续斜杠 / 段数上限
+     * 全都钉住这一等价性）。
+     */
+    private fun capSegments(path: String, end: Int, maxSegments: Int): String {
+        val out = StringBuilder(end.coerceAtMost(64))
+        if (end > 0 && path[0] == '/') out.append('/')
+        var i = 0
+        var segments = 0
+        var any = false
+        while (i < end) {
+            while (i < end && path[i] == '/') i++
+            if (i >= end) break
+            val start = i
+            while (i < end && path[i] != '/') i++
+            segments++
+            if (segments > maxSegments) break
+            if (any) out.append('/')
+            out.append(path, start, i)
+            any = true
+        }
+        // 没有任何段 ⇒ 与旧实现的 `parts.isEmpty() ⇒ "/"` 对齐
+        return if (any) out.toString() else "/"
     }
 
     /** 一次重定向评估的归一化结果。 */

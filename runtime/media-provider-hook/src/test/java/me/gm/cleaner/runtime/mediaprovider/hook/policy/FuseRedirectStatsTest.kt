@@ -88,6 +88,17 @@ class FuseRedirectStatsTest {
     }
 
     @Test
+    fun `纯斜杠与单段边界`() {
+        // capSegments 改为零分配扫描实现后（第43批），这几条是它与旧 split 版
+        // 最容易分叉的地方：没有任何「段」时必须退化成 "/"，而不是空串。
+        assertEquals("/", FuseRedirectStats.prefixOf("//"))
+        assertEquals("/", FuseRedirectStats.prefixOf("///"))
+        assertEquals("/", FuseRedirectStats.prefixOf("//a"))
+        assertEquals("/a", FuseRedirectStats.prefixOf("/a/"))
+        assertEquals("a", FuseRedirectStats.prefixOf("a"))
+    }
+
+    @Test
     fun `outcome 只有真正改写才算命中`() {
         assertEquals(
             FuseRedirectStats.Outcome.REDIRECTED,

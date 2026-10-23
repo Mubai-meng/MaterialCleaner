@@ -32,6 +32,17 @@ internal class FuseRedirectCounters {
     @Volatile
     private var lastMissPrefix = ""
 
+    /**
+     * 上一次观测到的**原始**未命中路径。
+     *
+     * 只用于「同一路径被反复访问」的零分配短路：MediaProvider 的常态是同一条
+     * 路径在一次查询链里被问很多次（FUSE 每个 entry 都会走一次评估）。旧实现
+     * 每次都重算前缀，而重算的开销远大于一次字符串内容比较。
+     * 命中短路时前缀必然未变（同一字符串），故对诊断语义**完全等价**。
+     */
+    @Volatile
+    private var lastMissPath = ""
+
     val dedupedEvents: Long
         get() = dedupedCount
 
@@ -46,6 +57,12 @@ internal class FuseRedirectCounters {
             return
         }
         missed.incrementAndGet()
+        // 同一路径反复访问是常态：内容比较（零分配）比重算前缀便宜一个数量级。
+        // 短路不改变任何可观测语义 —— 同一 path 的前缀必然相同。
+        // `isNotEmpty()` 这一半是刻意的：空路径（真实 FUSE 不会给，但单测会）必须
+        // 继续走原逻辑，否则「首个空 path 也要记 lastMissPackage」的行为会被悄悄改掉。
+        if (lastMissPath.isNotEmpty() && path == lastMissPath) return
+        lastMissPath = path
         if (lastMissPackage != packageName || lastMissPrefix.isEmpty()) {
             lastMissPackage = packageName
             lastMissPrefix = FuseRedirectStats.prefixOf(path)

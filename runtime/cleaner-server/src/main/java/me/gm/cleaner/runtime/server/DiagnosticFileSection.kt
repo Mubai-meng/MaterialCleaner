@@ -41,6 +41,22 @@ import java.util.zip.ZipOutputStream
 internal const val MAX_TEXT_FILE_BYTES = 512 * 1024
 
 /**
+ * 启动窗口段（`cleaner-boot-*`）的归档预算：**1536 KiB**。
+ *
+ * 为什么比其它条目大 3 倍：这一段是 `-b main,system,crash` **无 tag 过滤**的全系统
+ * 日志，实测 60 秒产出 7,249,920 B（**118 KB/s**）。512 KiB 只够 **4.3 秒**，
+ * 起机关键窗口结构性不可见（第 42 批实测单文件覆盖 0.97 s / 2.89 s）。
+ *
+ * 数值依据（第 42 批实机样本外推）：`E`/`F` 行约占 12% 字节 ≈ 860 KB，
+ * 分级裁剪给 CRITICAL 段 65% 预算 ⇒ 1536 × 0.65 ≈ 995 KB > 860 KB，
+ * 因此 **E/F 能全留（step=1）**；剩余预算给白名单行与时间轴采样。
+ * 降到 512 KiB 会让 E/F 自己就被采样，等于回到「证据随机丢弃」。
+ *
+ * 最多 [MAX_AUTO_LOG_FILES] 量的启动段（2 个分片）× 1536 KiB ≈ 3 MB，可接受。
+ */
+internal const val MAX_BOOT_LOG_BYTES = 1536 * 1024
+
+/**
  * `logcat -t` 的行数上限：**按原始行计**，本机 ~700–1500 行/s ⇒ 30000 行 ≈ 20–40 s 覆盖窗。
  * 旧值 5000/3000 只覆盖几秒，等于让"聚焦运行日志"变成空文件（实测过滤后仅 7 行）。
  */
@@ -131,6 +147,15 @@ internal fun readFileTail(file: File, maxBytes: Int): String {
     return output.toString(StandardCharsets.UTF_8.name())
 }
 
+/**
+ * 只取文件头部 [maxBytes]。
+ *
+ * ⚠️ 当前**无调用点**：启动段（`cleaner-boot-*`）已改走
+ * [DiagnosticBootLogTrimmer.addBootLogTrimmed] 的分级裁剪 —— 纯头部在实测
+ * 118 KB/s 的洪峰下只覆盖 4.3 秒，等于把起机中段证据整段丢掉（第 42 批实测
+ * 单文件覆盖 0.97 s）。保留本函数供「确实只关心开头 N 字节」的场景，
+ * **不要**再用它处理启动段。
+ */
 internal fun addFileHead(zip: ZipOutputStream, file: File, entryName: String, maxBytes: Int) {
     runCatching {
         val content = buildString {

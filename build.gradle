@@ -75,9 +75,15 @@ ext {
     // 同时 UI 显示「已挂载」）。修法：采集 starttime 快照 + 三元判定（已消失 /
     // stat 不可读 / starttime 不一致）后跳过，不进 managed 分母。
     // 上一版 5.5.6 / 556 = 第37批白名单修复。
+    // 2026-10-23：5.5.10 / 560 = 第42批两项诊断可见性修复。
+    // ① `initialize done in …` 整行在 ColorOS LOG_FLOWCTRL 下连续两批 100% 丢失
+    //    ⇒ 分段耗时双写进程内 StartupTiming（orchestrated_status.json 的 startupTiming 段）。
+    // ② boot log 归档 `keptFirst=512KB` 在 118 KB/s 洪峰下只覆盖 4.3 秒，起机关键
+    //    窗口结构性不可见 ⇒ 改为「E/F 全留 + 项目 tag 全留 + 其余均匀采样」的分级裁剪，
+    //    全时间轴可见且关键证据零丢失。
     // 若要切回上游口径，把下面一行改回 `versionCode = gitCommitCount` 即可。
-    versionCode = 559
-    versionName = '5.5.9'
+    versionCode = 560
+    versionName = '5.5.10'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 

@@ -9,6 +9,7 @@ import me.gm.cleaner.core.storage.redirect.databus.DataBusProtocol
 import me.gm.cleaner.runtime.server.orchestrator.MediaProviderHookLayerReporter
 import me.gm.cleaner.runtime.server.orchestrator.NativeHookLayerReporter
 import me.gm.cleaner.runtime.server.orchestrator.ServerErrorJournal
+import me.gm.cleaner.runtime.server.orchestrator.StartupTiming
 import me.gm.cleaner.runtime.server.vfs.VfsProcessCensus
 import me.gm.cleaner.runtime.server.vfs.VfsReportKeys
 import org.json.JSONArray
@@ -72,8 +73,9 @@ internal fun buildManifest(server: CleanerServer): String = buildString {
 /**
  * 归档会截断的条目预告。
  *
- * 动机：主环形/崩溃通道 `logs/auto/<name>.log` 保留**首尾各半**；启动段只保留
- * **头部** [MAX_TEXT_FILE_BYTES]（512 KiB）。
+ * 动机：主环形/崩溃通道 `logs/auto/<name>.log` 保留**首尾各半**；启动段按
+ * **分级裁剪**（E/F 与项目 tag 逐字全留 + 其余均匀采样，预算
+ * [MAX_BOOT_LOG_BYTES]）。
  * 实测一次 16,424,932 B 的会话日志进包后只剩 524,338 B（**2.9%**）。此前这一事实
  * 只写在被截断文件自己的第 4 行（`truncated=head omitted, tailBytes=…`），
  * 而 `manifest.txt` / `summary.txt` 里毫无提示 —— 只看入口文件的人会把
@@ -88,15 +90,27 @@ internal fun truncationSummary(): String {
             ?.filter { isRegularFileNoFollow(it) && AutoLogging.isLogFileName(it.name) }
             ?: emptyList(),
     )
-    val truncated = files.filter { it.length() > MAX_TEXT_FILE_BYTES }
+    val truncated = files.filter { it.length() > archiveBudgetBytes(it) }
     if (truncated.isEmpty()) {
-        return "none?autoLogs=bootHead+ringHeadTail(${MAX_TEXT_FILE_BYTES}B)"
+        return "none?autoLogs=bootTiered(${MAX_BOOT_LOG_BYTES}B)+ringHeadTail(${MAX_TEXT_FILE_BYTES}B)"
     }
     return truncated.joinToString("; ") { file ->
-        val kept = if (AutoLogging.isBootLogFileName(file.name)) "keptFirst" else "keptHeadTail"
-        "${file.name} $kept=${MAX_TEXT_FILE_BYTES}B dropped=${file.length() - MAX_TEXT_FILE_BYTES}B"
+        val budget = archiveBudgetBytes(file)
+        // boot 段不是「砍掉尾部」，而是分级裁剪（E/F 与项目 tag 逐字全留 +
+        // 其余均匀采样）。因此这里不能用 dropped= 表述，否则会被读成「尾部丢了」。
+        val kept = if (AutoLogging.isBootLogFileName(file.name)) "keptTiered" else "keptHeadTail"
+        "${file.name} $kept=${budget}B overBudget=${file.length() - budget}B"
     }
 }
+
+/**
+ * 单个归档条目的字节预算。
+ *
+ * 启动段**必须**用更大的预算：[MAX_BOOT_LOG_BYTES] 的依据见其 KDoc ——
+ * 512 KiB 在 118 KB/s 的洪峰下只覆盖 4.3 秒，连 E/F 行本身都会被采样掉。
+ */
+internal fun archiveBudgetBytes(file: File): Int =
+    if (AutoLogging.isBootLogFileName(file.name)) MAX_BOOT_LOG_BYTES else MAX_TEXT_FILE_BYTES
 
 internal fun buildSummary(server: CleanerServer): String = buildString {
     appendLine("Material Cleaner diagnostics summary")
@@ -116,7 +130,10 @@ internal fun buildSummary(server: CleanerServer): String = buildString {
     appendLine("- logs/logcat_crash_recent.txt and logs/logcat_media_provider_pid.txt cover crash and hook-host evidence.")
     appendLine("- ⚠️ This archive is NOT the full log: ring/crash logs keep the HEAD and the TAIL")
     appendLine("  (half of the budget each, middle omitted); boot logs")
-    appendLine("  (cleaner-boot-*, first 60 s after server start) keep only the HEAD.")
+    appendLine("  (cleaner-boot-*, first 60 s after server start) are TIER-TRIMMED, not head-cut:")
+    appendLine("  every E/F line and every project-tag line is kept VERBATIM, and the remaining")
+    appendLine("  noise is uniformly sampled, so the WHOLE time axis stays visible. Read the")
+    appendLine("  'retention=' and 'step=' lines at the top of each boot log to see what was dropped.")
     appendLine("  See the 'truncation=' line in manifest.txt, and note logcat itself drops lines under")
     appendLine("  ColorOS LOG_FLOWCTRL per-process quota. Absence in this archive != did not happen.")
     appendLine("  In EMBEDDED hook mode (EMBEDDED_GOT_PATCH) native libs load from inside an APK/APEX, so")
@@ -183,6 +200,42 @@ internal fun buildSummary(server: CleanerServer): String = buildString {
 }
 
 /**
+ * 启动编排分段耗时（内存事实，源自 [StartupTiming]）。
+ *
+ * 为什么必须放进摘要：`initialize done in …` 日志行在 ColorOS `LOG_FLOWCTRL` 下
+ * 会被**整行**丢弃（第41、42 批全包检索命中 0 次），而"启动花了多久、卡在哪一步"
+ * 直接决定兼容层多久从 RECOVERING 转 HEALTHY。此前排障只能靠快照体积变化反推时点。
+ *
+ * 缺该段一律按"本次进程尚未完成 initialize"陈述，不臆断耗时。
+ */
+internal fun StringBuilder.appendStartupTiming(root: JSONObject, zh: Boolean) {
+    val timing = root.optJSONObject("startupTiming") ?: return
+    val elapsed = timing.optLong("elapsedMs", -1L)
+    if (elapsed < 0L) return
+    val segments = timing.optJSONObject("segmentsMs")
+    val detail = segments?.let { obj ->
+        StartupTiming.SEGMENT_ORDER.mapNotNull { name ->
+            val value = obj.optLong(name, -1L)
+            if (value < 0L) null else "$name=$value"
+        }.joinToString(", ")
+    } ?: ""
+    val attempt = timing.optInt("attempt", 0)
+    if (zh) {
+        appendLine(
+            "- 启动编排：总耗时=${elapsed}ms" +
+                (if (detail.isEmpty()) "" else "（$detail）") +
+                (if (attempt > 1) "，第 $attempt 次" else ""),
+        )
+    } else {
+        appendLine(
+            "- Startup: elapsed=${elapsed}ms" +
+                (if (detail.isEmpty()) "" else " ($detail)") +
+                (if (attempt > 1) ", attempt #$attempt" else ""),
+        )
+    }
+}
+
+/**
  * P1 诊断质量：陈列 status JSON 中的关键信号。
  *
  * 职责边界：本函数只**陈列事实**，不做状态裁决——裁决归 Reporter
@@ -191,6 +244,8 @@ internal fun buildSummary(server: CleanerServer): String = buildString {
  * 正是历史上"摘要显示 synced 而实际 STALE"的成因。
  */
 internal fun StringBuilder.appendKeySignals(status: JSONObject) {
+    // 启动耗时不依赖任何一层是否可用，必须放在下方「三层缺任一层就 return」之前。
+    appendStartupTiming(status, zh = false)
     val vfs = status.optJSONObject("vfs")
     val mp = status.optJSONObject("mediaProviderJavaHook")
     val fuse = status.optJSONObject("fuseNativeHook")
@@ -245,6 +300,8 @@ internal fun StringBuilder.appendKeySignals(status: JSONObject) {
 
 /** 中文概览：同样只陈列 Reporter 结论，不自行裁决。 */
 internal fun StringBuilder.appendKeySignalsZhCn(status: JSONObject) {
+    // 同英文版：启动耗时不依赖任何一层是否可用，必须先于层 guard 输出。
+    appendStartupTiming(status, zh = true)
     val vfs = status.optJSONObject("vfs")
     val mp = status.optJSONObject("mediaProviderJavaHook")
     val fuse = status.optJSONObject("fuseNativeHook")
@@ -307,8 +364,11 @@ internal fun buildSummaryZhCn(server: CleanerServer): String = buildString {
     appendLine("- commands/media_provider_maps.txt 与 commands/media_provider_mountinfo.txt：MediaProvider 进程状态。")
     appendLine("- commands/dmesg_evidence.txt：内核侧拒绝证据（SELinux avc、FUSE、mount、namespace）。")
     appendLine("- logs/logcat_crash_recent.txt 与 logs/logcat_media_provider_pid.txt：崩溃与 Hook 宿主进程证据。")
-    appendLine("- ⚠️ 本归档**不是**完整日志：主环形每份只保留**尾部**；启动段 cleaner-boot-*")
-    appendLine("  （server 启动后 60 秒）只保留**头部**。见 manifest.txt 的 'truncation=' 行；")
+    appendLine("- ⚠️ 本归档**不是**完整日志：主环形每份保留首尾两段（各占一半预算，中段省略）；")
+    appendLine("  启动段 cleaner-boot-*（server 启动后 60 秒）是**分级裁剪**而非砍头：")
+    appendLine("  E/F 行与项目 tag 行**逐字全留**，其余按固定步长均匀采样，时间轴完整可见；")
+    appendLine("  实际丢了什么，看每份文件顶部的 'retention=' 与 'step=' 行。见 manifest.txt 的")
+    appendLine("  'truncation=' 行；")
     appendLine("  且 logcat 本身会被 ColorOS LOG_FLOWCTRL 按进程限额丢弃。")
     appendLine("  「归档里没有」≠「没发生」。另：EMBEDDED 模式（EMBEDDED_GOT_PATCH）下 native 库是从")
     appendLine("  APK/APEX 包内加载的，/proc/<pid>/maps 里不会有 libinline/libfuse_jni 条目 ——")

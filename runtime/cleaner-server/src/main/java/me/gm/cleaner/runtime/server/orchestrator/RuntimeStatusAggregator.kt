@@ -67,6 +67,11 @@ class RuntimeStatusAggregator(
                 }
             }
         )
+        // 启动编排分段耗时：日志里那行 `initialize done in …` 在 ColorOS LOG_FLOWCTRL
+        // 下连续两批整行丢失（第41、42批命中 0 次），这里改为随状态快照一起输出 ——
+        // 诊断包读的是 collectStatusJson() 的实时内存值，不受日志丢弃影响。
+        // 未完成 initialize 时**不写该键**：缺席 = "还没跑完"，空对象会被误读成"跑完了"。
+        StartupTiming.toJsonOrNull()?.let { root.put("startupTiming", it) }
         return root.toString(2)
     }
 

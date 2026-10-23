@@ -377,6 +377,7 @@ object DiagnosticArchive {
             appendLine("dir=$AUTO_LOG_DIR")
             appendLine("total=${all.size}")
             appendLine("included=${files.size}")
+            appendLine("budget=bootTiered(${MAX_BOOT_LOG_BYTES}B)+ringHeadTail(${MAX_TEXT_FILE_BYTES}B)")
             for (file in files) {
                 val kind = when {
                     AutoLogging.isBootLogFileName(file.name) -> "boot"
@@ -388,8 +389,16 @@ object DiagnosticArchive {
         })
         for (file in files) {
             if (AutoLogging.isBootLogFileName(file.name)) {
-                // 启动段的诊断价值在**开头**（server 启动 + 首分钟），必须取 head。
-                addFileHead(zip, file, "logs/auto/${file.name}", MAX_TEXT_FILE_BYTES)
+                // 启动段是 `-b main,system,crash` **无过滤**的全系统日志，实测 118 KB/s
+                //（60 秒 7,249,920 B）。只取头部 512 KiB 仅覆盖 4.3 秒，起机关键窗口
+                // 结构性不可见（第 42 批实测单文件 0.97 s）。改走分级裁剪：
+                // E/F 全留 + 项目 tag 全留 + 其余按步长均匀采样 ⇒ 完整时间轴 + 证据零丢失。
+                DiagnosticBootLogTrimmer.addBootLogTrimmed(
+                    zip,
+                    file,
+                    "logs/auto/${file.name}",
+                    MAX_BOOT_LOG_BYTES,
+                )
             } else {
                 // 主环形与崩溃通道取首尾两段（上游 317e754）：一个文件对应一次采集
                 // 周期时，启动失败 / Hook 未加载 / 挂载首轮失败的证据位于**周期开头**，

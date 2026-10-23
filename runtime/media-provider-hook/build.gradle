@@ -22,6 +22,10 @@ dependencies {
     // main.jar 随行模块清单由根项目 xposedRuntimeModules 统一声明
     rootProject.xposedRuntimeModules.each { implementation project(it) }
     testImplementation 'junit:junit:4.13.2'
+    // 单测需真实 org.json 实现：android.jar stub 的 JSONObject 构造/方法会抛
+    // RuntimeException（Stub!），而 FuseRedirectCounters 的诊断快照走 appendRedirectTo。
+    // 与 runtime:cleaner-server 用同一坐标，保持测试环境口径一致。
+    testImplementation 'org.json:json:20220320'
     compileOnly files('../../app/libs/libxposed-api-102.jar')
     // compileOnly 不会延伸到测试source set；基类 intercept(Chain) 的清理钩子单测
     // 必须实现 Chain，故把同一个 jar（仓库内已有，非新依赖）加进测试 classpath。

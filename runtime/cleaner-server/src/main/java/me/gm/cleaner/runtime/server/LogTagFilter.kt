@@ -71,6 +71,16 @@ object LogTagFilter {
     val FILTER_SPEC: String = TAGS.joinToString(separator = " ") { "$it:*" } + " *:S"
 
     /**
+     * 白名单的只读视图（离线判定用）。
+     *
+     * boot 日志的分级裁剪（[DiagnosticBootLogTrimmer]）要在**已写出的文件**上做
+     * 「这一行是不是本项目的 tag」判定，没法用 logcat 过滤串；与 [TAGS] 同源可
+     * 避免两处清单漂移。logcat 的匹配是**精确字符串比较**（无通配），这里同样用
+     * `Set.contains` 精确匹配，语义一致。
+     */
+    val tagSet: Set<String> = TAGS.toSet()
+
+    /**
      * 过滤串的数组形式，供 Java 侧拼装 logcat 命令使用。
      * 避免调用方各自拆分字符串导致口径分叉。
      */
