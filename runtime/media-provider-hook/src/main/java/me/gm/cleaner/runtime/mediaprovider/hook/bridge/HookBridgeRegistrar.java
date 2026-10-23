@@ -73,10 +73,32 @@ public final class HookBridgeRegistrar {
             if (e instanceof ThreadDeath) {
                 throw (ThreadDeath) e;
             }
+            // 「App 侧 Provider 还没注册」是开机 / 覆盖安装窗口的**预期竞态**：
+            // ContentResolver 此刻查不到 content://me.gm.cleaner.hooks_bridge，
+            // 下一轮 requestReRegister 就恢复。第 43 批实测这一类在一次开机窗口里
+            // 产出 17 行 E（12 行是堆栈），而同窗口真实故障数为 0 —— 与 5.5.9 处理的
+            // HOOK.JAVA.BINDER.DEAD 同型。降级只改字面量与堆栈输出，不新增运行时路径。
+            // 真故障（ack=false / linkToDeath 抛错 / 重试预算耗尽）仍记 E：
+            // 后两者的字面量在下面的分支与 MediaProviderRuntime 里，均未改动。
+            if (BridgeRetryableFailurePolicy.isRetryable(
+                    e.getClass().getName(), e.getMessage())) {
+                // 不打堆栈：一次注册失败 12 行堆栈会把启动窗口的其他信号挤出
+                // ColorOS 的按进程配额，而这条路径本身不含新信息（话术恒定）。
+                Log.w(TAG, "Failed to register hooks callback (provider not ready, retry pending): "
+                        + describeThrowable(e));
+                NativeHookStatus.INSTANCE.markHookError(
+                        ErrorCodes.INSTANCE.HOOK_JAVA_REG_FAILED,
+                        "stage=register_hooks_callback, retryable=true, failureType="
+                                + e.getClass().getSimpleName(),
+                        "HookBridgeRegistrar", HookErrorJournal.SEVERITY_WARN, 0, 0L);
+                NativeHookStatus.INSTANCE.markBridgeFailed(describeThrowable(e));
+                return false;
+            }
             Log.e(TAG, "Failed to register hooks callback", e);
             NativeHookStatus.INSTANCE.markHookError(
                     ErrorCodes.INSTANCE.HOOK_JAVA_REG_FAILED,
-                    "stage=register_hooks_callback, failureType=" + e.getClass().getSimpleName(),
+                    "stage=register_hooks_callback, retryable=false, failureType="
+                            + e.getClass().getSimpleName(),
                     "HookBridgeRegistrar", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
             NativeHookStatus.INSTANCE.markBridgeFailed(describeThrowable(e));
             return false;
@@ -126,7 +148,13 @@ public final class HookBridgeRegistrar {
             if (e instanceof ThreadDeath) {
                 throw (ThreadDeath) e;
             }
-            Log.w(TAG, "Failed to fetch registry binder", e);
+            if (BridgeRetryableFailurePolicy.isRetryable(
+                    e.getClass().getName(), e.getMessage())) {
+                Log.w(TAG, "Failed to fetch registry binder (provider not ready, retry pending): "
+                        + describeThrowable(e));
+            } else {
+                Log.w(TAG, "Failed to fetch registry binder", e);
+            }
             return false;
         }
         if (fresh == null || !fresh.pingBinder()) {

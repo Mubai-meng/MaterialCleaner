@@ -41,19 +41,23 @@ class BinderDeadSeverityContractTest {
         return hit!!.readText()
     }
 
-    /** 取某段文本中「最靠近 `anchor` 之后」的 severity 字面量。 */
+    /**
+     * 取某段文本中「最靠近 `anchor` 之后的**一个**」severity 字面量。
+     *
+     * 5.5.11 起 `registerHooksCallback` 的 catch 分成 retryable(W) / 非 retryable(E)
+     * 两条相邻分支，旧的「WARN 只要出现就赢」判据会把两条都读成 W。改为取最近者：
+     * 哪个字面量先出现就属于哪个分支。
+     */
     private fun severityAfter(text: String, anchor: String): String {
         val at = text.indexOf(anchor)
         assertTrue("锚点缺失：$anchor", at >= 0)
         val window = text.substring(at, minOf(text.length, at + 900))
+        val warn = window.indexOf("HookErrorJournal.SEVERITY_WARN").let { if (it < 0) Int.MAX_VALUE else it }
+        val error = window.indexOf("HookErrorJournal.SEVERITY_ERROR").let { if (it < 0) Int.MAX_VALUE else it }
         return when {
-            window.contains("HookErrorJournal.SEVERITY_WARN") &&
-                    window.indexOf("HookErrorJournal.SEVERITY_WARN") <
-                    window.indexOf("HookErrorJournal.SEVERITY_ERROR").let {
-                        if (it < 0) Int.MAX_VALUE else it
-                    } -> "W"
-            window.contains("HookErrorJournal.SEVERITY_ERROR") -> "E"
-            else -> "?"
+            warn == Int.MAX_VALUE && error == Int.MAX_VALUE -> "?"
+            warn < error -> "W"
+            else -> "E"
         }
     }
 
@@ -87,10 +91,57 @@ class BinderDeadSeverityContractTest {
         assertEquals("link_to_death 必须记 E", "E", severityAfter(src, "stage=link_to_death"))
     }
 
-    /** `REG.FAILED` 是真实注册失败，与 BINDER.DEAD 无关，同样不得被降级波及。 */
+    /**
+     * 5.5.11：`register_hooks_callback` 按成因分成三支，必须各归各位。
+     *
+     * - `provider_acknowledged_false`：Provider 明确回 `registered=false` ⇒ 真失败，E。
+     * - `retryable=true`：只在 `BridgeRetryableFailurePolicy` 认定「Provider 还没注册」
+     *   时出现（开机 / 覆盖安装窗口）⇒ 预期竞态，W，且不打堆栈。
+     * - `retryable=false`：认不出的异常 ⇒ 一律 E，宁可多一条红也不静音。
+     */
     @Test
-    fun `注册失败仍是 E`() {
+    fun `provider 明确拒绝注册仍是 E`() {
         val src = source(registrar)
-        assertEquals("stage=register_hooks_callback 必须记 E", "E", severityAfter(src, "stage=register_hooks_callback"))
+        assertEquals(
+            "reason=provider_acknowledged_false 必须记 E",
+            "E",
+            severityAfter(src, "reason=provider_acknowledged_false"),
+        )
+    }
+
+    @Test
+    fun `provider 未就绪是可重试路径记 W`() {
+        val src = source(registrar)
+        assertEquals(
+            "retryable=true 必须记 W",
+            "W",
+            severityAfter(src, "stage=register_hooks_callback, retryable=true"),
+        )
+    }
+
+    @Test
+    fun `认不出的注册失败仍是 E 不得被一起降级`() {
+        val src = source(registrar)
+        assertEquals(
+            "retryable=false 必须记 E",
+            "E",
+            severityAfter(src, "stage=register_hooks_callback, retryable=false"),
+        )
+    }
+
+    /**
+     * 反向保护：per-attempt 失败降 W 之后，**重试预算耗尽**必须升 E ——
+     * 否则「Provider 永远不出现」这种真故障会全程只有 W。
+     */
+    @Test
+    fun `重试预算耗尽升级为 E`() {
+        val src = source(
+            "me/gm/cleaner/runtime/mediaprovider/hook/bootstrap/MediaProviderRuntime.java"
+        )
+        assertEquals(
+            "HOOK.JAVA.REG.EXHAUSTED 必须记 E",
+            "E",
+            severityAfter(src, "stage=bridge_register_retry"),
+        )
     }
 }

@@ -164,7 +164,10 @@ public final class MediaProviderRuntime {
                     NativeHookStatus.INSTANCE.markBridgeFailed(
                             "registry watch failed after register, attempt " + attempts[0]);
                 } else {
-                    Log.e("MC_REDIRECT", "[XposedInit] Re-registration failed (attempt " + attempts[0] + ")");
+                    // 每次重试失败都是「还在窗口里」，记 E 会让启动期出现与重试次数
+                    // 等量的红色日志；真故障的升级点是下面的 HOOK_JAVA_REG_EXHAUSTED
+                    // （突发预算耗尽 ⇒ 已重试 MAX_BURST_ATTEMPTS 次仍失败）。
+                    Log.w("MC_REDIRECT", "[XposedInit] Re-registration failed (attempt " + attempts[0] + ")");
                     NativeHookStatus.INSTANCE.markBridgeFailed(
                             "re-register attempt " + attempts[0] + " failed");
                 }
@@ -178,7 +181,9 @@ public final class MediaProviderRuntime {
                                 "stage=bridge_register_retry, attempts=" + attempts[0]
                                         + ", cooldownMs="
                                         + BridgeRegistrationRetryPolicy.COOLDOWN_MILLIS,
-                                "MediaProviderRuntime", HookErrorJournal.SEVERITY_WARN, 0, 0L);
+                                // 预算耗尽 = 已重试 MAX_BURST_ATTEMPTS 次仍失败 ⇒ 真故障，
+                                // 记 E。上面的 per-attempt 降 W 之后，这里是唯一的升级点。
+                                "MediaProviderRuntime", HookErrorJournal.SEVERITY_ERROR, 0, 0L);
                     }
                     cooldownProbe[0] = true;
                     NativeHookStatus.INSTANCE.markBridgeRetryScheduled(attempts[0]);

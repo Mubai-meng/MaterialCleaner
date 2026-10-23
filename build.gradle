@@ -81,9 +81,20 @@ ext {
     // ② boot log 归档 `keptFirst=512KB` 在 118 KB/s 洪峰下只覆盖 4.3 秒，起机关键
     //    窗口结构性不可见 ⇒ 改为「E/F 全留 + 项目 tag 全留 + 其余均匀采样」的分级裁剪，
     //    全时间轴可见且关键证据零丢失。
+    // 2026-10-23：5.5.11 / 561 = 第43批四项（开机策略空窗 + 三处诊断可见性）。
+    // ① 开机策略空窗 7.55 s 的真因是 server 侧 `onStart` 取 hook binder 失败后
+    //    **10.16 秒无主动重试**（不是 hook 侧轮询，第43批 §9.2 已更正）
+    //    ⇒ `CleanerHooksClient` 加启动短退避 200→500→1000→2000×5（共 11.7 s，成功即停）。
+    // ② `HookBridgeRegistrar` 的「Provider 还没注册」由 E 降 W 且不打堆栈
+    //    （一次开机 17 行 E，12 行是堆栈）；真故障（ack=false / 认不出的异常 /
+    //    重试预算耗尽）仍为 E。
+    // ③ 实时值 `recordedPids` 加 `recordedPidsAt`，概览并列两个采样时点 —— 它和
+    //    30 秒节流的 `vfsMountedPids` 不是同一时刻，连续两批被误读成矛盾。
+    // ④ boot log 裁剪加 `### REPLAY` 段：跨日重放行（logd 从 ramoops 重放旧崩溃）
+    //    单列，不再污染 CRITICAL 的时间轴（原先会算出负跨度）与预算。
     // 若要切回上游口径，把下面一行改回 `versionCode = gitCommitCount` 即可。
-    versionCode = 560
-    versionName = '5.5.10'
+    versionCode = 561
+    versionName = '5.5.11'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 

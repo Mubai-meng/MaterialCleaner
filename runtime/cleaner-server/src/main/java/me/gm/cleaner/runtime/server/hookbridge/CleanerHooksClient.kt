@@ -1,5 +1,7 @@
 package me.gm.cleaner.runtime.server.hookbridge
 
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.RemoteException
 import android.os.SystemClock
@@ -26,7 +28,16 @@ object CleanerHooksClient {
     fun onStart(server: CleanerServer) {
         this.server = server
         Log.i("MC_REDIRECT", "[CleanerHooksClient] onStart: attempting to get hooks service binder...")
-        establishConnection(server, "onStart")
+        if (establishConnection(server, "onStart")) {
+            cancelStartupRetry()
+            return
+        }
+        // 旧实现失败后就此放手，下一次尝试只能等 whileAlive（真正用到网关时）
+        // 或 BinderSender.onActive（应用回到前台）。开机时两者都不在窗口内发生，
+        // 第 43 批实测这段空转 **10.16 秒**，MediaProvider 侧因此 7.55 秒无策略。
+        // 这里补一条有界短退避阶梯（200→500→1000→2000×5，共 11.7 s），
+        // 成功即停，稳态零开销。
+        startStartupRetry(server)
     }
 
     @Synchronized
@@ -154,7 +165,116 @@ object CleanerHooksClient {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════
+    // 启动期短退避重连（5.5.11）
+    // ═══════════════════════════════════════════════════════════
+
+    private val startupRetryLock = Any()
+    private var startupRetryHandler: Handler? = null
+    private var startupRetryThread: HandlerThread? = null
+
+    /**
+     * 取消令牌：每次 onStart / onDestroy 自增，已排队的任务见到代次不符就直接返回。
+     * 用代次而不是 removeCallbacks，是因为 onStart 可能来自任意线程。
+     */
+    @Volatile
+    private var startupRetryGeneration: Long = 0L
+    @Volatile
+    private var startupRetryActive = false
+    private var startupRetryAttempt = 0
+
+    /**
+     * 只在重连阶梯真正启用时创建线程；稳态下永不创建。
+     *
+     * 名字必须与属性 `startupRetryHandler` 区分：同名函数会让靠后的属性访问
+     * 解析歧义（5.5.11 首次构建即踩到 Unresolved reference）。
+     */
+    private fun ensureStartupRetryHandler(): Handler = synchronized(startupRetryLock) {
+        startupRetryHandler ?: run {
+            val thread = HandlerThread("CleanerHooksStartupRetry").apply { start() }
+            startupRetryThread = thread
+            Handler(thread.looper).also { startupRetryHandler = it }
+        }
+    }
+
+    private fun startStartupRetry(ctx: CleanerServer) {
+        synchronized(startupRetryLock) {
+            if (startupRetryActive) return
+            startupRetryActive = true
+            startupRetryAttempt = 0
+            val generation = ++startupRetryGeneration
+            postStartupRetryLocked(ctx, generation)
+        }
+    }
+
+    /** 调用方必须持有 [startupRetryLock]。 */
+    private fun postStartupRetryLocked(ctx: CleanerServer, generation: Long) {
+        val next = startupRetryAttempt + 1
+        if (!HookBridgeStartupRetryPolicy.shouldContinue(next)) {
+            startupRetryActive = false
+            Log.w(
+                "MC_REDIRECT",
+                "[CleanerHooksClient] startup retry exhausted after ${startupRetryAttempt} attempts " +
+                        "(${HookBridgeStartupRetryPolicy.totalWindowMillis()}ms window), " +
+                        "falling back to whileAlive / BinderSender",
+            )
+            return
+        }
+        startupRetryAttempt = next
+        val delay = HookBridgeStartupRetryPolicy.delayMillis(next)
+        val posted = ensureStartupRetryHandler().postDelayed({
+            if (generation != startupRetryGeneration) return@postDelayed
+            if (service != null && pingBinder()) {
+                finishStartupRetry()
+                return@postDelayed
+            }
+            if (establishConnection(ctx, "startupRetry#$next")) {
+                finishStartupRetry()
+                return@postDelayed
+            }
+            synchronized(startupRetryLock) {
+                if (generation == startupRetryGeneration) {
+                    postStartupRetryLocked(ctx, generation)
+                }
+            }
+        }, delay)
+        if (!posted) {
+            // Handler 已 quit（进程收尾）：放弃阶梯，交给既有恢复路径。
+            startupRetryActive = false
+        }
+    }
+
+    private fun finishStartupRetry() {
+        synchronized(startupRetryLock) {
+            if (!startupRetryActive) return
+            startupRetryActive = false
+            Log.i(
+                "MC_REDIRECT",
+                "[CleanerHooksClient] startup retry connected on attempt $startupRetryAttempt",
+            )
+        }
+    }
+
+    private fun cancelStartupRetry() {
+        synchronized(startupRetryLock) {
+            startupRetryGeneration++
+            startupRetryActive = false
+        }
+    }
+
     fun onDestroy() {
+        cancelStartupRetry()
+        synchronized(startupRetryLock) {
+            // ⚠️ 不要用 Handler.removeCallbacksAndMessages：cleaner-server 的编译期
+            // classpath 被 `hidden-api-stub` 里的最小 Handler 桩遮蔽（该桩只有
+            // 构造 / Handler(Looper) / post / postDelayed / getLooper 五个方法），
+            // 方法体写了也是 `Unresolved reference`（5.5.11 首次构建实测）。
+            // 取消依靠两道既有机制：startupRetryGeneration 代次校验 + quitSafely()。
+            startupRetryThread?.quitSafely()
+            startupRetryHandler = null
+            startupRetryThread = null
+            startupRetryAttempt = 0
+        }
         unlinkCurrentDeathRecipient()
         clearDeadConnection()
     }

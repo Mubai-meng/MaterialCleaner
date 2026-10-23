@@ -296,6 +296,7 @@ internal fun StringBuilder.appendKeySignals(status: JSONObject) {
     if (total >= 0) {
         appendLine("- srStatus: total=$total, truncated=$truncated")
     }
+    appendVfsSamplingSkew(vfs, zh = false)
 }
 
 /** 中文概览：同样只陈列 Reporter 结论，不自行裁决。 */
@@ -347,6 +348,52 @@ internal fun StringBuilder.appendKeySignalsZhCn(status: JSONObject) {
     val total = vfs.optInt(VfsProcessCensus.KEY_SR_TOTAL, -1)
     if (total >= 0) {
         appendLine("- srStatus：总数=$total，已截断=$truncated")
+    }
+    appendVfsSamplingSkew(vfs, zh = true)
+}
+
+/**
+ * 实时值 vs 普查缓存值的**采样时点**对照。
+ *
+ * 报告里并存两类指标：`recordedPids`（`collectReport` 当场读 Mounter）与
+ * `vfsMountedPids`（[CENSUS_THROTTLE_MS] 内复用的上一轮普查）。第 42 批与第 43 批
+ * **连续两次**出现 `recordedPids=0` 配 `vfsMountedPids=4`，两次都被读成
+ * 「模块自相矛盾」；实际两次都是普查采样之后用户从最近任务清理了目标应用。
+ *
+ * 时点并列后，读日志的人不必再靠推理 —— 相差多少毫秒直接写在脸上。
+ */
+internal fun StringBuilder.appendVfsSamplingSkew(vfs: JSONObject, zh: Boolean) {
+    val recorded = vfs.optInt(VfsReportKeys.RECORDED_PIDS, -1)
+    val mounted = vfs.optInt(VfsProcessCensus.KEY_MOUNTED, -1)
+    if (recorded < 0 || mounted < 0) return
+    val realtimeAt = vfs.optLong(VfsReportKeys.RECORDED_PIDS_AT, 0L)
+    val censusAt = vfs.optLong(VfsProcessCensus.KEY_CENSUS_AT, 0L)
+    // 缺任一时点就不猜：宁可不打印，也不给出可能错的差值。
+    if (realtimeAt <= 0L || censusAt <= 0L) return
+    val skew = realtimeAt - censusAt
+    val verdict = when {
+        recorded == mounted -> ""
+        skew >= 0 -> if (zh) {
+            "（两组数字来自不同时点，不是矛盾）"
+        } else {
+            " (different instants — NOT a contradiction)"
+        }
+        else -> if (zh) {
+            "（实时值早于普查值：以 vfsCensusAt 为准）"
+        } else {
+            " (realtime sample precedes census sample — trust vfsCensusAt)"
+        }
+    }
+    if (zh) {
+        appendLine(
+            "- VFS 采样：实时 recordedPids=$recorded @$realtimeAt，" +
+                    "普查 vfsMountedPids=$mounted @$censusAt，相差=${skew}ms" + verdict,
+        )
+    } else {
+        appendLine(
+            "- VFS sampling: realtime recordedPids=$recorded @$realtimeAt vs " +
+                    "census vfsMountedPids=$mounted @$censusAt, skew=${skew}ms" + verdict,
+        )
     }
 }
 

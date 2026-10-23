@@ -26,6 +26,17 @@ import java.util.zip.ZipOutputStream
  * 均匀抽样**。于是无论洪峰多高，输出的时间轴都覆盖完整窗口：密度下降，但
  * 「哪一秒开始不对劲」这个问题始终可答。
  *
+ * ## REPLAY：跨日重放行必须单列（5.5.11）
+ * `-b crash` 会让 logd 把 ramoops 里**几周前**的崩溃行重放进当前缓冲区
+ * （第 42/43 批都抓到 `11-10 12:57:13 pid 1220 (init)` 这类行冒出到 10-23 的会话里）。
+ * 这类行的 `MM-DD` 与会话日期不同，混在 CRITICAL 段里会造成两个后果：
+ * 1. **首末时间戳算出负跨度** —— 段首是本次会话、段尾却是三周前，"覆盖了多久"直接算错；
+ * 2. 抢占 CRITICAL 预算 —— 它们大多也是 `E`/`F`，会稀释真正的本次会话错误证据。
+ *
+ * 因此按「日期是否等于会话日期」先分一层：会话日期取文件里出现次数最多的 `MM-DD`
+ * （重放行必然只占极少数），跨日的行单列到末尾的 `### REPLAY` 段，并明确标注
+ * 它们**不属于本次会话**。REPLAY 单独拿 5% 预算，不吃其它段的比例。
+ *
  * ## 输出契约
  * - logcat 原始行**逐字保留**（不改写、不加前缀），归档仍可直接 `grep`；
  * - 段与段之间用 `### …` 分隔（logcat 行以 `MM-DD` 或级别字母开头，不会冲突）；
@@ -52,6 +63,9 @@ internal object DiagnosticBootLogTrimmer {
     /** logcat brief：`L/Tag( PID): msg`（兜底，防止将来改 `-v` 后解析全失效）。 */
     private val BARE_BRIEF = Regex("""^([VDIWEFA])/(.+?)\s*\(\s*\d+\):""")
 
+    /** 行首 `MM-DD`（后接时间），用于识别跨日重放。 */
+    private val DATE_PREFIX = Regex("""^\d{2}-\d{2}(?=\s+\d{2}:\d{2}:\d{2}\.\d{3})""")
+
     /** 头部说明预留（字节）：path/size/modified/retention/lines/step 六行 + 分隔。 */
     private const val HEADER_RESERVE_BYTES = 4096L
 
@@ -64,6 +78,14 @@ internal object DiagnosticBootLogTrimmer {
     /** FOCUSED 段预算占比（百分比）。 */
     private const val FOCUSED_PERCENT = 25
 
+    /**
+     * REPLAY 段预算占比（百分比）。
+     *
+     * 取自「剩余」而非挤压 CRITICAL/FOCUSED 的比例：重放行通常只有几行到几十行，
+     * 5% 只是上限，实际按需收敛（见 [planBudget]）。
+     */
+    private const val REPLAY_PERCENT = 5
+
     enum class LineClass {
         /** `E`/`F` 级别：错误与崩溃证据。 */
         CRITICAL,
@@ -73,6 +95,12 @@ internal object DiagnosticBootLogTrimmer {
 
         /** 其余级别：只用于保留时间轴。 */
         NOISE,
+
+        /**
+         * 时间戳日期 = 会话日期之外的重放行（logd 从 ramoops 重放的旧崩溃）。
+         * 单列，避免污染 CRITICAL 段的时间轴与预算。
+         */
+        REPLAY,
     }
 
     /** 一遍扫描的统计量（只累加计数，内存有界）。 */
@@ -94,6 +122,10 @@ internal object DiagnosticBootLogTrimmer {
          * （第 43 批单测抓到：3 行堆栈只留了第 1 行）。
          */
         val continuationBytes: Long = 0L,
+        /** 跨日重放行数（[LineClass.REPLAY]）。 */
+        val replayLines: Int = 0,
+        /** 跨日重放行字节数；**不计入** CRITICAL/FOCUSED/NOISE 任何一段。 */
+        val replayBytes: Long = 0L,
     )
 
     /**
@@ -109,6 +141,8 @@ internal object DiagnosticBootLogTrimmer {
         val criticalStep: Int,
         val focusedStep: Int,
         val noiseStep: Int,
+        val replayBudgetBytes: Long = 0L,
+        val replayStep: Int = 1,
     )
 
     /** 一趟裁剪的结果（内容 + 用来写头部统计的事实）。 */
@@ -119,16 +153,31 @@ internal object DiagnosticBootLogTrimmer {
         val emittedCritical: Int,
         val emittedFocused: Int,
         val emittedNoise: Int,
+        val emittedReplay: Int = 0,
     )
 
     /** 单行分类；返回 `null` 表示续行或非 logcat 内容。 */
-    fun classify(line: String, tagSet: Set<String>): LineClass? {
+    fun classify(line: String, tagSet: Set<String>): LineClass? =
+        classify(line, tagSet, sessionDate = null)
+
+    /**
+     * 单行分类（带会话日期）。
+     *
+     * @param sessionDate 本次会话的 `MM-DD`；为 null 时**不识别** REPLAY
+     *   （保持 5.5.10 行为，供只关心级别/tag 的调用方使用）
+     */
+    fun classify(line: String, tagSet: Set<String>, sessionDate: String?): LineClass? {
         val match = THREADTIME.find(line)
             ?: TIME_BRIEF.find(line)
             ?: BARE_BRIEF.find(line)
             ?: return null
         val level = match.groupValues[1]
         val tag = match.groupValues[2]
+        // 跨日重放优先于一切：它既不是本次会话的证据，也不该占其它段的预算。
+        if (sessionDate != null) {
+            val date = lineDate(line)
+            if (date != null && date != sessionDate) return LineClass.REPLAY
+        }
         return when {
             level == "E" || level == "F" -> LineClass.CRITICAL
             tagSet.contains(tag) -> LineClass.FOCUSED
@@ -136,8 +185,32 @@ internal object DiagnosticBootLogTrimmer {
         }
     }
 
-    /** 按行做一趟统计（不拼接字符串，内存有界）。 */
-    fun scan(file: File, tagSet: Set<String>): Scan {
+    /** 取行首 `MM-DD`；非 threadtime / time-brief 行返回 null。 */
+    fun lineDate(line: String): String? = DATE_PREFIX.find(line)?.value
+
+    /**
+     * 会话日期 = 文件里出现次数最多的 `MM-DD`（同票时取字典序较大者，即较晚那天）。
+     *
+     * 重放行必然只占极少数，所以「多数派」就是本次会话。
+     * 该方法多读一遍文件（7 MB 级 ≈ 几十毫秒），只在用户主动导出时发生。
+     */
+    fun dominantDate(file: File): String? {
+        val counts = HashMap<String, Int>()
+        file.bufferedReader(Charsets.UTF_8).useLines { lines ->
+            for (line in lines) {
+                val date = lineDate(line) ?: continue
+                counts[date] = (counts[date] ?: 0) + 1
+            }
+        }
+        return counts.entries.maxWithOrNull(compareBy({ it.value }, { it.key }))?.key
+    }
+
+    /**
+     * 按行做一趟统计（不拼接字符串，内存有界）。
+     *
+     * @param sessionDate 会话日期；null 表示不区分 REPLAY（旧行为）
+     */
+    fun scan(file: File, tagSet: Set<String>, sessionDate: String? = null): Scan {
         var totalLines = 0
         var totalBytes = 0L
         var criticalLines = 0
@@ -148,12 +221,14 @@ internal object DiagnosticBootLogTrimmer {
         var noiseBytes = 0L
         var continuationLines = 0
         var continuationBytes = 0L
+        var replayLines = 0
+        var replayBytes = 0L
         file.bufferedReader(Charsets.UTF_8).useLines { lines ->
             for (line in lines) {
                 totalLines++
                 val bytes = utf8Length(line)
                 totalBytes += bytes
-                when (classify(line, tagSet)) {
+                when (classify(line, tagSet, sessionDate)) {
                     LineClass.CRITICAL -> {
                         criticalLines++
                         criticalBytes += bytes
@@ -167,6 +242,11 @@ internal object DiagnosticBootLogTrimmer {
                     LineClass.NOISE -> {
                         noiseLines++
                         noiseBytes += bytes
+                    }
+
+                    LineClass.REPLAY -> {
+                        replayLines++
+                        replayBytes += bytes
                     }
 
                     null -> {
@@ -187,6 +267,8 @@ internal object DiagnosticBootLogTrimmer {
             noiseBytes = noiseBytes,
             continuationLines = continuationLines,
             continuationBytes = continuationBytes,
+            replayLines = replayLines,
+            replayBytes = replayBytes,
         )
     }
 
@@ -203,7 +285,11 @@ internal object DiagnosticBootLogTrimmer {
         val criticalDemand = scan.criticalBytes + scan.continuationBytes
         val criticalBudget = minOf(criticalDemand, usable * CRITICAL_PERCENT / 100)
         val focusedBudget = minOf(scan.focusedBytes, usable * FOCUSED_PERCENT / 100)
-        val noiseBudget = (usable - criticalBudget - focusedBudget).coerceAtLeast(0L)
+        // REPLAY 从「剩余」里拿，且按需收敛：重放行通常只有几十行，
+        // 5% 只是上限，不会因此饿死 NOISE 的时间轴。
+        val replayBudget = minOf(scan.replayBytes, usable * REPLAY_PERCENT / 100)
+        val noiseBudget =
+            (usable - criticalBudget - focusedBudget - replayBudget).coerceAtLeast(0L)
         return Plan(
             criticalBudgetBytes = criticalBudget,
             focusedBudgetBytes = focusedBudget,
@@ -215,6 +301,8 @@ internal object DiagnosticBootLogTrimmer {
             } else {
                 stepFor(scan.noiseBytes, noiseBudget)
             },
+            replayBudgetBytes = replayBudget,
+            replayStep = stepFor(scan.replayBytes, replayBudget),
         )
     }
 
@@ -233,28 +321,46 @@ internal object DiagnosticBootLogTrimmer {
      * @param maxBytes 输出内容（含头部）的字节上限
      */
     fun trim(file: File, maxBytes: Int, tagSet: Set<String>): Result {
-        val scan = scan(file, tagSet)
+        // 会话日期必须先定：它决定哪些行归 REPLAY，从而决定三段的预算需求。
+        val sessionDate = dominantDate(file)
+        val scan = scan(file, tagSet, sessionDate)
         val plan = planBudget(scan, maxBytes.toLong())
         val body = StringBuilder(
             minOf(maxBytes, 1 shl 20).coerceAtLeast(1024),
         )
         appendHeader(body, file, scan, plan, maxBytes)
         val emittedCritical = emitSection(
-            file, tagSet, LineClass.CRITICAL, plan.criticalStep,
+            file, tagSet, sessionDate, LineClass.CRITICAL, plan.criticalStep,
             scan.criticalLines, "CRITICAL (level E/F, verbatim)", body,
             hardLimitBytes = plan.criticalBudgetBytes * 2,
         )
         val emittedFocused = emitSection(
-            file, tagSet, LineClass.FOCUSED, plan.focusedStep,
+            file, tagSet, sessionDate, LineClass.FOCUSED, plan.focusedStep,
             scan.focusedLines, "FOCUSED (project tags, verbatim)", body,
             hardLimitBytes = plan.focusedBudgetBytes * 2,
         )
         val emittedNoise = emitSection(
-            file, tagSet, LineClass.NOISE, plan.noiseStep,
+            file, tagSet, sessionDate, LineClass.NOISE, plan.noiseStep,
             scan.noiseLines, "NOISE (time axis only)", body,
             hardLimitBytes = plan.noiseBudgetBytes * 2,
         )
-        return Result(body.toString(), scan, plan, emittedCritical, emittedFocused, emittedNoise)
+        // 无重放行时**不输出**空段：多数文件本来就没有，多一个空标题只是噪声。
+        // 反之有就必须显式写出来 —— 否则「时间轴首末跨度算出负数」无法自证。
+        val emittedReplay = if (scan.replayLines > 0) {
+            emitSection(
+                file, tagSet, sessionDate, LineClass.REPLAY, plan.replayStep,
+                scan.replayLines,
+                "REPLAY (other dates, NOT this session — excluded from the timeline above)",
+                body,
+                hardLimitBytes = plan.replayBudgetBytes * 2,
+            )
+        } else {
+            0
+        }
+        return Result(
+            body.toString(), scan, plan,
+            emittedCritical, emittedFocused, emittedNoise, emittedReplay,
+        )
     }
 
     private fun appendHeader(
@@ -272,7 +378,8 @@ internal object DiagnosticBootLogTrimmer {
             .append(" critical=").append(scan.criticalLines)
             .append(" focused=").append(scan.focusedLines)
             .append(" noise=").append(scan.noiseLines)
-            .append(" continuation=").append(scan.continuationLines).append('\n')
+            .append(" continuation=").append(scan.continuationLines)
+            .append(" replay=").append(scan.replayLines).append('\n')
         body.append("budget=maxBytes=").append(maxBytes)
             .append(" criticalBytes=").append(scan.criticalBytes)
             .append(" continuationBytes=").append(scan.continuationBytes)
@@ -281,6 +388,7 @@ internal object DiagnosticBootLogTrimmer {
         body.append("step=critical=").append(plan.criticalStep)
             .append(" focused=").append(plan.focusedStep)
             .append(" noise=").append(plan.noiseStep)
+            .append(" replay=").append(plan.replayStep)
             .append(" (0 = dropped for lack of budget)\n")
     }
 
@@ -292,6 +400,7 @@ internal object DiagnosticBootLogTrimmer {
     private fun emitSection(
         file: File,
         tagSet: Set<String>,
+        sessionDate: String?,
         target: LineClass,
         step: Int,
         totalLinesOfClass: Int,
@@ -315,7 +424,7 @@ internal object DiagnosticBootLogTrimmer {
         var headerEmitted = false
         file.bufferedReader(Charsets.UTF_8).useLines { lines ->
             for (line in lines) {
-                val cls = classify(line, tagSet)
+                val cls = classify(line, tagSet, sessionDate)
                 if (cls == null) {
                     // 续行：只在所属头行确实被写出时跟随，避免留下孤儿行
                     if (!headerEmitted) continue

@@ -258,6 +258,86 @@ class DiagnosticBootLogTrimmerTest {
         assertEquals(0, result.emittedNoise)
     }
 
+    // ── REPLAY（跨日重放行）──
+
+    @Test
+    fun `跨日重放行归入 REPLAY 而不进 CRITICAL`() {
+        // 本次会话是 10-23；第二条是 logd 从 ramoops 重放的 11-10 旧崩溃。
+        // 5.5.11 之前它会被算进 CRITICAL，让 CRITICAL 段首末时间戳出现**负跨度**。
+        val file = writeLog(
+            "boot-replay.log",
+            listOf(
+                threadtime("E", "Parcel", "this-session-error", second = 10),
+                // 旧日期行：只改行首 MM-DD，其余格式与 threadtime 一致
+                "11-10 12:57:13.107  1220  1220 F libc: Fatal signal 6 (replayed)",
+                threadtime("D", "Chatty", "noise", second = 11),
+            ),
+        )
+        val result = DiagnosticBootLogTrimmer.trim(file, maxBytes = 512 * 1024, tagSet = tagSet)
+        assertEquals("会话日期应判定为 10-23", "10-23", DiagnosticBootLogTrimmer.dominantDate(file))
+        assertEquals(1, result.scan.replayLines)
+        assertEquals(1, result.emittedReplay)
+        assertEquals("重放行不得计入 CRITICAL", 1, result.scan.criticalLines)
+        assertTrue(result.content.contains("### REPLAY"))
+        assertTrue(result.content.contains("NOT this session"))
+        // 两段都必须在：CRITICAL 留本次会话，REPLAY 单独收旧行
+        assertTrue(result.content.contains("this-session-error"))
+        assertTrue(result.content.contains("replayed"))
+        // 头部自证：replay 计数与步长都要写出来
+        assertTrue(result.content.contains("replay=1"))
+        assertTrue(result.content.contains("replay="))
+    }
+
+    @Test
+    fun `没有重放行时不输出空 REPLAY 段`() {
+        val file = writeLog(
+            "boot-noreplay.log",
+            listOf(threadtime("E", "Parcel", "only-this-session", second = 10)),
+        )
+        val result = DiagnosticBootLogTrimmer.trim(file, maxBytes = 512 * 1024, tagSet = tagSet)
+        assertEquals(0, result.scan.replayLines)
+        assertEquals(0, result.emittedReplay)
+        assertTrue("无重放行时不得出现 REPLAY 标题", !result.content.contains("### REPLAY"))
+    }
+
+    @Test
+    fun `REPLAY 预算不吃掉其它段`() {
+        // 有重放行 vs 无重放行：关键段步长必须一致（REPLAY 只从剩余里取 5%）
+        val base = scanOf(criticalBytes = 600_000, focusedBytes = 400_000, noiseBytes = 5_000_000)
+        val withReplay = base.copy(replayBytes = 8_000, replayLines = 10)
+        val a = DiagnosticBootLogTrimmer.planBudget(base, maxBytes = 1_048_576)
+        val b = DiagnosticBootLogTrimmer.planBudget(withReplay, maxBytes = 1_048_576)
+        assertEquals(a.criticalStep, b.criticalStep)
+        assertEquals(a.focusedStep, b.focusedStep)
+        assertEquals(1, b.replayStep)
+        assertTrue("REPLAY 预算应从剩余里切", b.replayBudgetBytes > 0)
+    }
+
+    @Test
+    fun `sessionDate 为 null 时不识别 REPLAY`() {
+        // 旧重载必须保持 5.5.10 行为：只按级别/tag 分类
+        assertEquals(
+            DiagnosticBootLogTrimmer.LineClass.CRITICAL,
+            DiagnosticBootLogTrimmer.classify(
+                "11-10 12:57:13.107  1220  1220 F libc: Fatal signal 6", tagSet,
+            ),
+        )
+        assertEquals(
+            DiagnosticBootLogTrimmer.LineClass.REPLAY,
+            DiagnosticBootLogTrimmer.classify(
+                "11-10 12:57:13.107  1220  1220 F libc: Fatal signal 6", tagSet, "10-23",
+            ),
+        )
+    }
+
+    @Test
+    fun `lineDate 只认带时间的行首日期`() {
+        assertEquals("10-23", DiagnosticBootLogTrimmer.lineDate(threadtime("E", "X", "y")))
+        assertEquals(null, DiagnosticBootLogTrimmer.lineDate("    at android.os.Looper.loop(L.java:1)"))
+        assertEquals(null, DiagnosticBootLogTrimmer.lineDate("E/AndroidRuntime( 1234): boom"))
+        assertEquals(null, DiagnosticBootLogTrimmer.lineDate(""))
+    }
+
     @Test
     fun `output stays within the hard ceiling`() {
         val lines = (0 until 2000).map { i ->

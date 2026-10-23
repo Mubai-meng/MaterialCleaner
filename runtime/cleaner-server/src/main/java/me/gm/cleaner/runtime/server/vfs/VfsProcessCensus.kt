@@ -50,19 +50,21 @@ data class VfsProcessCensus(
         const val KEY_SR_TOTAL = "srStatusTotal"
         const val KEY_SR_TRUNCATED = "srStatusTruncated"
         const val KEY_PACKAGES_WITH_PROCESSES = "vfsPackagesWithProcesses"
+        const val KEY_MOUNTED = "vfsMountedPids"
+        const val KEY_CENSUS_AT = "vfsCensusAt"
     }
 
     fun toMetrics(): Map<String, String> = mapOf(
         KEY_OBSERVED to observedPids.toString(),
         KEY_MANAGED to managedPids.toString(),
         KEY_UNMANAGED to unmanagedPids.toString(),
-        "vfsMountedPids" to mountedPids.toString(),
+        KEY_MOUNTED to mountedPids.toString(),
         "vfsPartialPids" to partialPids.toString(),
         "vfsNotMountedPids" to notMountedPids.toString(),
         "vfsUnknownPids" to unknownPids.toString(),
         "vfsDriftPids" to driftPids.toString(),
         "vfsMountFailedEvidence" to mountFailedEvidence.toString(),
-        "vfsCensusAt" to sampledAt.toString(),
+        KEY_CENSUS_AT to sampledAt.toString(),
         "srStatus" to detail,
         "srStatusShown" to detailShown.toString(),
         KEY_SR_TOTAL to detailTotal.toString(),

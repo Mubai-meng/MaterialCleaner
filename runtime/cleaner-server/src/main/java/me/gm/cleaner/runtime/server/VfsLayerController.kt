@@ -258,7 +258,11 @@ class VfsLayerController {
                         .size
                         .toString(),
                     VfsReportKeys.PREPARED_PACKAGES to preparedPackages.toString(),
-                    "recordedPids" to recordedPids.toString(),
+                    // 实时值必须带自己的采样时刻：它和下面的 census 缓存值
+                    // （vfsObservedPids/vfsMountedPids/srStatus，30s 节流）不是同一
+                    // 时刻的快照，缺时点就会被读成「模块自相矛盾」（第 42/43 批连续两次）。
+                    VfsReportKeys.RECORDED_PIDS to recordedPids.toString(),
+                    VfsReportKeys.RECORDED_PIDS_AT to now.toString(),
                     "mountFailedPids" to mountFailedPids.toString(),
                     "mountTotalAttempts" to mountTotalAttempts.toString(),
                     "mountFailureCount" to mountFailureCount.toString(),
