@@ -13,6 +13,19 @@ object VfsReportKeys {
     /** 目标目录（mkdir）已就绪的包数。**不是**挂载成功数。 */
     const val PREPARED_PACKAGES = "preparedPackages"
 
+    /**
+     * [PREPARED_PACKAGES] 的**采样时刻**（epoch ms），与 `recordedPidsAt` 同刻
+     * （同一次 `collectReport` 相邻两行读取，共用同一个 `now`）。
+     *
+     * 存在理由与 [RECORDED_PIDS_AT] 相同：第 44 批 `preparedPackages=0` 配
+     * `vfsMountedPids=6` 又一次被读成「模块自相矛盾」（第 38/40 批同型，这是第三次）。
+     * 两者本就不是同一维度 —— `preparedPackages` 数的是 `Mounter.mkdirRecords`
+     * 的 key（目录就绪），`vfsMountedPids` 数的是普查时刻活着的已挂载 pid；
+     * 目标应用全部退出后前者清零、后者是 30 秒内的缓存快照。
+     * 时点并列后，差值直接写在诊断概览里，不必再靠推理。
+     */
+    const val PREPARED_PACKAGES_AT = "preparedPackagesAt"
+
     /** 已配置重定向规则的包数（分母口径）。 */
     const val CONFIGURED_PACKAGES = "configuredPackages"
 

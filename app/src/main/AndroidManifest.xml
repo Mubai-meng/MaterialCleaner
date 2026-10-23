@@ -77,9 +77,20 @@
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
+        <!--
+            directBootAware 必须为 true：本 provider 是 cleaner-server（root 进程）启动时
+            唯一的握手入口。缺它时它要等 **用户解锁** 才被 AMS 安装 —— 第 44 批实测
+            `UnlockUser finished 21:11:29.077` 之后 4 ms 才出现
+            `ContentProviderHelper: Installing ContentProviderInfo{name=me.gm.cleaner.hooks_bridge}`，
+            而 server 的 onStart 在 21:11:27.237 就已经发了请求，必然拿到 null（3 次全失败）。
+            对比同级 BinderProvider 一直有该属性，所以 27.290（+53 ms）就能响应 call。
+            onCreate 只有 getContext/getApplicationContext，全类零 CE 存储引用，direct boot 安全。
+            注意：**不要**顺手给 fileprovider / androidx-startup 也加（后者会拉起重活）。
+        -->
         <provider
             android:name=".client.HooksBridgeProvider"
             android:authorities="${applicationId}.hooks_bridge"
+            android:directBootAware="true"
             android:exported="true"
             android:enabled="true" />
 

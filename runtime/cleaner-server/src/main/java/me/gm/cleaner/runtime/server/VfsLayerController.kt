@@ -258,6 +258,8 @@ class VfsLayerController {
                         .size
                         .toString(),
                     VfsReportKeys.PREPARED_PACKAGES to preparedPackages.toString(),
+                    // 与下面的 recordedPidsAt 同刻：同一个 now、同一次 collectReport。
+                    VfsReportKeys.PREPARED_PACKAGES_AT to now.toString(),
                     // 实时值必须带自己的采样时刻：它和下面的 census 缓存值
                     // （vfsObservedPids/vfsMountedPids/srStatus，30s 节流）不是同一
                     // 时刻的快照，缺时点就会被读成「模块自相矛盾」（第 42/43 批连续两次）。

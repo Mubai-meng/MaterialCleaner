@@ -52,9 +52,25 @@ internal const val MAX_TEXT_FILE_BYTES = 512 * 1024
  * 因此 **E/F 能全留（step=1）**；剩余预算给白名单行与时间轴采样。
  * 降到 512 KiB 会让 E/F 自己就被采样，等于回到「证据随机丢弃」。
  *
- * 最多 [MAX_AUTO_LOG_FILES] 量的启动段（2 个分片）× 1536 KiB ≈ 3 MB，可接受。
+ * 最多 [DiagnosticArchive.MAX_BOOT_LOG_FILES] 份启动段 × 1536 KiB ≈ 3 MB，可接受。
  */
 internal const val MAX_BOOT_LOG_BYTES = 1536 * 1024
+
+/**
+ * 诊断包内**日志类资产预算**的自证文案（`auto_logging_manifest.txt` 与诊断概览共用）。
+ *
+ * 必须写明 `perFile`：[MAX_BOOT_LOG_BYTES] 是**每个** boot 文件的裁剪上限，
+ * 而 [DiagnosticArchive.MAX_BOOT_LOG_FILES] 份会各自裁剪一遍 ⇒ 实际占用是乘积。
+ * 第 44 批读到 `budget=bootTiered(1572864B)` 时把它当成整个 auto 目录的总预算，
+ * 实测 `logs/auto/` 3,564,059 B = 声明值的 **1.70 倍**，白查了一轮。
+ * 这里直接把 `bootTotalMax` 算出来，不把乘法留给读日志的人。
+ *
+ * 文案变更是**纯诊断自证**，不改变任何裁剪行为。
+ */
+internal fun autoLogBudgetSpec(): String =
+    "perFile(bootTiered=${MAX_BOOT_LOG_BYTES}B, ringHeadTail=${MAX_TEXT_FILE_BYTES}B)" +
+        " maxBootFiles=${DiagnosticArchive.MAX_BOOT_LOG_FILES}" +
+        " bootTotalMax=${MAX_BOOT_LOG_BYTES.toLong() * DiagnosticArchive.MAX_BOOT_LOG_FILES}B"
 
 /**
  * `logcat -t` 的行数上限：**按原始行计**，本机 ~700–1500 行/s ⇒ 30000 行 ≈ 20–40 s 覆盖窗。

@@ -212,10 +212,16 @@ object CleanerHooksClient {
         val next = startupRetryAttempt + 1
         if (!HookBridgeStartupRetryPolicy.shouldContinue(next)) {
             startupRetryActive = false
-            Log.w(
+            // 与 CleanerHooksBinderRetriever 的 "provider not published yet"(W) 成对：
+            // 逐次失败是预期瞬态（降 W），但**整个阶梯耗尽**意味着 11.7 秒内桥都建不起来，
+            // 且 5.5.12 起 HooksBridgeProvider 已 directBootAware、开机即安装 —— 此时仍失败
+            // 只可能是 app 被停用 / 崩溃循环 / provider 被裁掉，属真故障，保持 E 才有红点。
+            // 有界：阶梯只跑一轮，不会刷屏。
+            Log.e(
                 "MC_REDIRECT",
                 "[CleanerHooksClient] startup retry exhausted after ${startupRetryAttempt} attempts " +
-                        "(${HookBridgeStartupRetryPolicy.totalWindowMillis()}ms window), " +
+                        "(${HookBridgeStartupRetryPolicy.totalWindowMillis()}ms window) — hooks bridge " +
+                        "never published (check app process disabled / crash-looping), " +
                         "falling back to whileAlive / BinderSender",
             )
             return

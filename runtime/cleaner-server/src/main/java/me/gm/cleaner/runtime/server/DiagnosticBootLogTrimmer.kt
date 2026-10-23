@@ -380,7 +380,9 @@ internal object DiagnosticBootLogTrimmer {
             .append(" noise=").append(scan.noiseLines)
             .append(" continuation=").append(scan.continuationLines)
             .append(" replay=").append(scan.replayLines).append('\n')
-        body.append("budget=maxBytes=").append(maxBytes)
+        // 显式 per-file：本段预算只约束**这一个文件**，诊断包里同名 boot 段共有
+        // MAX_BOOT_LOG_FILES 份。第 44 批把 manifest 的 1572864B 当总预算，实测 1.70 倍。
+        body.append("budget=perFile maxBytes=").append(maxBytes)
             .append(" criticalBytes=").append(scan.criticalBytes)
             .append(" continuationBytes=").append(scan.continuationBytes)
             .append(" focusedBytes=").append(scan.focusedBytes)

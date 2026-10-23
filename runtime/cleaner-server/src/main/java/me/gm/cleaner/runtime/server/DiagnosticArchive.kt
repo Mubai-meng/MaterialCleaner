@@ -34,7 +34,7 @@ object DiagnosticArchive {
     internal const val AUTO_LOG_DIR = "/data/local/tmp/cleaner_logs"
     private const val MAX_AUTO_LOG_FILES = 8
     /** 启动窗口段单独保留的份数（每份取头部，见 [addAutoLogs]）。 */
-    private const val MAX_BOOT_LOG_FILES = 2
+    internal const val MAX_BOOT_LOG_FILES = 2
     private const val MAX_EVENT_FILES = 20
 
     fun open(server: CleanerServer): ParcelFileDescriptor {
@@ -377,7 +377,7 @@ object DiagnosticArchive {
             appendLine("dir=$AUTO_LOG_DIR")
             appendLine("total=${all.size}")
             appendLine("included=${files.size}")
-            appendLine("budget=bootTiered(${MAX_BOOT_LOG_BYTES}B)+ringHeadTail(${MAX_TEXT_FILE_BYTES}B)")
+            appendLine("budget=" + autoLogBudgetSpec())
             for (file in files) {
                 val kind = when {
                     AutoLogging.isBootLogFileName(file.name) -> "boot"

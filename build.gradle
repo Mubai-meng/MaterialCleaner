@@ -93,8 +93,8 @@ ext {
     // ④ boot log 裁剪加 `### REPLAY` 段：跨日重放行（logd 从 ramoops 重放旧崩溃）
     //    单列，不再污染 CRITICAL 的时间轴（原先会算出负跨度）与预算。
     // 若要切回上游口径，把下面一行改回 `versionCode = gitCommitCount` 即可。
-    versionCode = 561
-    versionName = '5.5.11'
+    versionCode = 562
+    versionName = '5.5.12'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 

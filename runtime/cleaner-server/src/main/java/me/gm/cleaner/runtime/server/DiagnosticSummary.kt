@@ -92,7 +92,7 @@ internal fun truncationSummary(): String {
     )
     val truncated = files.filter { it.length() > archiveBudgetBytes(it) }
     if (truncated.isEmpty()) {
-        return "none?autoLogs=bootTiered(${MAX_BOOT_LOG_BYTES}B)+ringHeadTail(${MAX_TEXT_FILE_BYTES}B)"
+        return "none?autoLogs=" + autoLogBudgetSpec()
     }
     return truncated.joinToString("; ") { file ->
         val budget = archiveBudgetBytes(file)
@@ -363,6 +363,24 @@ internal fun StringBuilder.appendKeySignalsZhCn(status: JSONObject) {
  * 时点并列后，读日志的人不必再靠推理 —— 相差多少毫秒直接写在脸上。
  */
 internal fun StringBuilder.appendVfsSamplingSkew(vfs: JSONObject, zh: Boolean) {
+    // preparedPackages 也必须带时点：第 44 批 `preparedPackages=0` 配 `vfsMountedPids=6`
+    // 第三次被读成 bug。它是**目录就绪数**（Mounter.mkdirRecords），与已挂载 pid 数
+    // 不同维度；目标应用退出后实时清零。先于 skew 行输出，两者相邻便于对照。
+    val prepared = vfs.optInt(VfsReportKeys.PREPARED_PACKAGES, -1)
+    val preparedAt = vfs.optLong(VfsReportKeys.PREPARED_PACKAGES_AT, 0L)
+    if (prepared >= 0 && preparedAt > 0L) {
+        if (zh) {
+            appendLine(
+                "- VFS 就绪：preparedPackages=$prepared @$preparedAt" +
+                        "（目录就绪数，与已挂载 pid 数不同维度，不是矛盾）",
+            )
+        } else {
+            appendLine(
+                "- VFS prepared: preparedPackages=$prepared @$preparedAt" +
+                        " (dirs prepared — different dimension from mounted pid count)",
+            )
+        }
+    }
     val recorded = vfs.optInt(VfsReportKeys.RECORDED_PIDS, -1)
     val mounted = vfs.optInt(VfsProcessCensus.KEY_MOUNTED, -1)
     if (recorded < 0 || mounted < 0) return
