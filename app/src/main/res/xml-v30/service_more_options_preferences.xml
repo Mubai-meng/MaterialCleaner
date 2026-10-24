@@ -184,4 +184,33 @@
             android:summary="@string/about_summary"
             android:title="@string/about_title" />
     </PreferenceCategory>
+
+    <!--
+        用户要求放在设置页最下面。语义是「让本模块自己在系统桌面/后台消失」，
+        不是隐藏别的应用 —— 见 SelfHidingPreferences 的类文档。
+
+        注意：本文件是 res/xml-v30 变体，Android 11(API 30)+ 设备**只加载这一份**，
+        res/xml/service_more_options_preferences.xml 仅在 API<30 生效。
+        两份必须保持「本模块」分类一致 —— 5.5.13 只改了 res/xml 版本，
+        导致实机上这两个开关根本不渲染（第47批实证）。守卫见
+        SelfHidingPreferenceVariantParityTest。
+    -->
+    <PreferenceCategory
+        android:title="@string/self_hiding_header"
+        app:iconSpaceReserved="false">
+
+        <SwitchPreferenceCompat
+            android:defaultValue="false"
+            android:key="@string/hide_desktop_icon_key"
+            android:summary="@string/hide_desktop_icon_summary"
+            android:title="@string/hide_desktop_icon_title"
+            app:iconSpaceReserved="false" />
+
+        <SwitchPreferenceCompat
+            android:defaultValue="false"
+            android:key="@string/hide_recents_key"
+            android:summary="@string/hide_recents_summary"
+            android:title="@string/hide_recents_title"
+            app:iconSpaceReserved="false" />
+    </PreferenceCategory>
 </PreferenceScreen>

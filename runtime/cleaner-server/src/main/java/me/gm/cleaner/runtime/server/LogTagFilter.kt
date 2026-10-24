@@ -55,7 +55,7 @@ object LogTagFilter {
         "MediaProvider", "HookBridgeRegistrar", "HooksBridge", "HooksBinderRetriever",
         "BulkCursor", "ParceledListSlice", "IContentProviderKt",
         // ── app 侧 UI / 通知 ────────────────────────────────────────
-        "NotificationService", "ServiceMoreOptions",
+        "NotificationService", "ServiceMoreOptions", "MC_SelfHide",
         "OverridableDefaultItemAnimator", "SimpleListDiffer", "ThemeColorPreference",
         // ── server / app 进程名当 tag 用的场合 ───────────────────────
         "me.gm.cleaner", "me.gm.cleaner.runtime.server", "cleaner_server",

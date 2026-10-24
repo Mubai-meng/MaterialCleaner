@@ -133,6 +133,7 @@ class LogTagFilterTest {
             // app 侧 UI / 通知
             "NotificationService",
             "ServiceMoreOptions",
+            "MC_SelfHide",
             "OverridableDefaultItemAnimator",
             "SimpleListDiffer",
             "ThemeColorPreference",

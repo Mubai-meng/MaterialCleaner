@@ -675,48 +675,102 @@ class MoreOptionsFragment : BaseSettingsFragment() {
      * 否则用户会看到一个「已隐藏」的勾但图标还在 —— 这类静默不一致比直接报错更糟。
      */
     private fun bindSelfHidingPreferences() {
-        val hideDesktopIcon = findPreference<SwitchPreferenceCompat>(
-            getString(R.string.hide_desktop_icon_key)
-        ) ?: return
-        // 以 PackageManager 的实际状态为准，不以偏好为准：
-        // 用户可能在系统设置里手动恢复过，或覆盖安装重置了 alias。
-        hideDesktopIcon.isChecked =
-            !SelfHidingPreferences.isDesktopIconActuallyVisible(requireContext())
-        hideDesktopIcon.onPreferenceChangeListener =
-            Preference.OnPreferenceChangeListener { _, newValue ->
-                val hide = newValue as Boolean
-                val ok = SelfHidingPreferences.setHideDesktopIcon(requireContext(), hide)
-                if (!ok) {
-                    hideDesktopIcon.isChecked = !hide
-                    Snackbar.make(
-                        requireView(),
-                        getString(R.string.self_hiding_failed),
-                        Snackbar.LENGTH_LONG,
-                    ).show()
-                }
-                ok
-            }
+        val hideDesktopIcon = findSelfHidingSwitch(R.string.hide_desktop_icon_key)
+        val hideRecents = findSelfHidingSwitch(R.string.hide_recents_key)
 
-        val hideRecents = findPreference<SwitchPreferenceCompat>(
-            getString(R.string.hide_recents_key)
-        ) ?: return
-        hideRecents.isChecked = SelfHidingPreferences.isHideRecents(requireContext())
-        hideRecents.onPreferenceChangeListener =
-            Preference.OnPreferenceChangeListener { _, newValue ->
-                val hide = newValue as Boolean
-                val ok = SelfHidingPreferences.setHideRecents(
-                    requireContext(), requireActivity(), hide,
-                )
-                if (!ok) {
-                    hideRecents.isChecked = !hide
-                    Snackbar.make(
-                        requireView(),
-                        getString(R.string.self_hiding_failed),
-                        Snackbar.LENGTH_LONG,
-                    ).show()
+        // 两项都缺失 = 当前生效的偏好 XML 变体里根本没有「本模块」分类。
+        // 这是 5.5.14 的真实缺陷（只改了 res/xml、漏改 res/xml-v30，而 Android 11+
+        // 只加载 v30 变体），界面上表现为"设置页最底下没有这两个开关"且**零日志**。
+        // 无论如何都要留痕：静默跳过让这次缺陷多花了一整轮排查。
+        if (hideDesktopIcon == null && hideRecents == null) {
+            Log.e(
+                TAG_SELF_HIDING,
+                "self-hiding switches absent from the loaded preference XML; " +
+                        "current variant is missing the \"${getString(R.string.self_hiding_header)}\" " +
+                        "category. presentKeys=${allPreferenceKeys()}"
+            )
+            return
+        }
+        hideDesktopIcon?.apply {
+            // 以 PackageManager 的实际状态为准，不以偏好为准：
+            // 用户可能在系统设置里手动恢复过，或覆盖安装重置了 alias。
+            isChecked = !SelfHidingPreferences.isDesktopIconActuallyVisible(requireContext())
+            onPreferenceChangeListener =
+                Preference.OnPreferenceChangeListener { _, newValue ->
+                    val hide = newValue as Boolean
+                    val ok = SelfHidingPreferences.setHideDesktopIcon(requireContext(), hide)
+                    if (!ok) {
+                        isChecked = !hide
+                        Snackbar.make(
+                            requireView(),
+                            getString(R.string.self_hiding_failed),
+                            Snackbar.LENGTH_LONG,
+                        ).show()
+                    }
+                    ok
                 }
-                ok
+        }
+
+        hideRecents?.apply {
+            isChecked = SelfHidingPreferences.isHideRecents(requireContext())
+            onPreferenceChangeListener =
+                Preference.OnPreferenceChangeListener { _, newValue ->
+                    val hide = newValue as Boolean
+                    val ok = SelfHidingPreferences.setHideRecents(
+                        requireContext(), requireActivity(), hide,
+                    )
+                    if (!ok) {
+                        isChecked = !hide
+                        Snackbar.make(
+                            requireView(),
+                            getString(R.string.self_hiding_failed),
+                            Snackbar.LENGTH_LONG,
+                        ).show()
+                    }
+                    ok
+                }
+        }
+    }
+
+    /**
+     * 按字符串资源取开关偏好，缺失时**记录诊断**而不是静默返回。
+     *
+     * 偏好 XML 有 `res/xml` 与 `res/xml-v30` 两个变体，Android 11+ 只加载后者。
+     * 任一变体漏掉节点时，`findPreference` 返回 null —— 原来用 `?: return`
+     * 直接跳过，界面上只是"开关不见了"，日志里一条线索都没有（第47批踩过）。
+     * 这里必须把「期望的 key」与「实际存在的 key」都打出来，才能一次定位。
+     */
+    private fun findSelfHidingSwitch(keyRes: Int): SwitchPreferenceCompat? {
+        val key = getString(keyRes)
+        val p = findPreference<SwitchPreferenceCompat>(key)
+        if (p == null) {
+            Log.e(
+                TAG_SELF_HIDING,
+                "preference not found: key=$key res=0x${Integer.toHexString(keyRes)}; " +
+                        "presentKeys=${allPreferenceKeys()}"
+            )
+        }
+        return p
+    }
+
+    /**
+     * 当前已加载偏好树里的全部 key，用于诊断"哪个变体被加载、里面有什么"。
+     * 只在失败路径调用，不进热路径。
+     */
+    private fun allPreferenceKeys(): String = try {
+        val screen = preferenceScreen
+        buildList {
+            fun walk(group: androidx.preference.PreferenceGroup) {
+                for (i in 0 until group.preferenceCount) {
+                    val p = group.getPreference(i)
+                    p.key?.let { add(it) }
+                    if (p is androidx.preference.PreferenceGroup) walk(p)
+                }
             }
+            walk(screen)
+        }.joinToString(",")
+    } catch (e: Throwable) {
+        "unavailable(${e.javaClass.simpleName})"
     }
 
     @Suppress("DEPRECATION")
@@ -752,5 +806,14 @@ class MoreOptionsFragment : BaseSettingsFragment() {
 
     companion object {
         private const val DIALOG_FRAGMENT_TAG = "androidx.preference.PreferenceFragment.DIALOG"
+
+        /**
+         * 隐身开关诊断日志 tag。
+         *
+         * **必须**与 `LogTagFilter.TAGS` 里的同名条目保持一致 —— logcat 的 tag 过滤
+         * 是精确字符串比较、没有通配，漏登记会让这个 tag 的全部日志在归档里静默消失
+         * （第37批踩过一次，第47批又踩：MC_SelfHide 全部日志在归档里 0 条）。
+         */
+        private const val TAG_SELF_HIDING = "MC_SelfHide"
     }
 }
