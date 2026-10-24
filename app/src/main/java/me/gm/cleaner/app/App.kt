@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import me.gm.cleaner.client.ClientErrorJournal
+import me.gm.cleaner.client.SelfHidingPreferences
 import me.gm.cleaner.client.ServerStateMachine
 import me.gm.cleaner.client.ServiceBootStateStore
 import me.gm.cleaner.dao.AppLabelCache
@@ -37,6 +38,9 @@ class App : Application() {
         ServiceBootStateStore.init(dpsContext)
         ClientErrorJournal.init(dpsContext)
         ServerStateMachine.init(this)
+        // 覆盖安装后 alias 的 enabled 状态可能被重置回 manifest 默认值 ⇒
+        // 用户勾了「隐藏桌面图标」却在升级后又看到图标。这里按偏好重放一次，幂等。
+        SelfHidingPreferences.reconcileOnStartup(this)
         Shell.setDefaultBuilder(
             Shell.Builder.create()
                 .setFlags(Shell.FLAG_MOUNT_MASTER)

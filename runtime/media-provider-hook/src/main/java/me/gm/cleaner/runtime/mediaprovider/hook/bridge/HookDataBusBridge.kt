@@ -64,6 +64,24 @@ object HookDataBusBridge {
     @Volatile
     private var everHadCallback = false
 
+    /**
+     * 已报过「桥未注入即读快照」的快照名。
+     *
+     * 第 45 批现场：`HookPolicyCache` 每 30 s 打一轮「no snapshot available」，
+     * 但**没有任何一行**能回答「为什么读不到」——因为
+     * `DataBus.readSnapshot` 对「路径不存在/无权访问」两种情况都静默返回 null
+     * （只有「存在但非常规文件」才打 W）。旧实现让现场只能看到症状、
+     * 看不到原因；本次把「桥未注入」这个唯一可能原因直接打出来。
+     *
+     * 按名去重：一个进程内每个快照只报一次，不会每 30 s 刷屏。
+     * 进程重启后会重报一次——这是刻意的：「本进程此刻确实没桥」
+     * 是每个进程身份都需要各自知道一次的事实。
+     */
+    private val reportedNoCallbackSnapshots =
+        java.util.Collections.newSetFromMap(
+            java.util.concurrent.ConcurrentHashMap<String, Boolean>(),
+        )
+
     fun setCallback(value: ICleanerServerCallback?) {
         callback = value
         if (value != null) {
@@ -89,7 +107,22 @@ object HookDataBusBridge {
                 )
             }
         }
-        return DataBus.readSnapshot(name)
+        if (remote == null && reportedNoCallbackSnapshots.add(name)) {
+            // 这是第 45 批全部降级的**直接原因**在现场的唯一可见形式：
+            // server 从未把回调注入桥 ⇒ 只能走文件兜底 ⇒ 本进程无权
+            // 读取 /data/local/tmp/cleaner/bus ⇒ 必然拿不到。
+            Log.w(
+                TAG,
+                "readSnapshot without server callback (bridge not injected): $name" +
+                        " — falling back to direct file read, which this process" +
+                        " (uid=${android.os.Process.myUid()}) normally cannot do",
+            )
+        }
+        val value = DataBus.readSnapshot(name)
+        if (value == null && remote == null && reportedNoCallbackSnapshots.add("$name#fallback")) {
+            Log.w(TAG, "readSnapshot fallback also failed: $name — snapshot unavailable to this process")
+        }
+        return value
     }
 
     fun getSignalTimestamp(name: String): Long {

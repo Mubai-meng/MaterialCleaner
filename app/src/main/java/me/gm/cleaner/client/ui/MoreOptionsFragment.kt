@@ -33,6 +33,7 @@ import kotlinx.coroutines.withContext
 import me.gm.cleaner.R
 import me.gm.cleaner.app.ConfirmationDialog
 import me.gm.cleaner.client.CleanerClient
+import me.gm.cleaner.client.SelfHidingPreferences
 import me.gm.cleaner.client.ui.storageredirect.MountWizard
 import me.gm.cleaner.client.ui.storageredirect.RedirectReachabilityAnalyzer
 import me.gm.cleaner.dao.RootPreferences
@@ -576,6 +577,8 @@ class MoreOptionsFragment : BaseSettingsFragment() {
             true
         }
 
+        bindSelfHidingPreferences()
+
         val about = findPreference<Preference>(getString(R.string.about_key))!!
         about.onPreferenceClickListener = Preference.OnPreferenceClickListener {
             com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
@@ -658,6 +661,61 @@ class MoreOptionsFragment : BaseSettingsFragment() {
             Preference.OnPreferenceChangeListener { _, _ ->
                 ActivityCompat.recreate(requireActivity())
                 true
+            }
+    }
+
+    /**
+     * 「本模块」分类的两个开关：隐藏桌面图标 / 隐藏后台任务。
+     *
+     * 与其它偏好不同：这两项**不过 server**（不改任何存储重定向策略），
+     * 也不走 `NotifyServerPreferenceChangeListener`。它们只影响本模块自己的
+     * 启动器条目与 task 属性，纯客户端行为。
+     *
+     * 失败处理：`setComponentEnabledSetting` 失败或未生效时**回滚开关状态**，
+     * 否则用户会看到一个「已隐藏」的勾但图标还在 —— 这类静默不一致比直接报错更糟。
+     */
+    private fun bindSelfHidingPreferences() {
+        val hideDesktopIcon = findPreference<SwitchPreferenceCompat>(
+            getString(R.string.hide_desktop_icon_key)
+        ) ?: return
+        // 以 PackageManager 的实际状态为准，不以偏好为准：
+        // 用户可能在系统设置里手动恢复过，或覆盖安装重置了 alias。
+        hideDesktopIcon.isChecked =
+            !SelfHidingPreferences.isDesktopIconActuallyVisible(requireContext())
+        hideDesktopIcon.onPreferenceChangeListener =
+            Preference.OnPreferenceChangeListener { _, newValue ->
+                val hide = newValue as Boolean
+                val ok = SelfHidingPreferences.setHideDesktopIcon(requireContext(), hide)
+                if (!ok) {
+                    hideDesktopIcon.isChecked = !hide
+                    Snackbar.make(
+                        requireView(),
+                        getString(R.string.self_hiding_failed),
+                        Snackbar.LENGTH_LONG,
+                    ).show()
+                }
+                ok
+            }
+
+        val hideRecents = findPreference<SwitchPreferenceCompat>(
+            getString(R.string.hide_recents_key)
+        ) ?: return
+        hideRecents.isChecked = SelfHidingPreferences.isHideRecents(requireContext())
+        hideRecents.onPreferenceChangeListener =
+            Preference.OnPreferenceChangeListener { _, newValue ->
+                val hide = newValue as Boolean
+                val ok = SelfHidingPreferences.setHideRecents(
+                    requireContext(), requireActivity(), hide,
+                )
+                if (!ok) {
+                    hideRecents.isChecked = !hide
+                    Snackbar.make(
+                        requireView(),
+                        getString(R.string.self_hiding_failed),
+                        Snackbar.LENGTH_LONG,
+                    ).show()
+                }
+                ok
             }
     }
 

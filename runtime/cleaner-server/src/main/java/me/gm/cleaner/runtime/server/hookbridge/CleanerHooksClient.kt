@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.util.Log
 import me.gm.cleaner.runtime.server.CleanerServer
 import me.gm.cleaner.server.ICleanerHooksService
+import me.gm.cleaner.server.ICleanerServerCallback
 import java.util.function.Consumer
 
 object CleanerHooksClient {
@@ -84,7 +85,56 @@ object CleanerHooksClient {
         // 桥换代：通知网关递增代数，供恢复策略区分"过渡态"与"真故障"。
         MediaProviderHookGateway.onBridgeConnected()
         Log.i("MC_REDIRECT", "[CleanerHooksClient] $reason: connected")
+
+        // ⨀ 连接建立后**必须**把 server 回调注入桥。
+        //
+        // 第 45 批根因（5.5.11 回归）：本函数以前只打一行 connected 就 return。
+        // 而回调注入在当时只存在于 `whileAlive` 的**重连分支**内：
+        //   \`\`\`
+        //   if (service == null || !pingBinder()) { tryReconnect(...); service?.setCleanerServerBinder(...) }
+        //   \`\`\`
+        // 桥一直活着时 `service != null` 且 `pingBinder()==true`，快路径直接跳过整个分支
+        // ⇒ 回调**永远没有注入过**。
+        //
+        // 第 45 批实测铁证：
+        //   - server `startupRetry#6: connected` @ 09:02:51.160，之后全日志
+        //     `[HooksBridge] setCleanerServerBinder` **0 条**；
+        //   - `MediaProviderHooksService.setCleanerServerBinder called` **0 条**；
+        //   - 而 `startupTiming.segmentsMs.hookRefresh = 0`（内存快照事实，不受丢日志影响）
+        //     ⇒ `registerAndRefreshFromDataBus` 在桥连上之前就空转而过，`whileAlive` 发现
+        //     `service == null` → `tryReconnect` 被 5s 节流挡住 → return，什么都没发。
+        //
+        // 后果链：回调 null ⇒ `HookDataBusBridge.callback == null` ⇒ MediaProvider
+        // 读快照落文件兜底 ⇒ SELinux/uid 无权读 `/data/local/tmp/cleaner/bus`
+        // ⇒ 四类快照全 null ⇒ `loadConfiguredMountPoints` 直接 return false
+        // ⇒ `FuseNativePolicyAdapter.applyConfiguredMountPoints` 永远不被调用
+        // ⇒ hook 侧 `mountPointsGeneration=0` / `appliedPublisherEpoch=""`
+        // ⇒ server 侧 `NativeSyncPolicy` 判 STALE ⇒ 界面「存储重定向降级运行」。
+        injectServerCallback(ctx.mCleanerServerCallback)
         return true
+    }
+
+    /**
+     * 把 server 回调注入当前桥（应用进程侧代理会转发给 Xposed/MediaProvider）。
+     *
+     * 必须在**每次** `establishConnection` 成功后调用：应用进程重启后桥里的
+     * `sServerCallback` 也会丢，不重注就是第 45 批那个全部降级的局面。
+     *
+     * 失败只记 W 不抛：桥已经建立，注册失败不应把整个连接判为失败
+     * （否则会让 startup 阶梯重跑而不解决任何问题）。
+     */
+    private fun injectServerCallback(callback: ICleanerServerCallback) {
+        val target = service ?: return
+        try {
+            target.setCleanerServerBinder(callback)
+            Log.i("MC_REDIRECT", "[CleanerHooksClient] server callback injected into hooks bridge")
+        } catch (e: RemoteException) {
+            Log.w("MC_REDIRECT", "[CleanerHooksClient] Failed to inject server callback", e)
+            clearDeadConnection()
+        } catch (e: RuntimeException) {
+            Log.w("MC_REDIRECT", "[CleanerHooksClient] Failed to inject server callback", e)
+            clearDeadConnection()
+        }
     }
 
     private fun unlinkCurrentDeathRecipient() {
@@ -151,13 +201,10 @@ object CleanerHooksClient {
                         "(throttled or binder unavailable), will retry")
                 return
             }
-            try {
-                service?.setCleanerServerBinder(ctx.mCleanerServerCallback)
-            } catch (e: RemoteException) {
-                Log.e("MC_REDIRECT", "[CleanerHooksClient] Failed to re-register callback", e)
-                clearDeadConnection()
-                return
-            }
+            // 回调注入已收口进 establishConnection：tryReconnect 走的就是那条路径，
+            // 这里再注入一次纯属多余的 Binder 往返（setCleanerServerBinder 幂等，但
+            // 会多一条日志、让「注入了几次」这个事实失去唯一性）。
+            if (!pingBinder()) return
         }
         val s = service ?: return
         if (pingBinder()) {

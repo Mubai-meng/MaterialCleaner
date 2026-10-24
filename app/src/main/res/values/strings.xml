@@ -51,6 +51,16 @@
     <string name="check_update_key" translatable="false">check_update</string>
     <string name="check_update_title">Check for updates</string>
     <string name="check_update_summary">Fetch the latest release from GitHub</string>
+
+    <!-- Self hiding (5.5.13) -->
+    <string name="self_hiding_header">This module</string>
+    <string name="hide_desktop_icon_key" translatable="false">hide_desktop_icon</string>
+    <string name="hide_desktop_icon_title">Hide desktop icon</string>
+    <string name="hide_desktop_icon_summary">Hide this module\'s icon from the launcher. You can still open it from LSPosed or adb after hiding.</string>
+    <string name="hide_recents_key" translatable="false">hide_recents</string>
+    <string name="hide_recents_title">Hide from recent tasks</string>
+    <string name="hide_recents_summary">Keep this module out of the recent tasks list.</string>
+    <string name="self_hiding_failed">Failed to apply: the system did not accept the change.</string>
     <string name="new_version_available">New version %s available</string>
     <string name="click_to_view_release">Click to view release</string>
     <string name="update_available_channel_name">Update available</string>

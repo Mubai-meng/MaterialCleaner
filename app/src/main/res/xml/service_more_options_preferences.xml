@@ -136,4 +136,27 @@
             android:summary="@string/about_summary"
             android:title="@string/about_title" />
     </PreferenceCategory>
+
+    <!--
+        用户要求放在设置页最下面。语义是「让本模块自己在系统桌面/后台消失」，
+        不是隐藏别的应用 —— 见 SelfHidingPreferences 的类文档。
+    -->
+    <PreferenceCategory
+        android:title="@string/self_hiding_header"
+        app:iconSpaceReserved="false">
+
+        <SwitchPreferenceCompat
+            android:defaultValue="false"
+            android:key="@string/hide_desktop_icon_key"
+            android:summary="@string/hide_desktop_icon_summary"
+            android:title="@string/hide_desktop_icon_title"
+            app:iconSpaceReserved="false" />
+
+        <SwitchPreferenceCompat
+            android:defaultValue="false"
+            android:key="@string/hide_recents_key"
+            android:summary="@string/hide_recents_summary"
+            android:title="@string/hide_recents_title"
+            app:iconSpaceReserved="false" />
+    </PreferenceCategory>
 </PreferenceScreen>

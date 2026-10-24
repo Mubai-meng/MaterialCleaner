@@ -41,15 +41,32 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
+        <!--
+            桌面图标由 activity-alias 承载，而不是直接挂在 ServiceSettingsActivity 上。
+            原因（5.5.13 隐藏桌面图标功能）：禁用 Activity 的 enabled 会让 LSPosed
+            也无法用 `am start` / 模块详情页打开它；而 activity-alias 只控制「图标是否
+            出现在启动器」，本体始终 enabled ⇒ 隐藏后仍可由 LSPosed 或 adb 打开。
+            ⚠️ 别名必须写死 `.LauncherAlias`：PackageManager 按 ComponentName 字符串
+            匹配，改包名会导致老版本已隐藏的图标再也无法被 setComponentEnabledSetting 打开。
+        -->
         <activity
             android:name=".client.ui.ServiceSettingsActivity"
             android:exported="true"
-            android:label="@string/service_settings">
+            android:label="@string/service_settings" />
+
+        <activity-alias
+            android:name=".LauncherAlias"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:icon="@mipmap/ic_launcher"
+            android:roundIcon="@mipmap/ic_launcher_round"
+            android:targetActivity=".client.ui.ServiceSettingsActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
 
         <activity
             android:name=".client.ServerBridgeActivity"

@@ -48,6 +48,14 @@
     <string name="post_notification_title">接收更新通知</string>
     <string name="check_update_title">检查更新</string>
     <string name="check_update_summary">从 GitHub 获取最新版本</string>
+
+    <!-- 模块自身隐藏（5.5.13） -->
+    <string name="self_hiding_header">本模块</string>
+    <string name="hide_desktop_icon_title">隐藏桌面图标</string>
+    <string name="hide_desktop_icon_summary">从启动器隐藏本模块图标。隐藏后仍可从 LSPosed 或 adb 打开。</string>
+    <string name="hide_recents_title">隐藏后台任务</string>
+    <string name="hide_recents_summary">让本模块不出现在最近任务（多任务）列表中。</string>
+    <string name="self_hiding_failed">设置未生效：系统未接受本次变更。</string>
     <string name="new_version_available">发现新版本 %s</string>
     <string name="click_to_view_release">点击查看更新说明</string>
     <string name="update_available_channel_name">更新可用</string>

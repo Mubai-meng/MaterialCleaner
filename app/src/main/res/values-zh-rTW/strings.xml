@@ -48,6 +48,14 @@
     <string name="post_notification_title">接收更新通知</string>
     <string name="check_update_title">檢查更新</string>
     <string name="check_update_summary">從 GitHub 獲取最新版本</string>
+
+    <!-- 模組自身隱藏（5.5.13） -->
+    <string name="self_hiding_header">本模組</string>
+    <string name="hide_desktop_icon_title">隱藏桌面圖示</string>
+    <string name="hide_desktop_icon_summary">從啟動器隱藏本模組圖示。隱藏後仍可從 LSPosed 或 adb 開啟。</string>
+    <string name="hide_recents_title">隱藏背景工作</string>
+    <string name="hide_recents_summary">讓本模組不出現在最近工作（多工）清單中。</string>
+    <string name="self_hiding_failed">設定未生效：系統未接受本次變更。</string>
     <string name="new_version_available">發現新版本 %s</string>
     <string name="click_to_view_release">點擊查看更新說明</string>
     <string name="update_available_channel_name">更新可用</string>
