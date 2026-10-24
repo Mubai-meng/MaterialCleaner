@@ -62,16 +62,55 @@ object SelfHidingPreferences {
             "${BuildConfig.APPLICATION_ID}.LauncherAlias",
         )
 
+    /**
+     * 偏好必须放在**设备加密保护存储**（DE），不能放 CE。
+     *
+     * ⚠️ 这是 5.5.14 修的 P0 崩溃（5.5.13 引入）：
+     *
+     * 5.5.12 给 `HooksBridgeProvider` 加了 `android:directBootAware="true"`（开机握手必需），
+     * 于是**用户解锁之前**就会出现 `me.gm.cleaner` 进程并执行 `App.onCreate`。
+     * 而 [reconcileOnStartup] 在 `App.onCreate` 里读偏好 —— 若偏好建在 CE 存储上，
+     * 未解锁时 `getSharedPreferences` 直接抛：
+     *
+     * ```
+     * IllegalStateException: SharedPreferences in credential encrypted storage are
+     *   not available until after user (id 0) is unlocked
+     * at me.gm.cleaner.app.App.onCreate(App.kt:47)
+     * ```
+     *
+     * 后果不是"读不到偏好"，而是 `Unable to create application` ⇒ 整个进程创建失败
+     * ⇒ UI 显示「存储重定向未运行」（实质是 App 侧拿不到 server binder）。
+     *
+     * 修法与 `RootPreferences` / `ServicePreferences` / `ServiceBootStateStore` 完全一致：
+     * 统一用 `createDeviceProtectedStorageContext()`。DE 存储在解锁前后都可读写，
+     * 而这两个开关（桌面图标可见性、是否进最近任务）本来也不含任何用户隐私。
+     */
     private fun prefs(context: Context) =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     // ── 读 ──
 
+    /**
+     * 读偏好一律不抛。
+     *
+     * 兜底的必要性：即使已迁到 DE 存储，`App.onCreate` 仍在 Direct Boot 窗口内执行，
+     * 任何一次异常都会让进程创建失败（不是"开关失效"，而是整个 App 起不来）。
+     * 读不到就按 `false`（不隐藏）处理 —— 失败方向应是"图标可见、可进入设置"，
+     * 绝不是"图标消失且无处可点"。
+     */
+    private fun readBoolean(context: Context, key: String): Boolean = try {
+        prefs(context).getBoolean(key, false)
+    } catch (e: Exception) {
+        Log.w(TAG, "read preference $key failed, falling back to false", e)
+        false
+    }
+
     fun isHideDesktopIcon(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_HIDE_DESKTOP_ICON, false)
+        readBoolean(context, KEY_HIDE_DESKTOP_ICON)
 
     fun isHideRecents(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_HIDE_RECENTS, false)
+        readBoolean(context, KEY_HIDE_RECENTS)
 
     /**
      * 当前**实际**的图标可见状态（读 PackageManager，不读偏好）。
@@ -112,7 +151,10 @@ object SelfHidingPreferences {
             context.packageManager.setComponentEnabledSetting(
                 launcherAlias, newState, PackageManager.DONT_KILL_APP,
             )
-            prefs(context).edit { putBoolean(KEY_HIDE_DESKTOP_ICON, hide) }
+            // 偏好写入失败不影响本次开关是否生效（PackageManager 已经改成功了），
+            // 只影响「下次冷启动要不要重放」。绝不能让它把设置页点崩。
+            runCatching { prefs(context).edit { putBoolean(KEY_HIDE_DESKTOP_ICON, hide) } }
+                .onFailure { Log.w(TAG, "write hide_desktop_icon preference failed", it) }
             // 读回校验：某些 ColorOS 版本上 setComponentEnabledSetting 会返回成功但不落盘。
             val visible = isDesktopIconActuallyVisible(context)
             val ok = visible != hide
@@ -162,11 +204,9 @@ object SelfHidingPreferences {
             false
         }
         // 偏好无论成败都写：下次冷启动会再试一次，写下来才知道"用户想要什么"。
-        try {
-            prefs(context).edit { putBoolean(KEY_HIDE_RECENTS, hide) }
-        } catch (e: Exception) {
-            Log.e(TAG, "write hide_recents preference failed", e)
-        }
+        // 这里同样不能抛 —— 见 readBoolean 的注释。
+        runCatching { prefs(context).edit { putBoolean(KEY_HIDE_RECENTS, hide) } }
+            .onFailure { Log.w(TAG, "write hide_recents preference failed", it) }
         Log.i(TAG, "hide_recents=$hide applied=$ok")
         return ok
     }
