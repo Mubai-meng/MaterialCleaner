@@ -93,8 +93,10 @@ ext {
     // ④ boot log 裁剪加 `### REPLAY` 段：跨日重放行（logd 从 ramoops 重放旧崩溃）
     //    单列，不再污染 CRITICAL 的时间轴（原先会算出负跨度）与预算。
     // 若要切回上游口径，把下面一行改回 `versionCode = gitCommitCount` 即可。
-    versionCode = 566
-    versionName = '5.5.16'
+    // 2026-10-25：6.0.0 / 600 = 用户要求的正式版里程碑（承接 5.5.16 的三项日志侧改动，
+    // 行为与 5.5.16 完全一致，仅版本号跨入 6.x 以标记适配阶段收尾）。
+    versionCode = 600
+    versionName = '6.0.0'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 
