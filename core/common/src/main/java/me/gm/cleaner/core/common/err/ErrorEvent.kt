@@ -39,6 +39,22 @@ data class ErrorEvent(
      * 跨重启归属与"这件事发生在几点"。
      */
     val atWallMillis: Long = 0L,
+    /**
+     * 会话标识（开机维度），形如 `b<bootWallMillis>`；null 表示无法确定。
+     *
+     * 由 [ErrorJournal.record] 统一补齐（与 [atWallMillis] 同一策略），
+     * 调用点不需要、也不应该各自计算 —— 口径必须唯一，否则同一进程的
+     * 不同事件会落到不同会话里。
+     */
+    val sessionId: String? = null,
+    /**
+     * 写入该条目的进程 pid；0 表示未知。
+     *
+     * 会话（= 一次开机）内部再区分「服务被重启了几次」需要它：
+     * `atElapsed` 在同一 boot 内持续单调增，进程重启不会让它回零，
+     * 所以只靠时间戳看不出进程边界。
+     */
+    val pid: Int = 0,
 ) {
     init {
         require(code.isNotEmpty()) { "error code must not be empty" }
@@ -69,6 +85,8 @@ data class ErrorEvent(
         put("code", code)
         put("atElapsed", atElapsed)
         if (atWallMillis > 0L) put("atWall", atWallMillis)
+        sessionId?.let { put("sessionId", it) }
+        if (pid > 0) put("pid", pid)
         if (errno != 0) put("errno", errno)
         subject?.let { put("subject", it) }
         pathDigest?.let { put("pathDigest", it) }

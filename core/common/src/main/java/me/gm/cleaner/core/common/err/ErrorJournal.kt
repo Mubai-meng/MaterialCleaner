@@ -28,17 +28,34 @@ class ErrorJournal(
     private val buffer = ArrayDeque<ErrorEvent>(capacity)
 
     /**
+     * 本进程所属会话，**构造时算一次**。
+     *
+     * 不能每行重算：NTP 校正会让同一 boot 内的 boot_ts 漂移几十秒，
+     * 逐行计算等于把同一会话拆成多个 id。构造时机早于任何 [record]，
+     * 因此进程内所有事件必然同 id。
+     */
+    private val sessionId: String? = SessionStamp.currentSessionId()
+
+    /** 本进程 pid，同样只取一次（进程不会中途换 pid）。 */
+    private val pid: Int = SessionStamp.currentPid()
+
+    /**
      * 记录一条错误事件；满容量时静默淘汰最旧条目。
      *
-     * 墙钟戳在这里统一补齐（而不是要求每个调用点自己传）：持久层跨重启累积，
-     * 只有单调时钟的条目无法归属到具体会话。调用点显式给出时尊重原值。
+     * 墙钟戳与**会话标识**在这里统一补齐（而不是要求每个调用点自己传）：
+     * 持久层跨重启累积，只有单调时钟的条目既无法归属到具体会话、也无法排序。
+     * 调用点显式给出时尊重原值（便于测试与跨进程转发场景）。
      */
     fun record(event: ErrorEvent) {
-        val stamped = if (event.atWallMillis == 0L) {
-            event.copy(atWallMillis = System.currentTimeMillis())
-        } else {
-            event
-        }
+        val stamped = event.copy(
+            atWallMillis = if (event.atWallMillis == 0L) {
+                System.currentTimeMillis()
+            } else {
+                event.atWallMillis
+            },
+            sessionId = event.sessionId ?: sessionId,
+            pid = if (event.pid > 0) event.pid else pid,
+        )
         synchronized(lock) {
             if (buffer.size >= capacity) {
                 buffer.removeFirst()

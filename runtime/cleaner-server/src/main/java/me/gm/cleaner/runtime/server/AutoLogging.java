@@ -5,7 +5,9 @@ import android.util.Log;
 
 import java.io.Closeable;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
@@ -104,6 +106,49 @@ public class AutoLogging {
      */
     private static final int CRASH_ROTATE_KBYTES = 2048;
     private static final int CRASH_ROTATE_COUNT = 2;
+
+    /**
+     * 崩溃通道的**哨兵行**前缀（5.5.16，第 48 批 §4.1）。
+     *
+     * 缺陷现场：`cleaner-crash.log` 连续多次会话**全程 0 字节**，mtime 停在旧会话，
+     * 而同一次会话里 crash buffer 确实有新条目（20:06:25 的 FORTIFY 告警晚于通道启动
+     * 2.5 分钟）。同时刻的启动窗口段（`-b main,system,crash`）却把同一批 crash 行
+     * 写了进去 —— 所以不是 SELinux、不是权限、不是 logd 不可读。
+     *
+     * 剩下的唯一解释是 `logcat -f` 的**块缓冲**：crash buffer 没有新条目时几乎不产出
+     * 字节流，连 `--------- beginning of crash` 都不落盘。对排障者的后果是
+     * 「0 字节」同时代表「没崩溃」和「通道根本没工作」，二者无法区分 ——
+     * 正是规则⑨（"日志里没有"≠"没发生"）的另一个方向。
+     *
+     * 修法（最小、零功能风险）：logcat 启动**之前**先往目标文件写一行哨兵，
+     * 再在 [CRASH_PROBE_SECONDS] 秒后校验文件是否增长：
+     * - 增长 ⇒ 通道确实在落盘，只是此前没有可写的崩溃；
+     * - 未增长 ⇒ 通道静默，写明在文件里，下一批可直接据此判定是否需要改成周期
+     *   `logcat -d -b crash` 快照（那才是不依赖 `-f` 缓冲的方案）。
+     *
+     * 写入时机必须早于 logcat：`logcat -f` 以 `"a"`（append）打开文件，
+     * 且写入前会 seek 到 EOF，所以先写的哨兵不会被覆盖，也不会与它争 offset。
+     */
+    static final String CRASH_SENTINEL_PREFIX = "# crash channel armed";
+
+    /**
+     * 重写哨兵前允许的既有字节数。
+     *
+     * 只在这个范围内才认为「文件里只有上一次的哨兵/诊断行」，可以安全重写；
+     * 超过就说明确实写进过崩溃内容（或已轮转出 `.1`），此时**只追加**不覆盖 ——
+     * 抹掉崩溃证据比留下多几行哨兵严重得多。
+     */
+    private static final long CRASH_SENTINEL_RESET_BYTES = 1024L;
+
+    /**
+     * 崩溃通道静默自检的延迟（秒）。
+     *
+     * 取 90 s 而不是更短：crash buffer 的内容取决于设备上**是否真的崩过**，
+     * 空闲期本来就该是 0 条；太短的窗口会把「正常空闲」误报成「通道静默」。
+     * 90 s 覆盖了 server 启动 + 首轮挂载（实测启动窗 4.2 s、boot 段 60 s），
+     * 若这段时间通道健康，之后崩溃时自然会写进来。
+     */
+    private static final int CRASH_PROBE_SECONDS = 90;
 
     /** 启动窗口段：跑 60 秒，最多 2 × 8 MB = 16 MB（峰值 ~265 KB/s 时仍覆盖 60 s）。 */
     private static final int BOOT_LOG_SECONDS = 60;
@@ -337,9 +382,10 @@ public class AutoLogging {
                         + BOOT_ROTATE_COUNT + "x" + BOOT_ROTATE_KBYTES + "KB"
                         + " tags=" + LogTagFilter.INSTANCE.getFILTER_SPEC().split(" ").length);
         mLogProcess = startRingChannel(
-                LOG_BASE_NAME, buildLogcatCommand(null), "auto logging");
+                LOG_BASE_NAME, buildLogcatCommand(null), "auto logging", null);
         mCrashLogProcess = startRingChannel(
-                CRASH_LOG_BASE_NAME, buildCrashLogcatCommand(null), "auto logging crash");
+                CRASH_LOG_BASE_NAME, buildCrashLogcatCommand(null), "auto logging crash",
+                CRASH_SENTINEL_PREFIX);
         startBootLogLocked();
     }
 
@@ -347,9 +393,11 @@ public class AutoLogging {
      * 预创建基名文件、把真实路径填进命令模板、启动 logcat。
      *
      * @param argvTemplate 命令模板；其中 {@link #PATH_PLACEHOLDER} 会被替换为真实路径
+     * @param sentinel     ｜非 null 时在 logcat 启动**之前**向文件写入该前缀的哨兵行，
+     *                     并调度一次静默自检（见 [CRASH_SENTINEL_PREFIX]）
      */
     private Process startRingChannel(final String baseName, final String[] argvTemplate,
-                                     final String label) {
+                                     final String label, final String sentinel) {
         final File logFile;
         try {
             logFile = prepareRingFile(baseName);
@@ -363,7 +411,124 @@ public class AutoLogging {
                 argv[i] = logFile.getAbsolutePath();
             }
         }
+        if (sentinel != null) {
+            armChannel(logFile, sentinel, argv);
+        }
         return startLogcat(argv, label + " -> " + baseName);
+    }
+
+    /**
+     * 写哨兵行并调度静默自检。
+     *
+     * 顺序很关键：先写哨兵再 startLogcat —— logcat 以 append 模式打开，
+     * 若先启动它，文件可能已被它持有且位置未知，追加会出现交错。
+     */
+    private static void armChannel(final File logFile, final String sentinel,
+                                   final String[] argv) {
+        final long armedBytes = writeSentinel(logFile, sentinel, argv);
+        if (armedBytes <= 0L) {
+            // 哨兵写失败（权限/磁盘满）不阻断采集：没有哨兵只是少一层判据，
+            // 而 logcat 本身仍可能正常工作。
+            return;
+        }
+        try {
+            BOOT_SCHEDULER.schedule(
+                    () -> verifyChannel(logFile, armedBytes),
+                    CRASH_PROBE_SECONDS, TimeUnit.SECONDS);
+        } catch (final RejectedExecutionException e) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "channel probe schedule failed", e);
+        }
+    }
+
+    /**
+     * 纯函数：构造哨兵行。
+     *
+     * 抽出来是为了让单测能钉住三个必须出现的字段：`boot=`（开机墙钟起点，
+     * 与第 48 批分析侧 `audit_ts − uptime` 的口径一致）、`pid=`（区分 server 实例）、
+     * 以及**实际下发的命令行**（否则"通道怎么起的"只能靠读源码猜）。
+     *
+     * @param prefix           哨兵前缀
+     * @param wallMillis       当前墙钟
+     * @param elapsedMillis    当前开机后毫秒（`SystemClock.elapsedRealtime()`）
+     * @param pid              当前 pid
+     * @param commandLine      下发的完整命令行（空格连接）
+     */
+    static String sentinelLine(final String prefix, final long wallMillis,
+                               final long elapsedMillis, final int pid,
+                               final String commandLine) {
+        final long bootWall = wallMillis - elapsedMillis;
+        return prefix + ": wall=" + wallMillis
+                + " elapsed=" + elapsedMillis
+                + " boot=" + bootWall
+                + " pid=" + pid
+                + " cmd=[" + commandLine + "]";
+    }
+
+    /**
+     * 写哨兵行，返回写后文件长度（写入失败返回 -1）。
+     *
+     * 重置策略见 [CRASH_SENTINEL_RESET_BYTES]：只有「上一次留下的哨兵」这种小文件
+     * 才会被整份重写，避免多轮 server 重启后哨兵无界累积；一旦文件里有真实内容
+     * 就退化为追加。
+     */
+    static long writeSentinel(final File logFile, final String prefix, final String[] argv) {
+        try {
+            final long existing = logFile.length();
+            final boolean reset = existing <= CRASH_SENTINEL_RESET_BYTES;
+            final String line = sentinelLine(
+                    prefix,
+                    System.currentTimeMillis(),
+                    android.os.SystemClock.elapsedRealtime(),
+                    android.os.Process.myPid(),
+                    String.join(" ", argv));
+            try (FileOutputStream out = new FileOutputStream(logFile, !reset)) {
+                out.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            }
+            final long armed = logFile.length();
+            Log.i(BuildConfig.LIBRARY_PACKAGE_NAME,
+                    "channel armed: " + logFile.getName() + " reset=" + reset
+                            + " bytes=" + armed);
+            return armed;
+        } catch (final Throwable t) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "channel sentinel write failed", t);
+            return -1L;
+        }
+    }
+
+    /**
+     * 静默自检：文件在 [CRASH_PROBE_SECONDS] 秒内没有增长 ⇒ 通道没在落盘。
+     *
+     * 这里**只读长度 + 追加一行诊断**，不碰任何采集状态，因此可以安全地在定时线程
+     * 上跑；server 已退出时最坏也只是往一个没人看的文件里多写一行。
+     *
+     * 结论写进文件本身（而不是只打 logcat）：`/data/local/tmp/cleaner_logs` 是
+     * 磁盘目录，诊断包按首尾两段取用，写在这里的结论下一批一定读得到。
+     */
+    static void verifyChannel(final File logFile, final long armedBytes) {
+        try {
+            final long length = logFile.length();
+            if (length > armedBytes) {
+                Log.i(BuildConfig.LIBRARY_PACKAGE_NAME,
+                        "channel alive: " + logFile.getName()
+                                + " +" + (length - armedBytes) + "B in "
+                                + CRASH_PROBE_SECONDS + "s");
+                return;
+            }
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME,
+                    "channel silent: " + logFile.getName() + " wrote 0B in "
+                            + CRASH_PROBE_SECONDS + "s");
+            try (FileOutputStream out = new FileOutputStream(logFile, true)) {
+                out.write(("# channel silent: logcat wrote 0B within "
+                        + CRASH_PROBE_SECONDS + "s since armed (" + armedBytes + "B)"
+                        + " — if this repeats, -f block buffering is the cause;"
+                        + " switch to periodic 'logcat -d -b crash' snapshots\n")
+                        .getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            }
+        } catch (final Throwable t) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "channel probe failed", t);
+        }
     }
 
     /**

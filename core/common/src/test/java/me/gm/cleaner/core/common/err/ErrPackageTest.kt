@@ -90,6 +90,37 @@ class ErrorJournalTest {
         // 注：这里不断言 toJson() —— core:common 的单测没有 org.json 实现
         // （"Method put in org.json.JSONObject not mocked"），JSON 键由产物级检查覆盖。
     }
+
+    @Test
+    fun `record 尊重显式 sessionId 与 pid`() {
+        // 5.5.16：跨进程转发/回放场景会把原会话标识带进来，此时不得用本进程的值覆盖。
+        val journal = ErrorJournal(capacity = 2)
+        journal.record(
+            ErrorEvent(
+                code = ErrorCodes.SUP_PROC_DEAD,
+                atElapsed = 1L,
+                sessionId = "b1792843417956",
+                pid = 4242,
+            ),
+        )
+
+        val event = journal.snapshot().single()
+        assertEquals("b1792843417956", event.sessionId)
+        assertEquals(4242, event.pid)
+    }
+
+    @Test
+    fun `record 补齐的会话标识在进程内恒定`() {
+        // 同一 ErrorJournal 的两条事件必须落进同一会话；否则「按会话分组」
+        // 这件事在单个进程内就先失效了（第 48 批 14 会话混写正是这个后果）。
+        val journal = ErrorJournal(capacity = 4)
+        journal.record(ErrorEvent(code = ErrorCodes.BUS_QUEUE_FULL, atElapsed = 1L))
+        journal.record(ErrorEvent(code = ErrorCodes.BUS_QUEUE_FULL, atElapsed = 2L))
+
+        val snapshot = journal.snapshot()
+        assertEquals(snapshot[0].sessionId, snapshot[1].sessionId)
+        assertEquals(snapshot[0].pid, snapshot[1].pid)
+    }
 }
 
 class ErrorLogThrottleTest {

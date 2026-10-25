@@ -367,16 +367,38 @@ object DiagnosticArchive {
         return boot + ring
     }
 
+    /**
+     * 纯函数：本次归档**没有**收进包的文件，按 mtime 降序。
+     *
+     * 第 48 批 §4.2 的缺陷：manifest 只打 `total=5 included=4`，被静默丢掉的
+     * `cleaner-boot-1792843391140.log`（6,242,304 B，含重启前 86 秒现场）在清单里
+     * 完全不存在 —— 而它正是定位那次整机重启的唯一证据。排障者必须另翻
+     * `commands/auto_logs_tree.txt` 才能发现少了什么，这等于让「证据是否完整」
+     * 这个问题在包里不可答。
+     *
+     * 按 `name` 比对而不是 `File.equals`：同一目录下两者等价，但 name 不依赖路径
+     * 规范化（归档侧可能拿到不同前缀拼出的同名 File）。
+     */
+    internal fun excludedAutoLogFiles(all: List<File>, included: List<File>): List<File> {
+        val kept = included.mapTo(HashSet()) { it.name }
+        return all.asSequence()
+            .filter { it.name !in kept }
+            .sortedByDescending { it.lastModified() }
+            .toList()
+    }
+
     private fun addAutoLogs(zip: ZipOutputStream) {
         val dir = File(AUTO_LOG_DIR)
         val all = dir.listFiles()
             ?.filter { isRegularFileNoFollow(it) && AutoLogging.isLogFileName(it.name) }
             ?: emptyList()
         val files = selectAutoLogFiles(all)
+        val excluded = excludedAutoLogFiles(all, files)
         addText(zip, "logs/auto_logging_manifest.txt", buildString {
             appendLine("dir=$AUTO_LOG_DIR")
             appendLine("total=${all.size}")
             appendLine("included=${files.size}")
+            appendLine("excluded=${excluded.size}")
             appendLine("budget=" + autoLogBudgetSpec())
             for (file in files) {
                 val kind = when {
@@ -385,6 +407,17 @@ object DiagnosticArchive {
                     else -> "ring"
                 }
                 appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}\tkind=$kind")
+            }
+            // 第 48 批 §4.2：只写 total=5 / included=4 而不说「哪一个被丢」，
+            // 被丢的恰恰是含重启前现场的那份 boot log（6.2 MB），当时只能靠
+            // commands/auto_logs_tree.txt 才找回来。规则⑨ 的同源要求：排除必须留痕。
+            for (file in excluded) {
+                val reason = if (AutoLogging.isBootLogFileName(file.name)) {
+                    "maxBootFiles"
+                } else {
+                    "maxRingFiles"
+                }
+                appendLine("${file.name}\tsize=${file.length()}\tmodified=${file.lastModified()}\treason=$reason")
             }
         })
         for (file in files) {

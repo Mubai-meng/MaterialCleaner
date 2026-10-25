@@ -2,6 +2,7 @@ package me.gm.cleaner.runtime.server
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
@@ -74,5 +75,47 @@ class DiagnosticArchiveAutoLogSelectionTest {
         assertEquals(2, selected.size)
         assertEquals(boots[2], selected[0])
         assertEquals(boots[1], selected[1])
+    }
+
+    @Test
+    fun `excluded files are reported with the oldest first`() {
+        // 第 48 批 §4.2：manifest 只打 total=5 / included=4，被丢的那份
+        //（含重启前 86 秒现场）在清单里完全不存在，排障者只能另翻 tree 文件。
+        val boots = (1..4).map { file("cleaner-boot-$it.log", base + it * 1_000L) }
+
+        val selected = DiagnosticArchive.selectAutoLogFiles(boots)
+        val excluded = DiagnosticArchive.excludedAutoLogFiles(boots, selected)
+
+        assertEquals(2, excluded.size)
+        // 按 mtime 降序：新者在前，故最旧的落在末尾
+        assertEquals(boots[1], excluded[0])
+        assertEquals(boots[0], excluded[1])
+    }
+
+    @Test
+    fun `excluded keeps boot and ring overflow in one list`() {
+        // 3 份启动段只留 2、10 份主环形只留 8 ⇒ 共丢 3 份；
+        // 混合清单必须把两类都列出来，否则「到底谁被丢」依旧是猜。
+        val boots = (1..3).map { file("cleaner-boot-$it.log", base + it * 1_000L) }
+        val rings = (1..10).map { file("ring-$it.log", base + 100_000L + it * 1_000L) }
+
+        val selected = DiagnosticArchive.selectAutoLogFiles(boots + rings)
+        val excluded = DiagnosticArchive.excludedAutoLogFiles(boots + rings, selected)
+
+        assertEquals(3, excluded.size)
+        assertTrue("被丢的最旧一份应是启动段", excluded.last() in boots)
+        assertTrue("没超限时不得凭空产生过期项", selected.none { it in excluded })
+    }
+
+    @Test
+    fun `nothing is excluded when everything fits`() {
+        // 回归护栏：清单的 excluded 段不能把「已经收进包的文件」重复列一遍。
+        val boots = (1..2).map { file("cleaner-boot-$it.log", base + it * 1_000L) }
+        val rings = (1..3).map { file("ring-$it.log", base + 100_000L + it * 1_000L) }
+
+        val selected = DiagnosticArchive.selectAutoLogFiles(boots + rings)
+
+        assertEquals(5, selected.size)
+        assertEquals(emptyList<File>(), DiagnosticArchive.excludedAutoLogFiles(boots + rings, selected))
     }
 }

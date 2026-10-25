@@ -150,4 +150,32 @@ class AutoLoggingTest {
         assertFalse(AutoLogging.isBootLogFileName("cleaner.log"))
         assertFalse(AutoLogging.isBootLogFileName("cleaner.log.1"))
     }
+
+    /**
+     * 哨兵行是「通道到底有没有在工作」的唯一判据（第 48 批 §4.1）。
+     *
+     * 缺陷现场：`cleaner-crash.log` 连续多轮会话 0 字节，而同一时段 crash buffer
+     * 确实有新条目。0 字节同时意味着「没崩溃」和「通道没落盘」，二者必须可区分 ——
+     * 哨兵就是那个区分器，所以它必须自带 boot 起点、pid 和**真实下发的命令行**。
+     */
+    @Test
+    fun `crash sentinel line carries boot pid and full command`() {
+        val argv = AutoLogging.buildCrashLogcatCommand(
+            "/data/local/tmp/cleaner_logs/cleaner-crash.log",
+        )
+        val line = AutoLogging.sentinelLine(
+            AutoLogging.CRASH_SENTINEL_PREFIX,
+            1_792_843_506_051L,
+            88_095L,
+            9374,
+            argv.joinToString(" "),
+        )
+
+        assertTrue("必须是注释行，混进日志正文也不会被当成崩溃条目: $line", line.startsWith("#"))
+        assertTrue(line.startsWith(AutoLogging.CRASH_SENTINEL_PREFIX + ": "))
+        assertTrue("必须能被离线脚本按 boot 分组: $line", line.contains("boot=1792843417956"))
+        assertTrue("必须区分 server 实例: $line", line.contains("pid=9374"))
+        assertTrue("必须记下真实命令行，否则通道怎么起的只能靠读源码", line.contains("-b crash"))
+        assertTrue(line.contains("cleaner-crash.log"))
+    }
 }
