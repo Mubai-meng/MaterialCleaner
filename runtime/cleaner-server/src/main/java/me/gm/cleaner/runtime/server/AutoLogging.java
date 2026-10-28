@@ -150,6 +150,56 @@ public class AutoLogging {
      */
     private static final int CRASH_PROBE_SECONDS = 90;
 
+    /**
+     * 崩溃通道的兜底快照周期（秒）。第 51 批（6.0.2）。
+     *
+     * ## 为什么必须加这条兜底
+     *
+     * 第 49 批加的哨兵 + 90 s 自检**只负责诊断，不负责修复**：它把「通道静默」
+     * 写成一行字，然后继续用同一个必然静默的 `logcat -f`。第 51 批真机证据
+     * （PLK110 / 6.0.1）证明这个缺陷一直都在：
+     * - `cleaner-crash.log` 末尾同时有
+     *   `# crash channel armed: wall=1793061994631 ... pid=10194` 与
+     *   `# channel silent: logcat wrote 0B within 90s since armed (1810799B)`；
+     * - 而同一时段 `logcat -d -b crash -t 2000`（诊断包 commands 侧）**能读到**
+     *   `10-27 08:46:27.619 F libc : Fatal signal 6 (SIGABRT) ... pid 8079 (init)`;
+     * - `cleaner-crash.log` 里 **10-27 一行都没有**（最后一行停在 10-26 19:41）。
+     *
+     * 三重证据合起来只剩一个解释：`logcat -f` 对 crash buffer 走块缓冲，
+     * buffer 无新条目时不刷盘；等真有崩溃时，那一次写也可能因缓冲/轮转时机
+     * 全部丢失。而 `logcat -d`（dump 模式）直接读 buffer，不受块缓冲影响。
+     *
+     * ## 为什么不干脆停掉 `-f` 只留轮询
+     *
+     * `-f` 是**实时**落盘，崩溃进程被杀前后那几行只有它能抓到；轮询按周期取样，
+     * 两次之间若 buffer 被冲掉就没了。两者互补：`-f` 抢实时，轮询保「一定读得到」。
+     * 因此这里**不替换**，只增加一条独立快照通道。
+     *
+     * 60 s 的选择：crash buffer 默认容量在 256 KB 量级，实测单次崩溃 ~5 KB，
+     * 60 s 内足以容纳多次崩溃而不被 logd 覆盖；同时每小时只有 60 次 dump，
+     * 对 logd 的压力可忽略（实测 `-d -b crash` 耗时 < 20 ms）。
+     */
+    private static final int CRASH_SNAPSHOT_SECONDS = 60;
+
+    /**
+     * 崩溃快照的固定基名（**不带** `.log` 后缀的轮转形态，改由本类自己滚动）。
+     *
+     * 命名必须让 {@link #isCrashLogFileName(String)} 认得（它按
+     * `cleaner-crash.log` 前缀匹配），这样诊断归档会与 `-f` 那份一同按首尾两段取用，
+     * 排障者不必再去 `commands/` 里翻。
+     */
+    static final String CRASH_SNAPSHOT_NAME = CRASH_LOG_BASE_NAME + ".snapshot";
+
+    /**
+     * 快照保留轮数：`cleaner-crash.log.snapshot` + `.1` … `.3`，每份上限
+     * [CRASH_SNAPSHOT_MAX_BYTES]。总量 ~1.2 MB，与 `-f` 那份的 4 MB 合计仍在
+     * `MAX_LOG_DIR_BYTES`（64 MB）之内。
+     */
+    private static final int CRASH_SNAPSHOT_ROTATE_COUNT = 4;
+
+    /** 单份快照上限 256 KB —— 与 crash buffer 自身容量同量级，够装下未轮转的全部条目。 */
+    private static final long CRASH_SNAPSHOT_MAX_BYTES = 256L * 1024L;
+
     /** 启动窗口段：跑 60 秒，最多 2 × 8 MB = 16 MB（峰值 ~265 KB/s 时仍覆盖 60 s）。 */
     private static final int BOOT_LOG_SECONDS = 60;
     private static final int BOOT_ROTATE_KBYTES = 8192;
@@ -186,17 +236,25 @@ public class AutoLogging {
     private ScheduledFuture<?> mBootStopFuture;
 
     /**
-     * 单线程守护调度器：只负责 60 秒后停掉启动段，不创建额外常驻线程池。
+     * 单线程守护调度器：负责「60 秒后停掉启动段」「90 秒后自检崩溃通道」
+     * 「每 60 秒 dump 一次 crash buffer」这三件定时事务，不创建额外常驻线程池。
      *
      * 保持 static：它是纯粹的定时器，不持有任何实例状态，也不阻止进程退出
      * （daemon 线程）。
+     *
+     * 三件事务的耗时都是毫秒级（`-d -b crash` 实测 < 20 ms），单线程串行足够；
+     * 反过来说，如果某次 dump 卡住，它会顺延后面的 tick 而不会并发堆积 ——
+     * 这正是这里要的（宁可丢一拍，不要攒出 N 个并发 logcat）。
      */
     private static final ScheduledExecutorService BOOT_SCHEDULER =
             Executors.newSingleThreadScheduledExecutor(r -> {
-                final Thread thread = new Thread(r, "cleaner-boot-log-stop");
+                final Thread thread = new Thread(r, "cleaner-log-scheduler");
                 thread.setDaemon(true);
                 return thread;
             });
+
+    /** 崩溃快照的定时句柄；非 null 即「应运行」。停采集时必须 cancel。 */
+    private ScheduledFuture<?> mCrashSnapshotFuture;
 
     public AutoLogging(final android.content.pm.PackageInfo packageInfo) {
     }
@@ -216,6 +274,13 @@ public class AutoLogging {
         if (name.startsWith(BOOT_LOG_PREFIX)) {
             return true;
         }
+        // 崩溃快照：cleaner-crash.log.snapshot 及其 .1 ... .3。
+        // 必须**先于**下面的 `.log` 判定：快照名不以 .log 结尾，也过不了
+        // isRingShardOf（后缀不是纯数字），漏判会让快照既进不了诊断包、
+        // 也不计入 pruneLocked 的字节预算 —— 正是「证据静默消失」的形态。
+        if (isCrashSnapshotName(name)) {
+            return true;
+        }
         if (name.endsWith(".log")) {
             // 主环形基名 / 崩溃通道基名 / 旧版 createTempFile 生成的 <ts>-<rand>.log
             return true;
@@ -223,6 +288,35 @@ public class AutoLogging {
         // 两条固定基名通道的轮转分片
         return isRingShardOf(name, LOG_BASE_NAME)
                 || isRingShardOf(name, CRASH_LOG_BASE_NAME);
+    }
+
+    /**
+     * `cleaner-crash.log.snapshot` 与 `cleaner-crash.log.snapshot.N` 的判定。
+     *
+     * 抽成独立方法是为了让归档、预算、回收三处共用同一口径（规则⑪的同源要求）。
+     */
+    static boolean isCrashSnapshotName(final String name) {
+        if (name == null || !name.startsWith(CRASH_SNAPSHOT_NAME)) {
+            return false;
+        }
+        final String rest = name.substring(CRASH_SNAPSHOT_NAME.length());
+        if (rest.isEmpty()) {
+            return true;
+        }
+        if (!rest.startsWith(".")) {
+            return false;
+        }
+        final String digits = rest.substring(1);
+        if (digits.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < digits.length(); i++) {
+            final char c = digits.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -386,7 +480,52 @@ public class AutoLogging {
         mCrashLogProcess = startRingChannel(
                 CRASH_LOG_BASE_NAME, buildCrashLogcatCommand(null), "auto logging crash",
                 CRASH_SENTINEL_PREFIX);
+        startCrashSnapshotLocked();
         startBootLogLocked();
+    }
+
+    /**
+     * 启动崩溃快照轮询（调用方必须已持有 [mLock]）。
+     *
+     * 与 `-f` 通道**并行**存在：`-f` 抢实时，轮询保「一定读得到」，二者互补。
+     * 首拍延迟一个周期而不是立即执行 —— 启动瞬间 crash buffer 里通常只有
+     * 上一次开机的旧条目，立即 dump 会把它们写进本次会话的快照里，反而
+     * 干扰「本会话有没有崩」的判断。
+     */
+    private void startCrashSnapshotLocked() {
+        if (mCrashSnapshotFuture != null) {
+            return;
+        }
+        try {
+            mCrashSnapshotFuture = BOOT_SCHEDULER.scheduleWithFixedDelay(
+                    this::runCrashSnapshot,
+                    CRASH_SNAPSHOT_SECONDS,
+                    CRASH_SNAPSHOT_SECONDS,
+                    TimeUnit.SECONDS);
+            Log.i(BuildConfig.LIBRARY_PACKAGE_NAME,
+                    "crash snapshot scheduled: every " + CRASH_SNAPSHOT_SECONDS + "s -> "
+                            + CRASH_SNAPSHOT_NAME);
+        } catch (final RejectedExecutionException e) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "crash snapshot schedule failed", e);
+        }
+    }
+
+    /**
+     * 快照拍的执行体：捕获一切异常，保证定时任务不会因一次失败被永久取消
+     * （`scheduleWithFixedDelay` 在任务抛出未捕获异常后会**静默停止**后续执行 ——
+     * 这正是「日志通道悄悄失效」这类缺陷最喜欢的形态）。
+     */
+    private void runCrashSnapshot() {
+        try {
+            final File base = new File(sLogsDir, CRASH_SNAPSHOT_NAME);
+            final long written = snapshotCrashBuffer(base);
+            if (written > 0L) {
+                Log.i(BuildConfig.LIBRARY_PACKAGE_NAME,
+                        "crash snapshot written: " + base.getName() + " " + written + "B");
+            }
+        } catch (final Throwable t) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "crash snapshot tick failed", t);
+        }
     }
 
     /**
@@ -552,6 +691,177 @@ public class AutoLogging {
     }
 
     /**
+     * 纯函数：构造崩溃快照命令。
+     *
+     * {@code -d}（dump 后立即退出，不进入 follow 模式）是关键 —— 它直接读
+     * crash buffer，**不经过** {@code -f} 的块缓冲，这正是绕开本次缺陷的机制。
+     * `-t <n>` 限制单次条数，避免极端崩溃风暴下一次 dump 出几十 MB。
+     *
+     * 抽成独立方法是为了让单测钉住 `-d` 与 `-b crash` 两项：少了任何一个，
+     * 快照就会退化成「又一次 follow 采集」或「读错 buffer」。
+     */
+    static String[] buildCrashSnapshotCommand() {
+        return new String[]{
+                "/system/bin/logcat",
+                "-d",
+                "-v", "threadtime",
+                "-b", "crash",
+                "-t", "2000",
+        };
+    }
+
+    /**
+     * 纯函数：把一次 dump 的结果写进快照文件，返回写入的字节数。
+     *
+     * 三个分支，顺序不能换：
+     * 1. **内容为空** ⇒ 返回 0 且**不动**既有快照（空闲期空 dump 不能把上一次
+     *    的真实崩溃抹掉）；
+     * 2. **内容与既有快照逐字节相同** ⇒ 返回 0 且不轮转、不写盘。crash buffer
+     *    在空闲期不变，dump 出来就是同一份字节；若照常写出，每 60 s 会把同一
+     *    份 256 KB 重写一遍（15 MB/h），而 `pruneLocked` 按 mtime 淘汰 ——
+     *    最先被挤掉的恰恰是最该保留的 `cleaner.log`。这条空转分支既是省 IO，
+     *    也是保住主日志；
+     * 3. **内容有变** ⇒ 先轮转（`.N → .N+1`，最旧一份丢弃），再把新内容
+     *    **覆盖**写进基名文件。覆盖而非追加：一次 dump 就是 crash buffer 的
+     *    全量视图，追加会随每 60 s 重复累积同一批条目（真机 1 小时能攒到 100 MB）。
+     *
+     * 超过 [CRASH_SNAPSHOT_MAX_BYTES] 时保留**尾部**（最新的条目在尾部，
+     * crash buffer 是环形写入，头部最旧）。
+     *
+     * 覆盖语义的代价是「两次 dump 之间被 logd 冲掉的条目不可恢复」——
+     * 那些条目由 `-f` 那条实时通道负责，两条通道互补，见
+     * [CRASH_SNAPSHOT_SECONDS] 的注释。
+     *
+     * @return 写入字节数；空内容或内容未变时返回 0
+     */
+    static long writeCrashSnapshot(final File baseFile, final byte[] content) {
+        if (content == null || content.length == 0) {
+            return 0L;
+        }
+        try {
+            final byte[] payload = content.length > CRASH_SNAPSHOT_MAX_BYTES
+                    ? Arrays.copyOfRange(content, (int) (content.length - CRASH_SNAPSHOT_MAX_BYTES),
+                    content.length)
+                    : content;
+            // 内容未变 ⇒ 真正的空转：不轮转、不写盘。见方法注释第 2 条。
+            if (isSameContent(baseFile, payload)) {
+                return 0L;
+            }
+            if (baseFile.exists() && baseFile.length() > 0L) {
+                rotateSnapshots(baseFile);
+            }
+            try (FileOutputStream out = new FileOutputStream(baseFile, false)) {
+                out.write(payload);
+                out.flush();
+            }
+            setOwnerOnly(baseFile, false);
+            return payload.length;
+        } catch (final Throwable t) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "crash snapshot write failed", t);
+            return -1L;
+        }
+    }
+
+    /**
+     * `baseFile` 的内容是否与 `payload` 逐字节相同。
+     *
+     * 先比长度（O(1) 挡掉绝大多数情形）再逐字节比：crash buffer 的多数字节
+     * 在两次 dump 之间是不变的，逐字节比最多 256 KB，耗时远低于一次 logcat 启动。
+     *
+     * 读失败一律返回 false（当作「不同」）：宁可多写一次，也不要因为一次读
+     * 异常就永久跳过写入、把快照冻在旧内容上。
+     */
+    private static boolean isSameContent(final File baseFile, final byte[] payload) {
+        if (!baseFile.exists() || baseFile.length() != payload.length) {
+            return false;
+        }
+        try (java.io.InputStream in = new java.io.FileInputStream(baseFile)) {
+            return Arrays.equals(readAllBytes(in), payload);
+        } catch (final IOException e) {
+            return false;
+        }
+    }
+
+    /** 快照轮转：`base.3` 丢弃，`base.2 → base.3`，…，`base → base.1`。 */
+    private static void rotateSnapshots(final File baseFile) {
+        for (int i = CRASH_SNAPSHOT_ROTATE_COUNT - 1; i >= 1; i--) {
+            final File older = new File(baseFile.getParentFile(), baseFile.getName() + "." + i);
+            final File newer = i == 1
+                    ? baseFile
+                    : new File(baseFile.getParentFile(), baseFile.getName() + "." + (i - 1));
+            if (!newer.exists()) {
+                continue;
+            }
+            if (older.exists() && !older.delete()) {
+                // 删不掉就放弃这一轮搬移：宁可少一份最旧快照，也不要把新内容
+                // 覆盖到一份还有用的文件上。
+                continue;
+            }
+            if (!newer.renameTo(older)) {
+                Log.w(BuildConfig.LIBRARY_PACKAGE_NAME,
+                        "crash snapshot rotate failed: " + newer.getName() + " -> "
+                                + older.getName());
+            }
+        }
+    }
+
+    /**
+     * 一次崩溃快照：dump crash buffer 并并入快照文件。
+     *
+     * **不抛异常、不改采集状态**，因此可安全地在定时线程上跑。
+     * 失败只记一行 W 并返回，绝不影响 `-f` 通道。
+     *
+     * @return 写入字节数；空 dump 或失败返回 0 / 负数
+     */
+    static long snapshotCrashBuffer(final File baseFile) {
+        Process process = null;
+        try {
+            process = new ProcessBuilder(buildCrashSnapshotCommand())
+                    .redirectError(new File("/dev/null"))
+                    .start();
+            final byte[] content = readAllBytes(process.getInputStream());
+            // dump 是同步完成的，这里等它退出以拿到完整 stdout；
+            // 2 秒超时兜底，避免 logd 无响应时把调度线程挂死。
+            if (!process.waitFor(2, TimeUnit.SECONDS)) {
+                Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "crash snapshot timed out");
+                return -1L;
+            }
+            return writeCrashSnapshot(baseFile, content);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return -1L;
+        } catch (final Throwable t) {
+            Log.w(BuildConfig.LIBRARY_PACKAGE_NAME, "crash snapshot failed", t);
+            return -1L;
+        } finally {
+            if (process != null) {
+                closeStreams(process);
+                process.destroy();
+            }
+        }
+    }
+
+    /**
+     * 读完一个流（Java 8 没有 `InputStream.readAllBytes`）。
+     *
+     * 上限 [CRASH_SNAPSHOT_MAX_BYTES] × 2：留一倍余量给「读完之后才知道要截断」
+     * 的情况，同时防止某个异常的 logcat 产出无界内容把内存撑爆。
+     */
+    private static byte[] readAllBytes(final java.io.InputStream in) throws IOException {
+        final java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        final byte[] chunk = new byte[8192];
+        int read;
+        while ((read = in.read(chunk)) != -1) {
+            buffer.write(chunk, 0, read);
+            if (buffer.size() > CRASH_SNAPSHOT_MAX_BYTES * 2) {
+                break;
+            }
+        }
+        return buffer.toByteArray();
+    }
+
+
+    /**
      * 启动「启动窗口」段：独立文件、独立进程，跑满 [BOOT_LOG_SECONDS] 秒后自动停止。
      *
      * 这一段**不施加 tag 过滤**：它是"白名单漏登记"与"启动期崩溃"的兜底现场，
@@ -687,12 +997,19 @@ public class AutoLogging {
         final Process crash = mCrashLogProcess;
         final Process boot = mBootLogProcess;
         final ScheduledFuture<?> future = mBootStopFuture;
+        final ScheduledFuture<?> snapshot = mCrashSnapshotFuture;
         mLogProcess = null;
         mCrashLogProcess = null;
         mBootLogProcess = null;
         mBootStopFuture = null;
+        mCrashSnapshotFuture = null;
         if (future != null) {
             future.cancel(false);
+        }
+        // 快照定时器必须在这里取消：它是独立于三个 logcat 进程的第四条采集路径，
+        // 不取消的话「关闭保存日志」之后仍会每 60 秒 dump 一次 crash buffer 并写盘。
+        if (snapshot != null) {
+            snapshot.cancel(false);
         }
         if (main == null && crash == null && boot == null) {
             return;

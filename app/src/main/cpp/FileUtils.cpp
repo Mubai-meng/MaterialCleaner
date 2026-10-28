@@ -44,8 +44,11 @@ namespace FileUtils {
 #ifdef DEBUG
                 LOGI("mkdir: %s"_iobfs.c_str(), item.c_str());
 #endif
-            } else {
-                // 失败路径：错误日志不受 #ifdef DEBUG 门控，release 包同样要留下证据。
+            } else if (errno != EEXIST) {
+                // EEXIST 是正常路径：父目录已被系统/其他进程建好（Android、Android/data
+                // 恒存在），并发创建也会命中。把它当失败打 E 会让 release 包在每次挂载
+                // 时刷出与故障无关的错误行，挤掉 ColorOS 按进程配额里的真信号。
+                // 其余 errno（EACCES/EROFS/ENOTDIR…）仍必须留证。
                 LOGE("Failed to mkdir(%s, %d): %s"_iobfs.c_str(), item.c_str(), mode,
                      strerror(errno));
             }
@@ -72,8 +75,24 @@ namespace FileUtils {
     }
 
     bool prepare_dir(const char *path, mode_t mode, uid_t uid, gid_t gid) {
+        // 只对**本次新建**的目录设 owner，语义对齐 /system/vold/Utils.cpp PrepareAndroidDirs()。
+        //
+        // 为什么必须区分「已存在」：mkdirList 里既有目标应用自己的新建目录，也有
+        // /storage/emulated/0、/storage/emulated/0/Android、.../Android/data 这些
+        // 系统卷内既有目录。对后者 chmod/chown 在 FUSE 上会被 MediaProvider 拒绝
+        // （setattr 只允许特定目标），失败后旧实现按 `result = result && prepare_dir(...)`
+        // **短路**，导致同一批里排在后面的目录（多为规则的 source，例如
+        // .../Android/data/<pkg>/cache）根本没被 mkdir —— 随后 bind mount 报 ENOENT，
+        // 表现为「规则每次都失败、重试 2s/5s/15s 四轮全失败」。真机证据（6.0.0 /
+        // PLK110）：com.coloros.gallery3d 的规则每次记录 stage=mount_rule、
+        // phase=applying_rules、errno=2、index=0，source=.../gallery3d/cache。
+        struct stat existing{};
+        const bool existed = lstat(path, &existing) == 0 && S_ISDIR(existing.st_mode);
         if (!mkdirs(path, mode)) {
             return false;
+        }
+        if (existed) {
+            return true;
         }
         if (TEMP_FAILURE_RETRY(chmod(path, mode)) == -1) {
             // 错误日志不受 #ifdef DEBUG 门控：release 包同样要留下证据。
@@ -116,11 +135,17 @@ namespace FileUtils {
                 uid = juid;
                 gid = obbGid;
             }
-            result = result && prepare_dir(
+            // 逐目录独立求值，**不得**用 `result = result && prepare_dir(...)` 短路：
+            // 一个目录失败（FUSE 拒绝 setattr、或该目录恰好被并发删除）会跳过其余
+            // 全部目录的 mkdir。返回值仍表示「全部成功」，但每个目录都要被真正尝试。
+            const bool prepared = prepare_dir(
                     useSdcardFs || user_id == 0 ? dir :
                     (userSource + std::string(dir).substr(storage.length(), strlen(dir))).c_str(),
                     mode, uid, gid
             );
+            if (!prepared) {
+                result = JNI_FALSE;
+            }
             env->ReleaseStringUTFChars(jdir, dir);
             env->DeleteLocalRef(jdir);
         }

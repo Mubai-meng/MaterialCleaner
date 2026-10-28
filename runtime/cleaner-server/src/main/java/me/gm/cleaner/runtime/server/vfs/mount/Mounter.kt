@@ -15,6 +15,7 @@ import me.gm.cleaner.core.common.RuntimeFileUtils.toUserId
 import me.gm.cleaner.core.common.err.ErrorCodes
 import me.gm.cleaner.core.common.err.ErrorEvent
 import me.gm.cleaner.core.common.err.ErrorLogThrottle
+import me.gm.cleaner.core.storage.redirect.domain.RuntimeMountPlan
 import me.gm.cleaner.runtime.server.orchestrator.ServerErrorJournal
 import me.gm.cleaner.runtime.server.process.ProcessIdentity
 import api.SystemService
@@ -128,8 +129,11 @@ class Mounter {
         if (!mkdirRecords.containsKey(packageName)) {
             val mkdirRecord = mutableSetOf<String>()
             plan.mkdirList.forEach { record(mkdirRecord, it) }
+            // 交给 native 建目录的是**完整展开集**（含系统结构目录）—— 它们本来就存在，
+            // mkdirs 对已存在目录是 no-op，让 native 看到父级反而更稳。
             if (RuntimeFileUtils.auto_prepare_dirs(mkdirRecord.toTypedArray(), uid)) {
-                mkdirRecords.putAll(packageName, mkdirRecord)
+                // 而登记给**回收侧**的必须是滤掉结构目录后的集合，见 registerMkdirListLocked。
+                registerMkdirListLocked(packageName, plan)
             }
         }
         val result = RuntimeFileUtils.bind_mount_result(
@@ -316,6 +320,16 @@ class Mounter {
                 }
                 if (!disposition.retryable && !result.namespaceDirty) append(" permanent=true")
                 if (result.error.isNotBlank()) append(" os=").append(result.error)
+                // errno=2 的归因：native 只回报 "No such file or directory"，不说是
+                // source 还是 target 缺失 —— 而这两者处置完全不同（source 缺失是
+                // 目录准备没做成功，target 缺失是挂载点没建出来）。
+                val missing = MissingPathAttribution.describe(
+                    errno = result.errno,
+                    source = result.source,
+                    target = result.target,
+                    exists = { path -> File(path).exists() },
+                )
+                if (missing.isNotEmpty()) append(' ').append(missing)
             },
         )
         if (errorLogThrottle.tryAcquire(event.code, event.atElapsed)) {
@@ -430,11 +444,50 @@ class Mounter {
     }
 
     private fun record(mkdirRecord: MutableSet<String>, dir: String) {
-        if (RuntimeFileUtils.childOf(RuntimeFileUtils.externalStorageDirParent, dir)) {
+        // 只接受**严格子路径**（不含卷根本身）。旧实现以 externalStorageDir.parent
+        // （/storage/emulated）为界，于是 /storage/emulated/0 也被纳入 mkdirList：
+        // 一是对卷根做 chmod/chown 会改到整个用户存储的属主（chown 到 AID_MEDIA_RW），
+        // 二是 removeMountDirsLocked 会尝试 rmdir 它。卷根只由系统 vold 管理。
+        if (RuntimeFileUtils.childOf(RuntimeFileUtils.externalStorageDir.path, dir)) {
             mkdirRecord.add(dir)
             val parent = File(dir).parent ?: return
             record(mkdirRecord, parent)
         }
+    }
+
+    /**
+     * 统一的 mkdirList 登记入口：**三处调用点必须都走这里**。
+     *
+     * ## 为什么必须统一（第 51 批，6.0.2）
+     *
+     * `mkdirRecords` 有两个消费方，语义完全不同：
+     * - `removeMountDirsLocked` 拿它做 **rmdir**（删除）；
+     * - `getPreparedPackages` / `getMountedDirs` 拿它回答「目录建好了没」（诊断）。
+     *
+     * 旧实现三处写法不一致：
+     * - `bindMountLocked` 用 `record()` 递归展开父级 ⇒ 集合含 /storage/emulated/0、
+     *   /storage/emulated/0/Android、.../Android/data 这些**系统既有**目录；
+     * - `checkAndRecordLocked` 与 `remountLocked` 直接 `putAll(plan.mkdirList)`
+     *   ⇒ 集合只有挂载点和承载源。
+     *
+     * 于是「回收会不会去 rmdir 系统目录」取决于该包走了哪条路径 —— 同一份
+     * 用户存储，两种行为。这条不一致本身就是缺陷（规则同源的失效形态）。
+     *
+     * 修法：统一走本方法，登记前先用 {@link ProtectedSystemDirs} 滤掉结构目录。
+     * 卷根 / Android / Android/data / obb / media / sandbox 由 vold 与 MediaProvider
+     * 管理，本模块既不建也不删。滤掉它们不影响功能：`auto_prepare_dirs` 的
+     * `mkdirs()` 本身就会递归补齐缺失的父级（`FileUtils.cpp` 的 mkdirs 实现），
+     * 不依赖 Java 侧先把父目录列出来。
+     */
+    private fun registerMkdirListLocked(packageName: String, plan: RuntimeMountPlan) {
+        if (mkdirRecords.containsKey(packageName)) {
+            return
+        }
+        val root = RuntimeFileUtils.externalStorageDir.path
+        mkdirRecords.putAll(
+            packageName,
+            MountDirRecords.expandForReclaim(root, plan.mkdirList),
+        )
     }
 
     fun forProcListAsync(
@@ -481,9 +534,7 @@ class Mounter {
                 } else if (targets.size == mountedIndices.size && mountedIndices.all { it != -1 }) {
                     // record pid
                     pidRecords.put(packageName, procInfo.pid)
-                    if (!mkdirRecords.containsKey(packageName)) {
-                        mkdirRecords.putAll(packageName, plan.mkdirList)
-                    }
+                    registerMkdirListLocked(packageName, plan)
                 } else {
                     remountPackages += packageName
                 }
@@ -534,9 +585,7 @@ class Mounter {
                             val plan = VfsRuntimePolicy.getMountPlan(packageName, userId)
                                 ?: return@forEach
                             pidRecords.put(packageName, procInfo.pid)
-                            if (!mkdirRecords.containsKey(packageName)) {
-                                mkdirRecords.putAll(packageName, plan.mkdirList)
-                            }
+                            registerMkdirListLocked(packageName, plan)
                         }
                     }
                 }
@@ -678,8 +727,14 @@ class Mounter {
             .values
             .flatten()
             .toSet()
+        val root = RuntimeFileUtils.externalStorageDir.path
         val dirs = mkdirRecords[packageName]
             .filter { !others.contains(it) }
+            // 结构目录永不回收：mkdirList 必然把它们（作为挂载点的父级）带进来，
+            // 而 rmdir 只对空目录生效 —— 万一某个设备上 Android/data 恰好为空，
+            // 删掉它会连累整个用户存储的 app 目录结构。只有真正的挂载点/承载源
+            // 目录才由本模块回收。
+            .filter { !ProtectedSystemDirs.isProtected(root, it) }
             .sortedByDescending { it.length }
         mkdirRecords.removeAll(packageName)
         dirs.forEach { dir ->
@@ -839,4 +894,112 @@ class Mounter {
         /** 安全停止是否成功。 */
         val forceStopSucceeded: Boolean = false,
     )
+}
+
+/**
+ * `errno=2`（ENOENT）的**路径归因**纯函数。
+ *
+ * native 的 bind mount 失败只回报 `os=No such file or directory`，不区分是
+ * source 还是 target 缺失；而这两者的处置方向相反：
+ *
+ * - `missing=source`：承载目录没被建出来（目录准备阶段失败），改 vold 侧或
+ *   `auto_prepare_dirs` 的目录集合。
+ * - `missing=target`：挂载点没被建出来（挂载点推导 / mkdir 被跳过）。
+ * - `missing=none`：两侧都在，但 namespace 内解析不到 —— 说明问题在挂载事务
+ *   本身（baseline 重建把路径遮住了、或 source 落进被 unmount 的子树），
+ *   **不要**再去查目录创建。
+ *
+ * 只在 `errno == 2` 时给结论，其余 errno 返回空串（调用方不打印）。
+ * `exists` 由调用方注入，便于 JVM 单测覆盖全部分支。
+ */
+internal object MissingPathAttribution {
+    private const val ENOENT = 2
+
+    fun describe(
+        errno: Int,
+        source: String,
+        target: String,
+        exists: (String) -> Boolean,
+    ): String {
+        if (errno != ENOENT) return ""
+        if (source.isEmpty() || target.isEmpty()) return "missing=unknown"
+        val sourceMissing = !exists(source)
+        val targetMissing = !exists(target)
+        return when {
+            sourceMissing && targetMissing -> "missing=source+target"
+            sourceMissing -> "missing=source"
+            targetMissing -> "missing=target"
+            else -> "missing=none"
+        }
+    }
+}
+
+/**
+ * 用户存储内的**结构目录**判定（永不回收）。
+ *
+ * `RuntimeMountPlan.mkdirList` 是「挂载点 + 承载源」，`Mounter.record()` 会把它们的
+ * 父级一并纳入，于是 `/storage/emulated/0/Android`、`.../Android/data` 这类卷内
+ * 结构目录也会被登记。回收侧（`removeMountDirsLocked`）用的是同一份集合，
+ * 而 `rm_dir` 对空目录会成功 —— 一旦某个设备上这些目录恰好为空，删掉就会
+ * 连累整个用户存储的 app 目录结构。结构目录归 vold/MediaProvider 管。
+ */
+internal object ProtectedSystemDirs {
+    private val RELATIVE_PATHS = setOf(
+        "Android",
+        "Android/data",
+        "Android/obb",
+        "Android/media",
+        "Android/sandbox",
+    )
+
+    fun isProtected(root: String, dir: String): Boolean {
+        if (root.isEmpty() || dir.length <= root.length) return true
+        val relative = dir.removePrefix(root).removePrefix("/")
+        return relative in RELATIVE_PATHS
+    }
+}
+
+/**
+ * 把 `RuntimeMountPlan.mkdirList` 展开成**可回收**的目录集合。
+ *
+ * 纯函数（不碰文件系统），因此单测可以逐条钉死。三件事：
+ * 1. 只接受卷根的**严格子路径** —— 卷根本身由 vold 管理，不建也不删；
+ * 2. 递归展开父级，让「建目录」能覆盖缺失的中间层；
+ * 3. 滤掉 [ProtectedSystemDirs] 里的结构目录 —— 它们**可以建**（mkdirs 对已存在
+ *    目录是 no-op），但**绝不回收**（rmdir 对空目录会成功，删掉就连累整个存储）。
+ *
+ * 为什么建与删要用两份不同的集合：`auto_prepare_dirs` 需要看到父级才能补建缺失层，
+ * 而回收侧多一个父级就多一次误删风险。二者语义不同，不能共用同一份列表 ——
+ * 第 51 批之前三处调用点各写一套，正是这里最容易漂移的地方。
+ */
+internal object MountDirRecords {
+
+    /**
+     * @param root 卷根（`/storage/emulated/0`）；为空时返回空集合（fail-closed）
+     * @param mkdirList 挂载点 + 承载源
+     */
+    fun expandForReclaim(root: String, mkdirList: Collection<String>): Set<String> {
+        if (root.isEmpty()) return emptySet()
+        val expanded = mutableSetOf<String>()
+        mkdirList.forEach { expandInto(expanded, root, it) }
+        return expanded.filterNotTo(mutableSetOf()) { ProtectedSystemDirs.isProtected(root, it) }
+    }
+
+    private fun expandInto(acc: MutableSet<String>, root: String, dir: String) {
+        if (dir.length <= root.length) return
+        if (!isStrictChild(root, dir)) return
+        acc.add(dir)
+        // 用**字符串截取**取父级，不用 `File(dir).parent`：后者依赖平台的路径分隔符
+        // （JVM 单测跑在 Windows 上会返回反斜杠路径，递归当场断裂）。这些路径恒为
+        // Android 的绝对路径，按 '/' 截取既平台无关又不会做多余的规范化。
+        val cut = dir.lastIndexOf('/')
+        if (cut <= 0) return
+        expandInto(acc, root, dir.substring(0, cut))
+    }
+
+    /** `child` 是否位于 `parent` 之下（按路径段比较，`/a/bc` 不算 `/a/b` 的子路径）。 */
+    fun isStrictChild(parent: String, child: String): Boolean {
+        val prefix = if (parent.endsWith("/")) parent else "$parent/"
+        return child.length > prefix.length && child.startsWith(prefix)
+    }
 }
