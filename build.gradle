@@ -105,8 +105,62 @@ ext {
     //      新增每 60 s `logcat -d -b crash` 快照通道兜底（两条通道互补）
     //   ② mkdirRecords 三处登记口径不一致 + 回收侧未滤结构目录 ⇒
     //      统一走 MountDirRecords.expandForReclaim（挂载点/承载源可回收，结构目录永不回收）
-    versionCode = 602
-    versionName = '6.0.2'
+    // 2026-10-28：6.0.3 / 603 = 第 52 批（媒体库写入审计 + 一加15 签名适配）：
+    //   ① InsertHooker 改为优先调 FileUtils.computeDataFromValues 4 参重载
+    //      （设备实证 3 参版仅 const/4 v0,0x0 转发，会把 isFileTrashRestoreEnabled
+    //      硬编码成 false；宿主自身两处 insert 调用点用的是 4 参版）
+    //   ② 新增设置总开关「审计媒体库写入」audit_media_insert（默认关）：
+    //      未命中重定向规则时不再完全静默，补一条 MC_REDIRECT 审计流水，
+    //      带 inaccessible 命中情况；按包 10s 节流。只观测，绝不拦截。
+    //   ③ MediaDatabaseAdapter.initInsertHook 补注册可见性日志
+    //      （历史上完全静默 ⇒ "没 hook 上" 与 "hook 上但没触发" 无法区分）
+    // 2026-10-28：6.0.4 / 604 = 第 53 批（媒体库写入**拒绝**）：
+    //   ① 新增设置总开关「拦截媒体库写入」deny_media_insert_writes（默认关）。
+    //      命中「不可访问」或「只读」规则时短路本次 insertFile（setResult(null)），
+    //      补上「挂载层之外还有一条 MediaStore 写入通路」的缺口。
+    //   ② 拒绝用 setResult(null) 而非 setThrowable：设备实证 insertFile 两个重载
+    //      返回类型都是 Landroid/net/Uri;，且宿主自身在 SQLiteConstraintException
+    //      且 targetSdk<30 时就是 return null ⇒ null 是宿主认可的合法返回值，
+    //      抛受检异常反而会经 Binder 包装成 RuntimeException 崩掉调用方。
+    //   ③ 判定用重定向**前**的原始路径，与 FuseJavaGate.rejectInaccessible 同口径；
+    //      不可访问只算一次，审计复用结果（重复求值会污染 InaccessibleEvalStats.evaluated）。
+    //   ④ InaccessibleEvalStats / ReadOnlyEvalStats 各新增 DenyPoint.INSERT
+    //      （deniedInsert），与 FUSE 层的 FILE 分开计数，才能判断哪一层漏了。
+    // ── 6.0.7（607）第56批 ────────────────────────────────────────────────
+    //   ① 订正（第60批）：原记「整盘重定向两侧撕裂导致空白缩略图」，**该归因已证伪**。
+    //      真因在本模块之外：未挂载可移动卷的残留行。设备实证 —— 68 个失败 id 的
+    //      volume_name 全是 2cb4-cae8，而 `sm list-volumes all` 只有 private/
+    //      emulated;0、/storage 下无该卷 ⇒ 卡已拔出；picker.db 仍留着这些行，
+    //      getType→queryForSingleItem 会排除未挂载卷 ⇒ "No item at" ⇒ 缩略图空白。
+    //      执行 reset-library + sync-library 后 picker.db 853→494、报错归零。
+    //      「6.0.5 为 0、6.0.6 为 323」不成立：6.0.5 日志窗口止于 10-28 19:26，
+    //      而卡上最后一条 date_added 是 20:56 ⇒ 取样时卡还在；且 6.0.6 的 144 个
+    //      失败 id 完整包含 6.0.7 的 68 个（交集 68、独有 0）⇒ 固定集合，与版本无关。
+    //      改动本身保留：单条目 URI 不施加影子过滤（isSingleItemPath，SQL 下推与
+    //      cursor 兜底两处同口径），方向是「宁可留着灰格也绝不误删」的保守护栏，
+    //      无害；但从不再宣称它修好了空白图。用户配的「不可访问」照旧拦截。
+    //   ② 能力：「监控媒体库写入」的记录落到「文件系统记录」界面，
+    //      显示「哪个应用通过媒体存储创建了什么文件」。复用既有
+    //      EVENT_FILESYSTEM 队列 + flags 高位标记（零 AIDL / 零 Room 迁移）。
+    //   ③ 文案：审计 → 监控；删除「可在日志中查看」（告知义务交给聊天，
+    //      不写进产品文案）；说明改为指向「文件系统记录」。
+    // 2026-10-29：6.2.0 / 620 = 第55–61批合计交付（6.0.5–6.0.8 当时未单独立条目，一并并入本节）。
+    //   ① 新增「（实验性）监控媒体库写入」（默认关）：记录应用经 MediaStore 建条目的
+    //      每次请求（调用应用 / 目标路径 / 是否命中「不可访问」），落「文件系统记录」
+    //      显示为「通过媒体存储创建 xxx」。只观测，不拦截，不改变写入结果。（第52批）
+    //   ② 新增「拦截媒体库写入」（默认关）：命中「不可访问」或「只读」规则时
+    //      setResult(null) 短路 insertFile，补上「挂载层之外还有 MediaStore 写入通路」的缺口。
+    //   ③ 新增整盘重定向的「影子路径」过滤（RedirectShadowFilter / MediaReachability）：
+    //      进程内不存在的路径不再被 MediaStore 列出 ⇒ 修掉相册/文件管理器里
+    //      「一片灰格、点开打不开」。（第54/55批）
+    //   ④ 单条目 URI 不施加影子过滤（isSingleItemPath，SQL 下推与 cursor 兜底同口径）。
+    //      **纯防御**：第60批实测已证伪「它修好了空白图」的说法，真因是未挂载可移动卷的
+    //      残留行（系统 picker.db），归因订正见第61批写进 InaccessibleQueryFilter 的 KDoc。
+    //   ⑤ 关于页与「检查更新」改指自有 fork（Mubai-meng/MaterialCleaner）；版本比较改为
+    //      从 release tag/name 抽版本号后逐段比大小，兼容不含版本号的中文 tag。
+    //   ⑥ 文案：「审计」→「监控」；「拦截媒体库写入」说明删除「默认关闭…」整段。
+    versionCode = 620
+    versionName = '6.2.0'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 
