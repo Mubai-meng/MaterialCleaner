@@ -34,6 +34,16 @@ object InaccessibleEvalStats {
 
         /** MediaProvider query：命中不可访问路径的行被过滤掉的行数（按查询次数计） */
         QUERY("filteredQueries"),
+
+        /**
+         * MediaProvider insertFile：应用直接经 MediaStore 建条目被拒绝的次数。
+         *
+         * 与 [FILE] 的区别是拦截层不同：FILE 是 FUSE 文件操作钩子，
+         * INSERT 是 MediaProvider 的 `insertFile` 钩子 —— 后者此前完全没有
+         * 拒绝能力，应用可以绕过挂载直接用媒体库写入本该看不见的目录。
+         * 两者分开计数，才能判断「哪一层漏了」。
+         */
+        INSERT("deniedInsert"),
     }
 
     private val evaluated = AtomicLong(0L)

@@ -312,7 +312,7 @@ class MoreOptionsFragment : BaseSettingsFragment() {
             is me.gm.cleaner.net.UpdateChecker.UpdateCheckResult.Available -> {
                 val release = result.release
                 com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
-                    .setTitle(getString(R.string.new_version_available, release.tagName))
+                    .setTitle(getString(R.string.new_version_available, release.displayName))
                     .setMessage(release.body?.take(600))
                     .setPositiveButton(R.string.click_to_view_release) { _, _ ->
                         openReleasePage(release.htmlUrl)
@@ -495,13 +495,25 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                 super.onPreferenceChange(preference, newValue)
         }
 
-        // 决策 D1：BPF 拦截范围开关，属“记录外部应用专属目录”的子开关。
-        // 走 Notify 链（偏好层真相 → 服务端投影 → redirect_policy 快照 → Hook Cache 透传），
-        // 不在此直调 JNI。
-        val fuseBpfBlockAll = findPreference<SwitchPreferenceCompat>(
-            getString(me.gm.cleaner.R.string.fuse_bpf_block_all_key)
+        // 媒体库写入审计总开关（第52批）：仅观测，不拦截。
+        // 走 Notify 链（偏好层真相 → 服务端投影 → redirect_policy 快照 → Hook Cache）,
+        // 不在 UI 侧直连 Hook——Hook 跑在 MediaProvider 进程内。
+        val auditMediaInsert = findPreference<SwitchPreferenceCompat>(
+            getString(me.gm.cleaner.R.string.audit_media_insert_key)
         )
-        fuseBpfBlockAll?.onPreferenceChangeListener = object :
+        auditMediaInsert?.onPreferenceChangeListener = object :
+            NotifyServerPreferenceChangeListener() {
+
+            override fun onPreferenceChange(preference: Preference, newValue: Any?): Boolean =
+                super.onPreferenceChange(preference, newValue)
+        }
+
+        // 媒体库写入拒绝总开关（第52批）：命中不可访问/只读规则时拒绝写入。
+        // 同样走 Notify 链（偏好层真相 → 服务端投影 → redirect_policy 快照 → Hook Cache）。
+        val denyMediaInsertWrites = findPreference<SwitchPreferenceCompat>(
+            getString(me.gm.cleaner.R.string.deny_media_insert_writes_key)
+        )
+        denyMediaInsertWrites?.onPreferenceChangeListener = object :
             NotifyServerPreferenceChangeListener() {
 
             override fun onPreferenceChange(preference: Preference, newValue: Any?): Boolean =
@@ -590,7 +602,7 @@ class MoreOptionsFragment : BaseSettingsFragment() {
                 )
                 .setPositiveButton(R.string.open_project_url) { _, _ ->
                     val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-                        data = android.net.Uri.parse("https://github.com/firesahc/MaterialCleaner")
+                        data = android.net.Uri.parse("https://github.com/Mubai-meng/MaterialCleaner")
                     }
                     startActivity(intent)
                 }

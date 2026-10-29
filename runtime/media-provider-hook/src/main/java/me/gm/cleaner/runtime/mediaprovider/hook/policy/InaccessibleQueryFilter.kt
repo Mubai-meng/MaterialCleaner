@@ -136,6 +136,62 @@ object InaccessibleQueryFilter {
     }
 
     /**
+     * 该查询路径是否为**单条目** URI（末段是纯数字主键）。
+     *
+     * ## 为什么需要这个判定（第56批，真机日志 1793193023226）
+     *
+     * `content://media/external/file/17830` 这类单条目 URI 是系统图片选择器
+     * 逐条校验"这条还在不在、是什么类型"的入口：
+     *
+     * ```
+     * W ContentResolver: No item at content://media/external/file/17830
+     * E GalleryCloudMediaProvider: [fromMediaId] it's not image or video: 17830
+     * E DatabaseUtils: Failed to onOpenPreview, mediaUri is null, mediaId:17830
+     * W Glide: Load failed for [Image(mediaId=17830, ... totalCount=915)]  ⇒ 灰格
+     * ```
+     *
+     * 列表侧（`content://media/picker/...`）不经过本过滤（[shouldAttempt] 为 false），
+     * 而按 id 校验会进来 —— 影子段若作用于此，理论上会出现"列表有、按 id 查没有"
+     * 的撕裂。本判定让影子段避开单条目查询，属**事前防御**。
+     *
+     * ## ⚠️ 归因订正（第60批，设备实证）
+     *
+     * 第56批曾据上面这条链判定「是影子过滤剔掉了这些行；6.0.5 该错误为 0、
+     * 6.0.6 为 323 次，是本过滤新增后引入的回归」。**该结论已证伪**，真因与
+     * 本过滤无关：
+     *
+     * - 第60批把 `picker.db` / `external.db` 只读拉回本地比对，全部 68 个失败 id
+     *   的 `volume_name` 都是 `2cb4-cae8`；而 `sm list-volumes all` 只有
+     *   private / emulated;0，`/storage` 下没有该卷 ⇒ 卡被拔掉。
+     * - `getType` → `queryForSingleItem` 会排除未挂载卷 ⇒ 0 行 ⇒ 抛
+     *   `No item at`。用 shell 直接查同一个 id 同样 "No result found"。
+     * - 「6.0.5 为 0」是取样时机问题：6.0.5 日志窗口止于 10-28 19:26，而卡上
+     *   最后一条 `date_added` 是 20:56 ⇒ 取样时卡还在。6.0.6 的 144 个失败 id
+     *   又完整包含 6.0.7 的 68 个（交集 68、独有 0）⇒ 固定集合，与版本无关。
+     * - `com.coloros.gallery3d` 的不可访问规则数为 0（4 条全是重定向），
+     *   `QueryHooker.buildFilteredQueryArgs` 本就返回 null，本模块一条路径都没走。
+     *
+     * ⇒ 本判定**保留但降级为纯防御**：它没有修好任何已观测到的空白图。修法方向
+     * 仍然合理（宁留灰格不误删），但不得再作为缺陷修复的证据引用。
+     *
+     * ## 修法取舍
+     *
+     * 让**影子段**不作用于单条目查询（[RedirectShadowFilter] 是"别列出读不到的行"，
+     * 而单条目查询恰恰是列表之后才发生的校验，拦它只会把行变成灰格）。
+     * **不**跳过 `inaccessible` 段 —— 用户明确配置的"不可访问"要求连存在性都看不见，
+     * 必须照旧拦截。
+     *
+     * @param path `Uri#getPath()`，例如 `/external/file/17830`、`/picker/0/x/media/12`
+     * @return true 表示末段是纯数字主键（单条目查询）
+     */
+    fun isSingleItemPath(path: String?): Boolean {
+        if (path.isNullOrBlank()) return false
+        val last = path.trimEnd('/').substringAfterLast('/')
+        if (last.isEmpty() || last.length > 18) return false
+        return last.all { it in '0'..'9' }
+    }
+
+    /**
      * 判定某条记录的 `_data` 是否落在任一不可访问根内（自身或任意深度子孙）。
      *
      * SQL 下推与结果集兜底**必须共用这一个判据** —— 两条路径各写一份匹配逻辑

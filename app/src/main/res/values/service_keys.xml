@@ -6,5 +6,7 @@
     <string name="record_shared_storage_key" translatable="false">record_shared_storage</string>
     <string name="record_external_app_specific_storage_key" translatable="false">record_external_app_specific_storage</string>
     <string name="fuse_bpf_block_all_key" translatable="false">fuse_bpf_block_all</string>
+    <string name="audit_media_insert_key" translatable="false">audit_media_insert</string>
+    <string name="deny_media_insert_writes_key" translatable="false">deny_media_insert_writes</string>
     <string name="upsert_key" translatable="false">upsert</string>
 </resources>

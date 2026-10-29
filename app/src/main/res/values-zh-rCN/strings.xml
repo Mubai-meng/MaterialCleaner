@@ -97,6 +97,10 @@
     <string name="record_external_app_specific_storage_summary">使应用通过 FUSE 访问其专属存储空间，会使得性能显著下降</string>
     <string name="fuse_bpf_block_all_title">（实验性）FUSE BPF 拦截范围（保留）</string>
     <string name="fuse_bpf_block_all_summary">保留兼容选项：安装路径恒按记录策略拦截，移除恒放行，本开关当前不改变行为，用于兼容旧平台与未来扩展。</string>
+    <string name="audit_media_insert_title">（实验性）监控媒体库写入</string>
+    <string name="audit_media_insert_summary">对应用写入媒体库的每次请求留存记录，包含调用应用、目标路径，以及该请求是否命中「不可访问」规则。仅记录，不拦截，不改变写入结果；记录会显示在「文件系统记录」中。</string>
+    <string name="deny_media_insert_writes_title">拦截媒体库写入</string>
+    <string name="deny_media_insert_writes_summary">应用向媒体库写入条目时，若目标路径命中「不可访问」或「只读」规则，则拒绝本次写入并返回空值。</string>
     <string name="upsert_title">使用 upsert 保存数据</string>
     <string name="upsert_summary">重复的数据只保留最新的一份</string>
     <string name="storage_redirect_prompt">存储重定向提示</string>
@@ -335,6 +339,7 @@
     <string name="filesystem_record_flags_move_to">移动%1$s至 %2$s</string>
     <string name="filesystem_record_flags_file">文件</string>
     <string name="filesystem_record_flags_dir">文件夹</string>
+    <string name="filesystem_record_flags_media_insert">通过媒体存储创建%1$s %2$s</string>
 
     <string name="copied">已复制：%s</string>
     <string name="loading">加载中</string>
@@ -346,7 +351,7 @@
     <string name="about_title">关于</string>
     <string name="about_summary">版本与项目信息</string>
     <string name="about_version">版本 %s</string>
-    <string name="about_project_url">项目地址：https://github.com/firesahc/MaterialCleaner</string>
+    <string name="about_project_url">项目地址：https://github.com/Mubai-meng/MaterialCleaner</string>
     <string name="open_project_url">打开项目地址</string>
     <string name="cancel">取消</string>
 

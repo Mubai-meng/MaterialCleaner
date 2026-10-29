@@ -97,6 +97,10 @@
     <string name="record_external_app_specific_storage_summary">使應用通過 FUSE 訪問其專屬儲存空間，會使得性能顯著下降</string>
     <string name="fuse_bpf_block_all_title">（實驗性）FUSE BPF 攔截範圍（保留）</string>
     <string name="fuse_bpf_block_all_summary">保留相容選項：安裝路徑恆按記錄策略攔截，移除恆放行，本開關目前不改變行為，用於相容舊平台與未來擴充。</string>
+    <string name="audit_media_insert_title">（實驗性）監控媒體庫寫入</string>
+    <string name="audit_media_insert_summary">對應用寫入媒體庫的每次請求留存記錄，包含呼叫應用、目標路徑，以及該請求是否命中「無法存取」規則。僅記錄，不攔截，不改變寫入結果；記錄會顯示在「檔案系統記錄」中。</string>
+    <string name="deny_media_insert_writes_title">攔截媒體庫寫入</string>
+    <string name="deny_media_insert_writes_summary">應用向媒體庫寫入項目時，若目標路徑命中「無法存取」或「唯讀」規則，則拒絕本次寫入並回傳空值。</string>
     <string name="upsert_title">使用 upsert 保存數據</string>
     <string name="upsert_summary">重複的數據只保留最新的一份</string>
     <string name="storage_redirect_prompt">儲存重定向提示</string>
@@ -335,6 +339,7 @@
     <string name="filesystem_record_flags_move_to">移動%1$s至 %2$s</string>
     <string name="filesystem_record_flags_file">文件</string>
     <string name="filesystem_record_flags_dir">文件夾</string>
+    <string name="filesystem_record_flags_media_insert">透過媒體儲存建立%1$s %2$s</string>
 
     <string name="copied">已複製：%s</string>
     <string name="loading">載入中</string>
@@ -346,7 +351,7 @@
     <string name="about_title">關於</string>
     <string name="about_summary">版本與專案資訊</string>
     <string name="about_version">版本 %s</string>
-    <string name="about_project_url">專案地址：https://github.com/firesahc/MaterialCleaner</string>
+    <string name="about_project_url">專案地址：https://github.com/Mubai-meng/MaterialCleaner</string>
     <string name="open_project_url">打開專案地址</string>
     <string name="cancel">取消</string>
 

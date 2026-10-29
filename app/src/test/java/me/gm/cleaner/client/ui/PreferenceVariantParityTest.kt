@@ -93,8 +93,12 @@ class PreferenceVariantParityTest {
             "v30 独有节点集合发生变化，请确认是「API≥30 专属」还是「漏改默认变体」",
             listOf(
                 "apply_read_only_template_to_key",
+                // 第52批：媒体库写入审计，只在 v30 —— InsertHooker 在 SDK_INT < Q
+                // 直接 return，该开关对 res/xml 服务的 API 26–29 设备无实际功能。
+                "audit_media_insert_key",
+                // 第52批：媒体库写入拒绝，同样只在 v30（理由同上）。
+                "deny_media_insert_writes_key",
                 "edit_read_only_template_key",
-                "fuse_bpf_block_all_key",
                 "record_external_app_specific_storage_key",
                 "record_shared_storage_key",
                 "upsert_key",

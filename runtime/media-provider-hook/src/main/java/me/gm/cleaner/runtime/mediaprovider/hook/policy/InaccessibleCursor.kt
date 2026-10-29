@@ -42,6 +42,8 @@ class InaccessibleCursor private constructor(
     private val roots: List<String>,
     private val tailHiddenColumns: Int,
     private val appSpecificPackage: String? = null,
+    private val shadowRoots: List<String> = emptyList(),
+    private val shadowSharedRoot: String? = null,
 ) : CursorWrapper(cursor) {
 
     /** 对外可见的列数（= 宿主列数 - 被隐藏的尾列数），换算见 [InaccessibleCursorPlan]。 */
@@ -77,7 +79,8 @@ class InaccessibleCursor private constructor(
     }
 
     private fun isHidden(data: String?): Boolean =
-        InaccessibleQueryFilter.isHidden(roots, data, appSpecificPackage)
+        InaccessibleQueryFilter.isHidden(roots, data, appSpecificPackage) ||
+            RedirectShadowFilter.isUnreachable(shadowRoots, shadowSharedRoot, data)
 
     override fun getCount(): Int = mapping.size
 
@@ -150,9 +153,15 @@ class InaccessibleCursor private constructor(
             roots: Collection<String>?,
             tailHiddenColumns: Int = 0,
             appSpecificPackage: String? = null,
+            shadowRoots: Collection<String>? = null,
+            shadowSharedRoot: String? = null,
         ): Cursor? {
+            // 影子集合只有在「存在整盘重定向」时才非空（见 MediaReachability），
+            // 因此这里只要两者皆空就等价于改动前的行为。
+            val shadow = shadowRoots.orEmpty().toList()
             if (cursor == null || cursor.isClosed
-                || (roots.isNullOrEmpty() && appSpecificPackage.isNullOrBlank())
+                || (roots.isNullOrEmpty() && appSpecificPackage.isNullOrBlank()
+                    && (shadow.isEmpty() || shadowSharedRoot.isNullOrBlank()))
             ) {
                 return cursor
             }
@@ -165,7 +174,8 @@ class InaccessibleCursor private constructor(
             val hide = tailHiddenColumns.coerceIn(0, cursor.columnCount)
             return try {
                 val wrapped = InaccessibleCursor(
-                    cursor, roots.orEmpty().toList(), hide, appSpecificPackage)
+                    cursor, roots.orEmpty().toList(), hide, appSpecificPackage,
+                    shadow, shadowSharedRoot)
                 if (wrapped.hiddenCount == 0) cursor else wrapped
             } catch (t: Throwable) {
                 // 兜底的兜底：包装失败绝不能让应用拿不到数据。

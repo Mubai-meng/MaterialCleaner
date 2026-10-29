@@ -125,6 +125,10 @@
     <string name="record_external_app_specific_storage_summary">Enabling apps to access their specific storage via FUSE, which will cause a significant performance regression.</string>
     <string name="fuse_bpf_block_all_title">(Experimental) FUSE BPF interception scope (reserved)</string>
     <string name="fuse_bpf_block_all_summary">Reserved compatibility option: the install path is always intercepted per the recording policy and removal is always passed through, so this switch currently does not change native behavior. Kept for old platforms and future extension.</string>
+    <string name="audit_media_insert_title">(Experimental) Monitor media library writes</string>
+    <string name="audit_media_insert_summary">Retains a record for each media library write request, including the calling app, target path, and whether the request matched an inaccessible rule. Observation only — it never blocks or alters the write. Records appear in "File system records".</string>
+    <string name="deny_media_insert_writes_title">Block media library writes</string>
+    <string name="deny_media_insert_writes_summary">When an app writes an item to the media library at a path matching an inaccessible or read-only rule, the write is rejected and returns null.</string>
     <string name="upsert_title">Save data using upsert</string>
     <string name="upsert_summary">Only keep the latest one for duplicate data.</string>
     <string name="storage_redirect_prompt">Storage Redirect Prompt</string>
@@ -367,6 +371,7 @@
     <string name="filesystem_record_flags_move_to">move %1$s to %2$s</string>
     <string name="filesystem_record_flags_file">file</string>
     <string name="filesystem_record_flags_dir">directory</string>
+    <string name="filesystem_record_flags_media_insert">created %1$s %2$s via media storage</string>
 
     <string name="copied">Copied: %s</string>
     <string name="loading">Loading</string>
@@ -379,7 +384,7 @@
     <string name="about_title">About</string>
     <string name="about_summary">Version and project info</string>
     <string name="about_version">Version %s</string>
-    <string name="about_project_url">Project: https://github.com/firesahc/MaterialCleaner</string>
+    <string name="about_project_url">Project: https://github.com/Mubai-meng/MaterialCleaner</string>
     <string name="open_project_url">Open project</string>
     <string name="cancel">Cancel</string>
 

@@ -117,6 +117,18 @@ object RuntimePolicyProjector {
                 } else {
                     false
                 },
+                // 真相归偏好层：只做透传，不按 ROM 做条件改写。
+                auditMediaInsert = if (preferencesReady) {
+                    ServicePreferences.auditMediaInsert
+                } else {
+                    false
+                },
+                // 真相归偏好层：只做透传，不按 ROM 做条件改写。
+                denyMediaInsertWrites = if (preferencesReady) {
+                    ServicePreferences.denyMediaInsertWrites
+                } else {
+                    false
+                },
                 upsertRecords = if (preferencesReady) ServicePreferences.upsert else true,
             ),
         )

@@ -335,7 +335,7 @@ class NotificationService : Service() {
             )
             val notification = NotificationCompat
                 .Builder(context, NOTIFICATION_CHANNEL)
-                .setContentTitle(context.getString(R.string.new_version_available, release.tagName))
+                .setContentTitle(context.getString(R.string.new_version_available, release.displayName))
                 .setContentText(context.getString(R.string.click_to_view_release))
                 .setSmallIcon(R.drawable.ic_outline_update_24)
                 .setColor(context.getColor(R.color.color_primary))

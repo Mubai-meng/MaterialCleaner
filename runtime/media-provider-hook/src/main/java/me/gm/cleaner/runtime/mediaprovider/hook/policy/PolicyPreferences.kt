@@ -11,6 +11,10 @@ internal data class PreferencesHolder(
     // 真相归偏好层：本字段只做透传，不按 ROM 做条件改写。
     val fuseBpfBlockAll: Boolean = false,
     val aggressivelyPromptForReadingMediaFiles: Boolean = false,
+    // 真相归偏好层：本字段只做透传，不按 ROM 做条件改写。
+    val auditMediaInsert: Boolean = false,
+    // 真相归偏好层：本字段只做透传，不按 ROM 做条件改写。
+    val denyMediaInsertWrites: Boolean = false,
     val generation: Long = 0L,
     val publisherEpoch: String = "",
 )
@@ -25,6 +29,10 @@ internal object PolicyPreferencesParser {
             fuseBpfBlockAll = root.optBoolean("fuseBpfBlockAll", false),
             aggressivelyPromptForReadingMediaFiles =
                 root.optBoolean("aggressivelyPromptForReadingMediaFiles", false),
+            // 缺席容忍为 false：老快照没有该字段时审计恒关闭，不改变既有行为。
+            auditMediaInsert = root.optBoolean("auditMediaInsert", false),
+            // 缺席容忍为 false：老快照没有该字段时拒绝恒关闭，不改变既有行为。
+            denyMediaInsertWrites = root.optBoolean("denyMediaInsertWrites", false),
             generation = root.optLong("generation", 0L),
             publisherEpoch = root.optString("publisherEpoch", ""),
         )

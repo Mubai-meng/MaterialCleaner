@@ -7,6 +7,7 @@ import me.gm.cleaner.runtime.mediaprovider.hook.policy.InaccessibleQueryFilter;
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.InaccessibleEvalStats;
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.InaccessibleQueryFilter;
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.MediaBucketCensus;
+import me.gm.cleaner.runtime.mediaprovider.hook.policy.RedirectShadowFilter;
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeHookStatus;
 
 import android.database.Cursor;
@@ -17,6 +18,8 @@ import android.os.CancellationSignal;
 import android.provider.MediaStore.Files.FileColumns;
 import android.util.ArraySet;
 import android.util.Log;
+import me.gm.cleaner.core.storage.redirect.domain.MediaReachability;
+import me.gm.cleaner.core.storage.redirect.domain.RedirectRule;
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.AbstractGuardedHook;
 import me.gm.cleaner.runtime.mediaprovider.hook.xp.HookParam;
 import me.gm.cleaner.runtime.mediaprovider.hook.xp.XpCompat;
@@ -32,6 +35,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -132,6 +136,31 @@ public class QueryHooker extends AbstractGuardedHook {
     private static final String[] DATA_PROJECTION = new String[]{DATA_COLUMN};
     private static final int PROBE_ROW_CAP = 400;
 
+    /**
+     * 影子集合缓存：包名 → (规则代际, 可达根, 共享存储根)。
+     *
+     * 推导一次要遍历规则列表并逐候选跑一遍解释器，而 query 是热路径（相册一次滚动
+     * 几十上百次查询），不能每次都重算。规则代际变化（用户改了规则）时自然失效。
+     * 只在「该包存在整盘重定向」时才写入，未命中的包不占位。
+     */
+    private static final Map<String, ShadowRoots> SHADOW_CACHE =
+            new ConcurrentHashMap<>();
+
+    /** 影子判定的不可变快照；[roots] 为空表示"不启用过滤"。 */
+    private static final class ShadowRoots {
+        final long generation;
+        final List<String> roots;
+        final String sharedRoot;
+
+        ShadowRoots(final long generation, final List<String> roots, final String sharedRoot) {
+            this.generation = generation;
+            this.roots = roots;
+            this.sharedRoot = sharedRoot;
+        }
+
+        static final ShadowRoots DISABLED = new ShadowRoots(-1L, Collections.<String>emptyList(), null);
+    }
+
     /** 记录路径在本 ROM 不可用（如缺少 getQueryBuilder）时只告警一次。 */
     private static final AtomicBoolean RECORD_UNAVAILABLE_LOGGED = new AtomicBoolean();
 
@@ -177,15 +206,28 @@ public class QueryHooker extends AbstractGuardedHook {
         //  InaccessibleQueryFilter（纯函数，已单测）。任何异常都走"不过滤"回退。
         // ══════════════════════════════════════════════════════════════
         final List<String> hiddenPaths = HookPolicyCache.INSTANCE.getInaccessiblePaths(callingPackage);
+        // ── 「影子路径」：整盘重定向把进程内的共享存储根换掉后，未被恒等 carve-out 救回的
+        //    路径在该进程里根本不存在，而 MediaStore 的数据库独立于挂载命名空间、照旧返回
+        //    整行 ⇒ 应用打开撞 ENOENT ⇒ 相册里就是一片灰格（第 55 批真机：有的显示、有的
+        //    空白，新拍的在 DCIM/Camera 所以正常）。判据与规则的推导见
+        //    RedirectShadowFilter / MediaReachability；无整盘重定向时两个集合恒为空，
+        //    下面所有分支保持与改动前逐字节等价。
+        // 一次取快照（内部按规则代际缓存）：roots 与 sharedRoot 必须来自同一份规则，
+        // 分两次取会在规则热更新时出现"白名单与根不配套"的错配。
+        final ShadowRoots shadow = shadowFor(callingPackage);
+        final List<String> shadowRoots = shadow.roots;
+        final String shadowRoot = shadow.sharedRoot;
         final Object originalArgs = param.args[2];
         Bundle filteredArgs = null;
-        if (!hiddenPaths.isEmpty() && shouldAttemptFilter(uri)
+        if ((!hiddenPaths.isEmpty() || !shadowRoots.isEmpty()) && shouldAttemptFilter(uri)
                 && !FILTER_UNSUPPORTED.contains(callingPackage)) {
-            final Bundle candidate =
-                    buildFilteredQueryArgs(originalArgs, hiddenPaths, callingPackage);
+            final Bundle candidate = buildFilteredQueryArgs(
+                    originalArgs, hiddenPaths, callingPackage, shadowRoots, shadowRoot,
+                    InaccessibleQueryFilter.INSTANCE.isSingleItemPath(uri.getPath()));
             if (candidate != null) {
                 if (FILTER_VALIDATED.contains(callingPackage)
-                        || probeFilteredQuery(param, candidate, hiddenPaths, callingPackage)) {
+                        || probeFilteredQuery(param, candidate, hiddenPaths, callingPackage,
+                                shadowRoots, shadowRoot)) {
                     FILTER_VALIDATED.add(callingPackage);
                     filteredArgs = candidate;
                     param.args[2] = filteredArgs;
@@ -208,12 +250,16 @@ public class QueryHooker extends AbstractGuardedHook {
                         injectedDataColumn = true;
                     }
                     PENDING_FILTER.set(new Object[]{
-                            callingPackage, hiddenPaths, injectedDataColumn});
+                            callingPackage, hiddenPaths, injectedDataColumn,
+                            shadowRoots, shadowRoot,
+                            InaccessibleQueryFilter.INSTANCE.isSingleItemPath(uri.getPath())});
                     Log.d("MC_REDIRECT", "[QueryHooker] inaccessible filter applied pkg="
                             + callingPackage + " paths=" + hiddenPaths.size()
                             + " cursorFallback="
                             + SQL_PUSHDOWN_INEFFECTIVE.contains(callingPackage)
-                            + " injectedDataColumn=" + injectedDataColumn);
+                            + " injectedDataColumn=" + injectedDataColumn
+                            + " shadow=" + RedirectShadowFilter.INSTANCE.describe(
+                                    shadowRoots, shadowRoot));
                 } else {
                     // 本 ROM 不接受这条 selection：永久放弃该包的过滤，绝不让应用
                     // 原本能成功的查询失败。此时 FUSE 层拒绝仍在（内容读不到），
@@ -396,7 +442,9 @@ public class QueryHooker extends AbstractGuardedHook {
      */
     private boolean probeFilteredQuery(final HookParam param, final Bundle filtered,
                                        final List<String> hiddenPaths,
-                                       final String callingPackage) {
+                                       final String callingPackage,
+                                       final List<String> shadowRoots,
+                                       final String shadowRoot) {
         final Object provider = param.thisObject;
         if (provider == null) {
             return false;
@@ -413,7 +461,8 @@ public class QueryHooker extends AbstractGuardedHook {
             // ① 兼容性探针通过（没抛异常）只说明宿主「接受」这条 selection，
             //    不代表它采纳了。必须再验一次有效性，否则会重演第 21 批的假成功。
             final int leaked = countLeakedRows(
-                    provider, queryMethod, param.args[0], filtered, hiddenPaths, callingPackage);
+                    provider, queryMethod, param.args[0], filtered, hiddenPaths, callingPackage,
+                    shadowRoots, shadowRoot);
             if (leaked > 0) {
                 SQL_PUSHDOWN_INEFFECTIVE.add(callingPackage);
                 Log.w("MC_REDIRECT", "[QueryHooker] inaccessible SQL pushdown NOT honored"
@@ -457,7 +506,9 @@ public class QueryHooker extends AbstractGuardedHook {
     private static int countLeakedRows(final Object provider, final Method queryMethod,
                                        final Object uri, final Bundle filtered,
                                        final List<String> hiddenPaths,
-                                       final String callingPackage) {
+                                       final String callingPackage,
+                                       final List<String> shadowRoots,
+                                       final String shadowRoot) {
         try {
             final Object r = queryMethod.invoke(provider, uri, DATA_PROJECTION, filtered, null);
             if (!(r instanceof Cursor)) {
@@ -475,8 +526,11 @@ public class QueryHooker extends AbstractGuardedHook {
                     if (++seen > PROBE_ROW_CAP) {
                         break;
                     }
+                    final String data = c.getString(idx);
                     if (InaccessibleQueryFilter.INSTANCE.isHidden(
-                            hiddenPaths, c.getString(idx), callingPackage)) {
+                            hiddenPaths, data, callingPackage)
+                            || RedirectShadowFilter.INSTANCE.isUnreachable(
+                                    shadowRoots, shadowRoot, data)) {
                         leaked++;
                     }
                 } while (c.moveToNext());
@@ -525,10 +579,21 @@ public class QueryHooker extends AbstractGuardedHook {
         if (!SQL_PUSHDOWN_INEFFECTIVE.contains(pkg)) {
             return result;
         }
+        @SuppressWarnings("unchecked")
+        final List<String> shadowRoots = pending.length > 3
+                ? (List<String>) pending[3] : Collections.<String>emptyList();
+        final String shadowRoot = pending.length > 4 ? (String) pending[4] : null;
+        // 单条目查询（`.../file/17830`）与 SQL 下推侧同口径：**不施加影子过滤**。
+        // 否则走 cursor 兜底的包会在单条目上把行剔掉 ⇒ 灰格照旧（补丁 A 只覆盖了下推侧）。
+        // 空集合在 RedirectShadowFilter.isUnreachable 里恒返回 false，等价于"不参与"。
+        final boolean singleItem = pending.length > 5 && Boolean.TRUE.equals(pending[5]);
+        final List<String> shadowRows = singleItem
+                ? Collections.<String>emptyList() : shadowRoots;
+        final String shadowRowRoot = singleItem ? null : shadowRoot;
         // 注入了 _data 就多一列要对外隐藏；否则列数与宿主一致。
         final int tailHidden = Boolean.TRUE.equals(pending[2]) ? 1 : 0;
-        final Cursor wrapped =
-                InaccessibleCursor.wrapIfNeeded((Cursor) result, hidden, tailHidden, pkg);
+        final Cursor wrapped = InaccessibleCursor.wrapIfNeeded(
+                (Cursor) result, hidden, tailHidden, pkg, shadowRows, shadowRowRoot);
         if (wrapped != result && wrapped instanceof InaccessibleCursor) {
             final int hiddenRows = ((InaccessibleCursor) wrapped).getHiddenCount();
             InaccessibleEvalStats.INSTANCE.recordHiddenRows(hiddenRows);
@@ -685,9 +750,32 @@ public class QueryHooker extends AbstractGuardedHook {
      */
     private static Bundle buildFilteredQueryArgs(final Object originalArgs,
                                                  final List<String> hiddenPaths,
-                                                 final String callingPackage) {
-        final kotlin.Pair<String, List<String>> exclusion =
+                                                 final String callingPackage,
+                                                 final List<String> shadowRoots,
+                                                 final String shadowRoot,
+                                                 final boolean singleItem) {
+        // 两段排除条件都是「按行剔除」，语义独立、用 AND 合并：
+        //   ① 用户明确配置的「不可访问」；
+        //   ② 整盘重定向下在该进程里根本不存在、只剩灰格的「影子路径」。
+        // 任一段为空时退化为另一段，交集为空则整体不干预（与原行为一致）。
+        final kotlin.Pair<String, List<String>> inaccessible =
                 InaccessibleQueryFilter.INSTANCE.buildExclusion(hiddenPaths, callingPackage);
+        // 单条目查询（`.../file/17830`）**不施加影子过滤**：它是图片选择器逐条校验
+        // "这条还在不在"的入口，剔掉它只会让已经出现在列表里的行变成灰格
+        // （第56批真机：915 条列表 vs 323 次 "No item"）。`inaccessible` 段照旧生效。
+        final kotlin.Pair<String, List<String>> shadow = singleItem
+                ? null
+                : RedirectShadowFilter.INSTANCE.buildExclusion(shadowRoots, shadowRoot);
+        final kotlin.Pair<String, List<String>> exclusion;
+        if (inaccessible == null) {
+            exclusion = shadow;
+        } else if (shadow == null) {
+            exclusion = inaccessible;
+        } else {
+            exclusion = new kotlin.Pair<>(
+                    "(" + inaccessible.getFirst() + ") AND (" + shadow.getFirst() + ")",
+                    concatArgs(inaccessible.getSecond(), shadow.getSecond()));
+        }
         if (exclusion == null) {
             return null;
         }
@@ -709,6 +797,61 @@ public class QueryHooker extends AbstractGuardedHook {
             filtered.putStringArray(key, args);
         }
         return filtered;
+    }
+
+    /**
+     * 该包在整盘重定向下仍然可达的子树根（供本次查询一次性取出、逐行复用）。
+     *
+     * 未配置整盘重定向时返回空表 ⇒ 调用方所有影子分支自动短路，行为与改动前一致。
+     * 规则按 userId=0 取：本机（一加 15 / ColorOS17）只有用户 0，且规则也只在用户 0 下
+     * 配置；若将来出现其它用户的查询，这里取不到规则 ⇒ 不启用过滤（fail-open），
+     * 宁可留着灰格也绝不误删本可正常显示的行。
+     *
+     * 任何异常一律吞掉并返回空表：本功能是体验修复，绝不能因为它让宿主查询失败。
+     */
+    private static ShadowRoots shadowFor(final String callingPackage) {
+        try {
+            final long generation = HookPolicyCache.INSTANCE.getRedirectPolicyGeneration();
+            final ShadowRoots cached = SHADOW_CACHE.get(callingPackage);
+            if (cached != null && cached.generation == generation) {
+                return cached;
+            }
+            final List<RedirectRule> rules =
+                    HookPolicyCache.INSTANCE.getRedirectRules(callingPackage, 0);
+            final String sharedRoot = rules.isEmpty() ? null
+                    : MediaReachability.INSTANCE.findWholeRootTarget(rules);
+            final Set<String> roots = sharedRoot == null ? Collections.<String>emptySet()
+                    : RedirectShadowFilter.INSTANCE.reachableRoots(rules);
+            final ShadowRoots computed = roots.isEmpty()
+                    ? ShadowRoots.DISABLED
+                    : new ShadowRoots(generation, new ArrayList<>(roots), sharedRoot);
+            // 只在"确实启用"时缓存：未配置整盘重定向的包是绝大多数，不该占表。
+            if (!computed.roots.isEmpty()) {
+                SHADOW_CACHE.put(callingPackage, computed);
+            }
+            return computed;
+        } catch (Throwable t) {
+            Log.d("MC_REDIRECT", "[QueryHooker] shadow roots unavailable, skipped: " + t);
+            return ShadowRoots.DISABLED;
+        }
+    }
+
+    /** 该包可达子树根（空表 ⇒ 不启用影子过滤）。 */
+    private static List<String> shadowReachableRoots(final String callingPackage) {
+        return shadowFor(callingPackage).roots;
+    }
+
+    /** 该包整盘重定向的共享存储根；未启用时返回 null。 */
+    private static String shadowSharedRoot(final String callingPackage) {
+        return shadowFor(callingPackage).sharedRoot;
+    }
+
+    /** `?` 绑定参数的顺序拼接：两段 selection 以 AND 相连时参数也必须首尾相接。 */
+    private static List<String> concatArgs(final List<String> first, final List<String> second) {
+        final List<String> merged = new ArrayList<>(first.size() + second.size());
+        merged.addAll(first);
+        merged.addAll(second);
+        return merged;
     }
 
     /** 按优先级取第一个非空字符串；全空返回 null。 */

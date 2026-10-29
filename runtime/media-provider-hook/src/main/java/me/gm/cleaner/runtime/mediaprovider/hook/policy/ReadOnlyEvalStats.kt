@@ -36,6 +36,15 @@ object ReadOnlyEvalStats {
 
         /** renameForFuse（品种 B） */
         RENAME("deniedRename"),
+
+        /**
+         * MediaProvider insertFile：应用经 MediaStore 建条目被只读规则拒绝的次数。
+         *
+         * 与 [FILE] 的区别同 [InaccessibleEvalStats.DenyPoint.INSERT]：FILE 在 FUSE 层，
+         * INSERT 在 MediaProvider 的 `insertFile` 层。只读规则（允许读、拒绝写）
+         * 此前只在 FUSE 层生效，应用可经 MediaStore 绕过。
+         */
+        INSERT("deniedInsert"),
     }
 
     private val evaluated = AtomicLong(0L)

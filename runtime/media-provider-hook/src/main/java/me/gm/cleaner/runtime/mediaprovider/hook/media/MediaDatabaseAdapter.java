@@ -136,10 +136,27 @@ public class MediaDatabaseAdapter {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             return;
         }
+        // 逐方法注册并计数：此处历史上完全静默，于是「一条 insertFile 都没 hook 上」
+        // 与「hook 上了但没触发」在日志里长得一模一样 —— 第52批排查媒体库写入时
+        // 正卡在这个盲区。设备实证（PLK110 / Android 17）有 7 参与 8 参两个重载，
+        // 正常情况 registered 应为 2。
+        int registered = 0;
         for (final var method : mMediaProviderClass.getDeclaredMethods()) {
             if (method.getName().equals("insertFile")) {
                 HookInstall.hook(method, new InsertHooker(mHook, mClassLoader));
+                registered++;
+                Log.i("MC_REDIRECT", "[MediaDatabaseAdapter] insertFile hooked: params="
+                        + method.getParameterCount());
             }
+        }
+        if (registered == 0) {
+            // 0 意味着 InsertHooker 根本不会执行，后续所有「没有 INSERT 日志」的
+            // 观察都不可作为「应用没写媒体库」的证据。
+            Log.w("MC_REDIRECT", "[MediaDatabaseAdapter] no insertFile method found -"
+                    + " InsertHooker inactive, media-store writes are NOT observed");
+        } else {
+            Log.i("MC_REDIRECT", "[MediaDatabaseAdapter] insertFile hooks registered="
+                    + registered);
         }
     }
 }

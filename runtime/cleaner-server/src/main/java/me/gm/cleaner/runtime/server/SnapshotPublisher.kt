@@ -289,6 +289,10 @@ object SnapshotPublisher {
         // 偏好层真相透传：Hook 侧按缺席容忍解析，缺席即视为 false。
         root.put("fuseBpfBlockAll", snapshot.behavior.fuseBpfBlockAll)
         root.put("aggressivelyPromptForReadingMediaFiles", snapshot.behavior.aggressivelyPromptForReadingMediaFiles)
+        // 媒体库写入审计总开关：Hook 侧按缺席容忍解析，缺席即视为 false。
+        root.put("auditMediaInsert", snapshot.behavior.auditMediaInsert)
+        // 媒体库写入拒绝总开关：Hook 侧按缺席容忍解析，缺席即视为 false（放行）。
+        root.put("denyMediaInsertWrites", snapshot.behavior.denyMediaInsertWrites)
         root.put("upsertRecords", snapshot.behavior.upsertRecords)
 
         return root.toString(2)

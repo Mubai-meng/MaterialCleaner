@@ -217,4 +217,60 @@ class InaccessibleQueryFilterTest {
             InaccessibleQueryFilter.selectionArgsKeys.size,
         )
     }
+
+    // ────────────────────────────────────────────────────────────
+    // isSingleItemPath（第56批新增；第60批订正归因：纯防御，未修好任何已观测缺陷）
+    //
+    // 判据来自真机日志 1793193023226：列表查询 `/picker/0/.../media` 不走本过滤
+    // （shouldAttempt=false ⇒ 915 条全返回），而按 id 校验走 `/external/file/17830`。
+    // 让影子段避开单条目查询，可避免"列表有、按 id 查没有"的理论撕裂。
+    // ⚠️ 第56批把当时那片灰格归因于影子过滤 —— 第60批实测证伪：真因是未挂载卷
+    // （volume_name='2cb4-cae8'）的残留行，与本模块无关。详见 InaccessibleQueryFilter KDoc。
+    // ────────────────────────────────────────────────────────────
+
+    @Test
+    fun `单条目URI被识别`() {
+        // 真机失败链上的那条
+        assertTrue(InaccessibleQueryFilter.isSingleItemPath("/external/file/17830"))
+        assertTrue(InaccessibleQueryFilter.isSingleItemPath("/external/images/media/17830"))
+        assertTrue(InaccessibleQueryFilter.isSingleItemPath("/external/audio/media/42"))
+        // 末尾带斜杠也应识别
+        assertTrue(InaccessibleQueryFilter.isSingleItemPath("/external/file/17830/"))
+    }
+
+    @Test
+    fun `列表URI不被误判为单条目`() {
+        // 真机上的 picker 列表路径 —— 它本来就不经过过滤，但绝不能因此被当成单条目
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath(
+            "/picker/0/com.coloros.gallery3d.photopicker/media"))
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath("/external/images/media"))
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath("/external/video/media"))
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath("/external/file"))
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath("/external"))
+    }
+
+    @Test
+    fun `非数字末段不当成单条目`() {
+        // 末段含非数字 ⇒ 是表名/类型名，不是主键
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath("/external/file/abc"))
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath("/external/file/12a"))
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath("/external/file/a12"))
+    }
+
+    @Test
+    fun `空值与非绝对路径安全返回false`() {
+        // 宁可不判定也不能崩：该函数在查询热路径上，任何异常都会拖累宿主查询。
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath(null))
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath(""))
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath("   "))
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath("/"))
+    }
+
+    @Test
+    fun `超长数字串不当成主键`() {
+        // 防御：18 位上限之外视为异常输入（MediaStore 的 _id 是 64 位整数，
+        // 但真实取值远小于此；超长串更像是被拼接出来的路径）。
+        assertFalse(InaccessibleQueryFilter.isSingleItemPath(
+            "/external/file/1234567890123456789"))
+    }
 }

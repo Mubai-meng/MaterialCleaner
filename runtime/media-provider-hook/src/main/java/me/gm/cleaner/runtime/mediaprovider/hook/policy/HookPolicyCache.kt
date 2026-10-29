@@ -3,6 +3,7 @@ import android.util.Log
 import me.gm.cleaner.core.common.err.ErrorCodes
 import me.gm.cleaner.core.storage.redirect.databus.DataBus
 import me.gm.cleaner.core.storage.redirect.domain.InaccessiblePathDeriver
+import me.gm.cleaner.core.storage.redirect.domain.MediaReachability
 import me.gm.cleaner.core.storage.redirect.domain.MountPlanDeriver
 import me.gm.cleaner.core.storage.redirect.domain.OrderedRedirectInterpreter.isCanonicalAbsolutePath
 import me.gm.cleaner.core.storage.redirect.domain.RedirectRule
@@ -159,6 +160,26 @@ object HookPolicyCache {
         private set(value) {
             preferences = preferences.copy(aggressivelyPromptForReadingMediaFiles = value)
         }
+
+    /**
+     * 媒体库写入审计总开关：随 redirect_policy 快照透传。
+     *
+     * 关闭时 [me.gm.cleaner.runtime.mediaprovider.hook.media.InsertHooker]
+     * 在未命中重定向规则的情况下保持完全静默（历史行为）；打开后补一条
+     * 结构化审计流水。默认 false ⇒ 老快照下行为不变。
+     */
+    val auditMediaInsert: Boolean
+        get() = preferences.auditMediaInsert
+
+    /**
+     * 媒体库写入拒绝总开关：随 redirect_policy 快照透传。
+     *
+     * 关闭时 [me.gm.cleaner.runtime.mediaprovider.hook.media.InsertHooker]
+     * 一律放行（历史行为）；打开后命中「不可访问」或「只读」规则的 insert
+     * 会被短路拒绝。默认 false ⇒ 老快照下行为不变。
+     */
+    val denyMediaInsertWrites: Boolean
+        get() = preferences.denyMediaInsertWrites
 
     /**
      * 从 DataBus 加载最后一次快照初始化缓存。
@@ -655,6 +676,20 @@ object HookPolicyCache {
      */
     fun hasRedirectRules(packageName: String): Boolean =
         rule.data.containsKey(packageName)
+
+    /**
+     * 取该包的**完整、有序**重定向规则（只读视图，按 userId 取）。
+     *
+     * 用途：媒体库查询侧判定「某条 `_data` 在该应用命名空间里是否还指向它自己」——
+     * 见 [MediaReachability]。不做剔除、不做解释，调用方拿到的就是解释器用的那份序列。
+     *
+     * 与 [getMountedPath] 的区别：后者直接给结果，这里给输入，便于一次取得规则后
+     * 对多行复用（查询结果可能有数千行，不能每行都重新取一次）。
+     *
+     * @return 规则列表；无规则或未加载快照时返回空列表（调用方按"不限制"处理）
+     */
+    fun getRedirectRules(packageName: String, userId: Int): List<RedirectRule> =
+        rule.data[packageName]?.get(userId) ?: emptyList()
 
     // ═══════════════════════════════════════════════════════════
     // JSON 解析

@@ -14,6 +14,10 @@ data class RuntimeBehaviorPolicy(
     /** FUSE BPF 拦截范围开关：偏好层真相的透传字段，本层不解释其语义。 */
     val fuseBpfBlockAll: Boolean = false,
     val aggressivelyPromptForReadingMediaFiles: Boolean = false,
+    /** 媒体库写入审计总开关：偏好层真相的透传字段，本层不解释其语义。 */
+    val auditMediaInsert: Boolean = false,
+    /** 媒体库写入拒绝总开关：偏好层真相的透传字段，本层不解释其语义。 */
+    val denyMediaInsertWrites: Boolean = false,
     val upsertRecords: Boolean = true,
 ) {
     /** 外部应用专属存储是否纳入记录：总开关开且包不在名单内。 */

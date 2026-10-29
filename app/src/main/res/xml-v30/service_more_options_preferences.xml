@@ -93,24 +93,49 @@
             android:title="@string/record_external_app_specific_storage_title"
             app:iconSpaceReserved="false" />
 
-        <!--
-          决策 D1 的子开关：是否连 fuse_bpf_fill_entries 的"移除"语义一起拦截。
-          刻意**不加** android:dependency：该属性会让本开关在其父开关
-          （记录外部应用专属存储空间，其自身又依赖"记录共享存储空间"）关闭时
-          被置灰且完全不可点击，用户既无法查看说明也无法预先设定取值。
-          依赖关系改由 summary 文案显式说明，取值始终可编辑并由服务端按需使用。
-        -->
-        <SwitchPreferenceCompat
-            android:key="@string/fuse_bpf_block_all_key"
-            android:summary="@string/fuse_bpf_block_all_summary"
-            android:title="@string/fuse_bpf_block_all_title"
-            app:iconSpaceReserved="false" />
-
         <SwitchPreferenceCompat
             android:defaultValue="true"
             android:key="@string/upsert_key"
             android:summary="@string/upsert_summary"
             android:title="@string/upsert_title"
+            app:iconSpaceReserved="false" />
+
+        <!--
+          媒体库写入审计总开关（第52批）。
+          默认关闭 ⇒ 与历史行为完全一致（未命中重定向规则时 InsertHooker 静默）。
+          打开后每次 insert 留一条 MC_REDIRECT 审计流水，按包 10s 节流。
+          只观测、不拦截：打开它不会改变任何应用的写入结果。
+
+          刻意**不加** android:dependency：审计与「记录文件系统」是两件独立的事
+          （前者看 MediaStore 建条目，后者看 FUSE 文件事件），且用户常常只想
+          临时开审计排查问题，不想连带打开记录带来的性能损失。
+
+          只存在于 v30 变体：InsertHooker 在 SDK_INT < Q 直接 return，
+          对 res/xml 服务的 API 26–29 设备无实际功能。
+        -->
+        <SwitchPreferenceCompat
+            android:defaultValue="false"
+            android:key="@string/audit_media_insert_key"
+            android:summary="@string/audit_media_insert_summary"
+            android:title="@string/audit_media_insert_title"
+            app:iconSpaceReserved="false" />
+
+        <!--
+          媒体库写入拒绝总开关（第52批）。
+          默认关闭 ⇒ 与历史行为完全一致（命中规则也照样放行）。
+          打开后命中「不可访问」或「只读」规则的 insert 被短路拒绝。
+
+          刻意**不**与审计开关做 dependency：两者独立 ——
+          审计是"看得见"，拒绝是"拦得住"，用户可能只想先开审计摸清情况。
+
+          只存在于 v30 变体：InsertHooker 在 SDK_INT < Q 直接 return，
+          对 res/xml 服务的 API 26–29 设备无实际功能。
+        -->
+        <SwitchPreferenceCompat
+            android:defaultValue="false"
+            android:key="@string/deny_media_insert_writes_key"
+            android:summary="@string/deny_media_insert_writes_summary"
+            android:title="@string/deny_media_insert_writes_title"
             app:iconSpaceReserved="false" />
     </PreferenceCategory>
 
@@ -174,12 +199,14 @@
             android:title="@string/dark_theme_title" />
 
         <SwitchPreferenceCompat
+            android:icon="@drawable/ic_outline_contrast_24"
             android:key="@string/black_dark_theme_key"
             android:title="@string/black_dark_theme_title" />
     </PreferenceCategory>
 
     <PreferenceCategory android:title="@string/about_header">
         <Preference
+            android:icon="@drawable/ic_baseline_info_24"
             android:key="@string/about_key"
             android:summary="@string/about_summary"
             android:title="@string/about_title" />
