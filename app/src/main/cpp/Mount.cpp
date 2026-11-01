@@ -532,10 +532,18 @@ static bool switch_mnt_ns(int pid) {
     }
     if (setns(nsFd, CLONE_NEWNS) != 0) {
         LOGE("Failed to setns %s"_iobfs.c_str(), strerror(errno));
-        close(nsFd);
+        // 必须与上面的 sys_open 配对用 raw syscall 关闭。
+        // libc close() 会走 fdsan 检查：只要该 fd 号在进程的 fdsan 表里留有
+        // 任何所有者标记（例如 fork 自持有 DIR* 的父进程时继承下来的表项），
+        // 就会直接 SIGABRT，把整条挂载事务变成 child_result_timeout。
+        // 真机证据（2026-10-31 / PLK110 / 6.2.0）：
+        //   fdsan: attempted to close file descriptor 107, expected to be unowned,
+        //          actually owned by DIR* 0x7af03a7400
+        //   #10 Mounter.bindMountLocked+686
+        sys_close(nsFd);
         return false;
     }
-    close(nsFd);
+    sys_close(nsFd);
     return true;
 }
 

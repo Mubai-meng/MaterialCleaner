@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <cstring>
+#include <unistd.h>
 #include <string>
 #include <vector>
 
@@ -74,7 +75,9 @@ namespace ProcInfo {
         if (fd >= 0) {
             FILE *fp = fdopen(fd, "r"_iobfs.c_str());
             if (fp == nullptr) {
-                sys_close(fd);
+                // fdopen 失败时 fd 未被 FILE* 接管，用 libc close 才是正确配对；
+                // raw close 不清 fdsan 表，会把该 fd 号上的旧标记留给下一个复用它的人。
+                close(fd);
             } else {
                 char line[PATH_MAX];
                 while (fgets(line, PATH_MAX - 1, fp) != nullptr) {
@@ -106,7 +109,7 @@ namespace ProcInfo {
             if (sfd >= 0) {
                 FILE *fp = fdopen(sfd, "r"_iobfs.c_str());
                 if (fp == nullptr) {
-                    sys_close(sfd);
+                    close(sfd);
                 } else {
                     char line[PATH_MAX];
                     while (fgets(line, PATH_MAX - 1, fp) != nullptr) {
@@ -138,7 +141,7 @@ namespace ProcInfo {
         }
         FILE *fp = fdopen(fd, "r"_iobfs.c_str());
         if (fp == nullptr) {
-            sys_close(fd);
+            close(fd);
             return nullptr;
         }
         struct IsTarget {

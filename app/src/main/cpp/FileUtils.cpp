@@ -1,7 +1,9 @@
 #include <cerrno>
 #include <libgen.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <unistd.h>
+#include <string>
 #include <vector>
 
 #include "absl/strings/match.h"
@@ -152,21 +154,39 @@ namespace FileUtils {
         return result;
     }
 
+    /// 递归 chown 一棵目录树。
+    ///
+    /// **目录句柄的持有方式是这里的关键**，不能为了省一次拷贝改回「readdir 循环里
+    /// 直接递归」：那种写法会让每一层祖先目录的 DIR 在整棵子树遍历期间一直开着，
+    /// 目录深度 D 就同时占着 D 个 fd。本进程同时会从 Mounter 线程 fork（raw clone）
+    /// 出挂载子进程，子进程连同 fdsan 表一起继承 —— 于是子进程里存在「fd 号标着
+    /// DIR*」的陈旧表项，之后任何 libc close() 落到被复用的同一个号上就 SIGABRT。
+    ///
+    /// 真机证据（2026-10-31 11:38:09 / PLK110 / ColorOS17 / 6.2.0）：
+    ///   fdsan: attempted to close file descriptor 107, expected to be unowned,
+    ///          actually owned by DIR* 0x7af03a7400
+    ///   #10 Mounter.bindMountLocked+686 → Mount::bind_mount_status → switch_mnt_ns
+    /// 崩溃发生在挂载子进程刚 fork 出来的 setns 收尾，整条挂载事务丢失。
+    ///
+    /// 改成「先读完目录项 → 立即 closedir → 再逐个递归」，任意时刻最多 1 个 DIR，
+    /// 顺带消掉深层目录把 fd 号推到高位、乃至 EMFILE 的隐患。
     void chownRecursively(const char *path, uid_t uid, gid_t gid) {
         DIR *pDir = opendir(path);
         if (pDir != nullptr) {
+            std::vector<std::string> children;
             struct dirent *file;
             while ((file = readdir(pDir)) != nullptr) {
                 if (!strcmp(file->d_name, "."_iobfs.c_str()) ||
                     !strcmp(file->d_name, ".."_iobfs.c_str())) {
                     continue;
                 }
-                char child[PATH_MAX];
-                snprintf(child, sizeof(child), "%s/%s"_iobfs.c_str(), path, file->d_name);
-
-                chownRecursively(child, uid, gid);
+                children.emplace_back(
+                        StringPrintf("%s/%s"_iobfs.c_str(), path, file->d_name));
             }
             closedir(pDir);
+            for (const auto &child: children) {
+                chownRecursively(child.c_str(), uid, gid);
+            }
         }
         TEMP_FAILURE_RETRY(chown(path, uid, gid));
     }
