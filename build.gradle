@@ -159,8 +159,22 @@ ext {
     //   ⑤ 关于页与「检查更新」改指自有 fork（Mubai-meng/MaterialCleaner）；版本比较改为
     //      从 release tag/name 抽版本号后逐段比大小，兼容不含版本号的中文 tag。
     //   ⑥ 文案：「审计」→「监控」；「拦截媒体库写入」说明删除「默认关闭…」整段。
-    versionCode = 620
-    versionName = '6.2.0'
+    // 2026-11-01：6.2.1 / 621 = 挂载子进程 fdsan 崩溃（唯一实质修复）
+    //         + 配置向导大小写变体兜底（防御性，非任何已观测缺陷的修复）。
+    //   ① 配置向导的「可访问目录」补齐大小写变体（MountWizard.caseVariantDirNames）：
+    //      只收「与标准目录仅大小写不同、且真实存在」的顶层目录，不收应用私有目录
+    //      （否则污染 autoAnswer 的 q1 判定）。⚠️ 归因订正：本条**不是** 10-31 相册
+    //      「能看不能编辑」的修复项 —— 用户未改任何规则、仅重启即恢复，重启前后策略
+    //      快照逐字节相同（redirectRevision=f4a54277），fuseRedirect.redirected 却
+    //      从 575 降为 0；真因是那次进程的 MediaStore `_data` 为小写而磁盘扫描视图为
+    //      大写，MediaProvider 重启重建后自愈，与本模块匹配逻辑无关。
+    //   ② 挂载子进程 fdsan SIGABRT：switch_mnt_ns 用 raw sys_open 打开
+    //      /proc/<pid>/ns/mnt，却用 libc close() 关闭；fdsan 表里该 fd 号残留
+    //      DIR* 标记时直接 abort，整条挂载事务丢失（child_result_timeout）。
+    //      改为 raw 配 raw（sys_close），并把 chownRecursively 改成不再跨递归持有
+    //      祖先 DIR、ProcInfo 的 fdopen 失败分支改用 libc close。详见 CHANGELOG 6.2.1。
+    versionCode = 621
+    versionName = '6.2.1'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 

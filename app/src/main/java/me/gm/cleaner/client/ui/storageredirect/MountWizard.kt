@@ -952,8 +952,50 @@ class MountWizard(private val packageInfo: PackageInfo) {
             // Any type saved to Download dir is allowed.
             recommendDirs += downloadDir
         }
+        // 真实存在、但与上面这些常量**拼写不同**的同名目录（典型：ColorOS 相册的 `pictures`）。
+        recommendDirs += caseVariantOf(recommendDirs)
         return recommendDirs
     }
+
+    /**
+     * 共享存储根下真实存在、且与 [base] 中某一项「仅大小写不同」的目录。
+     *
+     * ## 为什么有它（防御性改进，不是任何已观测缺陷的修复项）
+     *
+     * 上面那张推荐表全部由 `Environment.DIRECTORY_*` 常量拼出来，而这些常量只有一种拼法
+     * （`Pictures`）。厂商有时会自己建一份大小写变体并在里面放真东西，而大小写在文件系统上
+     * 是**两个不同目录** —— 「保留 `Pictures`」并不会保留 `pictures`。用户做根目录重定向
+     * （沙盒）时，向导里看不到那份变体，也就无从勾选，它整棵子树会掉进空沙盒。
+     * 本函数把这种真实存在、但拼写不同的目录补进推荐表，属于**事前兜底**。
+     *
+     * ⚠️ **归因订正（2026-11-01）**：本条曾以「10-31 相册能看不能编辑」为据，写成
+     * 「小写 `pictures` 未被保留导致 ENOENT，是那次故障的根因」。**该结论已被证伪**：
+     * 用户始终没有改过任何相册规则，仅重启手机即恢复；11-01 重启后的规则快照与 10-31
+     * **逐字节相同**（`redirectRevision=f4a54277`、size=6230，4 条规则、只有大写 `Pictures`），
+     * 期间 `fuseRedirect.redirected` 却从 575 掉到 0。真实机制是**那次进程的 MediaStore
+     * 快照里 `_data` 是小写、而磁盘扫描视图是大写**（重启后 MediaProvider 重建 `_data`
+     * 即自愈），与本模块的匹配逻辑无关 —— 本例中重定向其实是**正确执行**的。
+     * 保留本函数仅因其对「厂商变体命名」有兜底价值，勿再把它当那次故障的修复。
+     *
+     * ## 为什么只收「大小写变体」而不是扫描所有顶层目录
+     *
+     * 推荐表同时是 [autoAnswer] 的判据：`getRecommendDirs(type).none { startsWith(dir, path) }`
+     * 决定某个文件事件要不要触发「根目录重定向」建议。若把 `alipay`、`tencent` 这类应用私有
+     * 目录也塞进来，等于把它们一律判成「公共可访问」，q1 建议会大面积失灵。只收标准目录的
+     * 大小写变体既覆盖了厂商改名的真实形态，又不会污染那个判定。
+     *
+     * 顺带排除 `Android`：它也在 `Environment.STANDARD_DIRECTORIES` 里，但绝不该被推荐成
+     * 「应用保存有用数据的地方」。
+     *
+     * @param base 已经确定的推荐列表（标准目录 + Download 兜底）
+     * @return 真实存在的大小写变体；目录不可枚举时返回空表，绝不抛
+     */
+    private fun caseVariantOf(base: List<File>): List<File> = runCatching {
+        val actual = File(sdDir).listFiles().orEmpty()
+            .filter { it.isDirectory }
+            .map { it.name }
+        caseVariantDirNames(base.map { it.name }, actual).map { File(sdDir, it) }
+    }.getOrDefault(emptyList())
 
     fun getRecommendDirOps(
         oldList: List<Pair<String, String>>, newList: List<Pair<String, String>>
@@ -1313,3 +1355,40 @@ class PathsAdapter(
         }
     }
 }
+
+/**
+ * 从 [actual]（共享存储根下真实存在的目录名）里挑出「与 [known] 中某项仅大小写不同」的那些。
+ *
+ * 纯函数，可 JVM 单测；调用点见 `MountWizard.caseVariantOf`。
+ *
+ * 规则三条：
+ * 1. 不能已在 [known] 里（否则重复推荐同一个目录）；
+ * 2. 忽略大小写后必须等于 [known] 中的某一项 —— 只收「厂商改了个大小写」的形态，
+ *    不收 `alipay`/`tencent` 这类应用私有目录（它们会污染 autoAnswer 的 q1 判定）；
+ * 3. 排除 `Android`：它在 `Environment.STANDARD_DIRECTORIES` 里，但绝不该被推荐成
+ *    「应用保存有用数据的地方」。
+ *
+ * 真机依据（2026-10-31 / PLK110 / ColorOS17）：ColorOS 相册的截图与编辑工作目录都在
+ * **小写** `pictures/` 下，而 `Environment.DIRECTORY_PICTURES` 是 `Pictures`。大小写
+ * 在文件系统上是两个目录，向导只按常量推荐 ⇒ 用户勾不到 `pictures` ⇒ 根目录重定向后
+ * 它整棵子树掉进空沙盒 ⇒ 相册「能看缩略图、点编辑提示无法加载该照片」。
+ */
+internal fun caseVariantDirNames(
+    known: Collection<String>,
+    actual: Collection<String>,
+): List<String> {
+    val knownSet = known.toHashSet()
+    return actual.asSequence()
+        .filter { it.isNotEmpty() }
+        .filter { !it.equals(ANDROID_DIR_NAME, ignoreCase = true) }
+        .filter { it !in knownSet }
+        .filter { candidate -> knownSet.any { it.equals(candidate, ignoreCase = true) } }
+        // 同一目录的多种拼写在真实文件系统里确实可以并存（它们是不同 inode），但推荐表里
+        // 并排出现 `pictures` / `PICTURES` 只会让用户无从下手：按小写排序后只留第一个。
+        .sortedBy { it.lowercase() }
+        .distinctBy { it.lowercase() }
+        .toList()
+}
+
+/** `Environment.DIRECTORY_ANDROID` 的字面量 —— 它是 API 29 才有的常量，本项目 minSdk 26。 */
+private const val ANDROID_DIR_NAME: String = "Android"
