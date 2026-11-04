@@ -12,7 +12,9 @@ import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeStatusSnapshotParse
 object NativeHookStatus {
     private const val TAG = "NativeHookStatus"
     /**
-     * 快照结构版本：5 = 新增 `readOnlyEval` 段（只读判定 / 拒绝计数）。
+     * 快照结构版本：8 = `fuseRedirect` 新增 `preserved` 与 `lastPreserve*`
+     *     （恒等 carve-out 命中，与「未命中」区分；此前 PRESERVE 命中被记成 miss）。
+     * 5 = 新增 `readOnlyEval` 段（只读判定 / 拒绝计数）。
      * 6 = 新增 `inaccessibleEval` 段（「不可访问的路径」判定 / 拒绝计数）。
      * 7 = `inaccessibleEval` 新增 `appSpecificRows`（应用专属存储幽灵行观测计数）。
      *     ⚠️ 不可访问 ≠ 只读：只读允许读、拒绝写；不可访问连读都拒绝。
@@ -20,7 +22,7 @@ object NativeHookStatus {
      * 3 = 新增 `hookErrors` 段（模块进程结构化错误流水）。
      * 2 = 无这两段。消费方一律用 `optJSONObject` 读取，缺段即视为模块未提供。
      */
-    private const val SCHEMA_VERSION = 7
+    private const val SCHEMA_VERSION = 8
 
     /** 快照内受控文本（错误详情等）的最大长度，超出截断。 */
     internal const val MAX_TEXT_LENGTH = 200
@@ -551,9 +553,18 @@ object NativeHookStatus {
     /** 记录 FUSE 事件前置去重的累计抑制条数（绝对值，非增量）。 */
     fun setFuseEventDedupedCount(total: Long) = fuse.setDedupedCount(total)
 
-    /** 记录一次 FUSE 路径重定向评估的结果（热路径：只有原子自增与 volatile 写）。 */
-    fun recordFuseRedirect(packageName: String, path: String, redirected: Boolean) =
-        fuse.record(packageName, path, redirected)
+    /**
+     * 记录一次 FUSE 路径重定向评估的结果（热路径：只有原子自增与 volatile 写）。
+     *
+     * 入参是 [FuseRedirectStats.Outcome] 而不是 `Boolean`：恒等 carve-out（PRESERVE）
+     * 与真未命中的派生路径完全相同，用布尔量必然把前者记成后者
+     * （见 [FuseRedirectStats.outcome]）。
+     */
+    fun recordFuseRedirect(
+        packageName: String,
+        path: String,
+        outcome: FuseRedirectStats.Outcome,
+    ) = fuse.record(packageName, path, outcome)
 
     fun toJson(): String {
         return JSONObject().apply {

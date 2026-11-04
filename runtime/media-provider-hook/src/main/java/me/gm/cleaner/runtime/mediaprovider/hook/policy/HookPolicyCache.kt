@@ -7,6 +7,7 @@ import me.gm.cleaner.core.storage.redirect.domain.MediaReachability
 import me.gm.cleaner.core.storage.redirect.domain.MountPlanDeriver
 import me.gm.cleaner.core.storage.redirect.domain.OrderedRedirectInterpreter.isCanonicalAbsolutePath
 import me.gm.cleaner.core.storage.redirect.domain.RedirectRule
+import me.gm.cleaner.core.storage.redirect.domain.ResolvedMountedPath
 import me.gm.cleaner.runtime.mediaprovider.hook.bridge.HookDataBusBridge
 import me.gm.cleaner.runtime.mediaprovider.hook.fuse.FuseNativePolicyAdapter
 import org.json.JSONObject
@@ -664,6 +665,22 @@ object HookPolicyCache {
         val userRules = snapshot.data[packageName] ?: return null
         val rules = userRules[userId] ?: return null
         return MountPlanDeriver.resolveMountedPath(rules, path)
+    }
+
+    /**
+     * 与 [getMountedPath] 同源，但额外给出「是否真的命中过规则」。
+     *
+     * 为什么要多这一位：`derivedPath == path` 有两种成因相反的来源 —— 命中恒等
+     * carve-out（PRESERVE，规则正确生效）与一条规则都没匹配上（真未命中）。
+     * 只看派生路径无法区分，而 FUSE 重定向的命中率恰好由这一位决定。
+     *
+     * @return null 表示该包在该用户下没有任何规则（此时 [getMountedPath] 也返回 null）
+     */
+    fun resolveMountedPath(packageName: String, path: String): ResolvedMountedPath? {
+        val snapshot = rule
+        val userRules = snapshot.data[packageName] ?: return null
+        val rules = userRules[extractUserIdFromPath(path)] ?: return null
+        return MountPlanDeriver.resolve(rules, path)
     }
 
     /** 检查指定包是否在 denylist 中。 */

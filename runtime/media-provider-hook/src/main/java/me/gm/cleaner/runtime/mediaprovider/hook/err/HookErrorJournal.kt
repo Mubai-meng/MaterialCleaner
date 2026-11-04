@@ -52,7 +52,8 @@ object HookErrorJournal {
      * 字段与 `core:common` 的 `ErrorEvent`（code/errno/subject/generation/detail）
      * 对齐，另加三个本进程专属字段：[severity] 原始级别、
      * [firstAtElapsed]/[lastAtElapsed] 首次与末次发生时刻、[count] 累计条数。
-     * [detail] 语义为「最近一次的明细」——同 key 聚合下不保留历史明细。
+     * [detail] 语义为「最近一次的明细」——同 key 聚合下不保留历史明细；
+     * [generation] 同口径，取最近一次观测到的非零代次。
      */
     data class Entry(
         val code: String,
@@ -117,6 +118,10 @@ object HookErrorJournal {
                 slots.remove(key)
                 existing.copy(
                     lastAtElapsed = maxOf(existing.lastAtElapsed, nowElapsed),
+                    // 代次与 [Entry.detail] 同口径：取**最近一次**的非零值。
+                    // 不刷新会让合并后的条目长期显示首次代次，读者无法判断
+                    // "最近这次死亡属于哪一轮" —— 而代次正是唯一能回答该问题的字段。
+                    generation = maxOf(existing.generation, generation),
                     count = existing.count + 1L,
                 )
             } else {

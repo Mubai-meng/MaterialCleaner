@@ -32,6 +32,11 @@ class HookRecoveryCoordinator(
     private var hooksRetryCount = 0
     private var hooksReconnectScheduled = false
     private val hooksRetryDelays = longArrayOf(1_000L, 2_000L, 5_000L, 10_000L, 30_000L)
+
+    /** 重试预算上限：`hooksRetryDelays` 走两轮。单一真源，避免快照与门控各算一遍。 */
+    private val maxHookRetries: Int
+        get() = hooksRetryDelays.size * 2
+
     private var lastNativeHookCheckGeneration: Long = 0L
 
     /** 上次触发刷新时观察到的 snapshot 侧代数；-1 表示尚未触发过。 */
@@ -50,7 +55,7 @@ class HookRecoveryCoordinator(
     fun snapshot(): RecoverySnapshot = RecoverySnapshot(
         hooksRetryCount = hooksRetryCount,
         hooksReconnectScheduled = hooksReconnectScheduled,
-        maxHookRetries = hooksRetryDelays.size * 2,
+        maxHookRetries = maxHookRetries,
         lastNativeHookCheckGeneration = lastNativeHookCheckGeneration,
     )
 
@@ -95,12 +100,20 @@ class HookRecoveryCoordinator(
             hooksRetryCount = 0
             Log.i(TAG, "performHooksReconnect: Phase 1 OK - Binder reconnected")
         } else {
-            hooksRetryCount++
-            Log.w(TAG, "performHooksReconnect: Phase 1 FAILED (attempt $hooksRetryCount)")
-            if (hooksRetryCount < hooksRetryDelays.size * 2) {
+            // 预算必须**钳制**在上限。onHooksBinderDied() 不受预算门控 ——
+            // 预算耗尽后再来一次死亡事件仍会再排一轮重连；旧实现于是把计数推到
+            // 11、12… 无上界，对外报告出 `hooksRetryCount=11 > maxHookRetries=10`
+            // 这种自相矛盾的状态（2026-11-02 诊断包 A 实测），
+            // 让"预算耗尽"与"还有余量"再也无法区分。
+            hooksRetryCount = HookRetryBudget.next(hooksRetryCount, maxHookRetries)
+            Log.w(
+                TAG,
+                "performHooksReconnect: Phase 1 FAILED (attempt $hooksRetryCount/$maxHookRetries)",
+            )
+            if (HookRetryBudget.shouldContinue(hooksRetryCount, maxHookRetries)) {
                 scheduleHooksReconnect()
             } else {
-                Log.e(TAG, "performHooksReconnect: max retries (${hooksRetryDelays.size * 2}) exceeded")
+                Log.e(TAG, "performHooksReconnect: max retries ($maxHookRetries) exceeded")
             }
             return
         }
@@ -151,4 +164,25 @@ class HookRecoveryCoordinator(
                 if (stateChanged) "" else " (same mismatch state, retry after backoff)")
         MediaProviderHookGateway.refreshPolicyFromDataBus()
     }
+}
+
+/**
+ * Hook 重连重试预算的纯函数（无 android 依赖，便于 JVM 单测）。
+ *
+ * 与 [HookRecoveryCoordinator] 的私有成员分开是刻意的：`private companion object`
+ * 内的成员在单测里不可见（本项目已踩过），而这里的两条规则恰好是最需要钉死的部分。
+ */
+internal object HookRetryBudget {
+
+    /**
+     * 推进一次失败计数，**永不越过** [max]。
+     *
+     * 为什么必须钳制：[HookRecoveryCoordinator.onHooksBinderDied] 不受预算门控，
+     * 预算耗尽后再来一次死亡事件仍会再排一轮重连；若不钳制，计数会无上界地增长，
+     * 快照里就会出现 `hooksRetryCount > maxHookRetries` 这种自相矛盾的状态。
+     */
+    fun next(current: Int, max: Int): Int = if (current >= max) max else current + 1
+
+    /** 是否还允许再排一轮（钳制后口径：`count == max` 即预算耗尽）。 */
+    fun shouldContinue(count: Int, max: Int): Boolean = count < max
 }

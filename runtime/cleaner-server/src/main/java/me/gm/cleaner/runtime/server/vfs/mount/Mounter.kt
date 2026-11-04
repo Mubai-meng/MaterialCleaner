@@ -4,6 +4,9 @@ import android.app.ActivityManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.util.ArrayMap
 import android.util.ArraySet
 import android.util.Log
@@ -327,7 +330,7 @@ class Mounter {
                     errno = result.errno,
                     source = result.source,
                     target = result.target,
-                    exists = { path -> File(path).exists() },
+                    probe = ::probePath,
                 )
                 if (missing.isNotEmpty()) append(' ').append(missing)
             },
@@ -336,6 +339,28 @@ class Mounter {
             Log.w("MC_REDIRECT", "[Mounter] mount failed pkg=$packageName ${event.toCompactString()}")
         }
         ServerErrorJournal.record(event)
+    }
+
+    /**
+     * 存在性探测：区分「确实不存在」与「读不到」。
+     *
+     * `File.exists()` 把任何 stat 失败都吞成 `false` —— FUSE 断连（ENOTCONN）时
+     * 每条路径都"不存在"，`missing=` 归因会整体失真。这里只把 ENOENT/ENOTDIR
+     * 判成确实缺失，其余错误一律 [PathProbe.UNKNOWN]（归因输出 `missing=unknown`）。
+     */
+    private fun probePath(path: String): PathProbe = try {
+        // 用单参重载：本工程的 android.jar 只暴露 `stat(String)`，
+        // `stat(String, StructStat)` 不可见。只在挂载失败时调用，分配可忽略。
+        Os.stat(path)
+        PathProbe.PRESENT
+    } catch (e: ErrnoException) {
+        when (e.errno) {
+            OsConstants.ENOENT, OsConstants.ENOTDIR -> PathProbe.ABSENT
+            else -> PathProbe.UNKNOWN
+        }
+    } catch (t: Throwable) {
+        // 永不抛出：这是诊断路径，探测失败不能反过来制造新的失败。
+        PathProbe.UNKNOWN
     }
 
     /**
@@ -897,6 +922,15 @@ class Mounter {
 }
 
 /**
+ * 路径存在性探测结果。
+ *
+ * 三态而不是布尔：`File.exists()` 把「确实不存在」与「读不到」混为一谈，
+ * 而这两者对 `errno=2` 归因的结论**完全相反** —— 前者指向目录缺失（要改目录集合），
+ * 后者说明探测本身不可信（此时任何归因都是误导）。
+ */
+internal enum class PathProbe { PRESENT, ABSENT, UNKNOWN }
+
+/**
  * `errno=2`（ENOENT）的**路径归因**纯函数。
  *
  * native 的 bind mount 失败只回报 `os=No such file or directory`，不区分是
@@ -908,9 +942,11 @@ class Mounter {
  * - `missing=none`：两侧都在，但 namespace 内解析不到 —— 说明问题在挂载事务
  *   本身（baseline 重建把路径遮住了、或 source 落进被 unmount 的子树），
  *   **不要**再去查目录创建。
+ * - `missing=unknown`：路径没回报，或探测读不到（ENOTCONN / EIO / EACCES …）。
+ *   此时**不要**下任何目录层面的结论。
  *
  * 只在 `errno == 2` 时给结论，其余 errno 返回空串（调用方不打印）。
- * `exists` 由调用方注入，便于 JVM 单测覆盖全部分支。
+ * `probe` 由调用方注入，便于 JVM 单测覆盖全部分支。
  */
 internal object MissingPathAttribution {
     private const val ENOENT = 2
@@ -919,12 +955,22 @@ internal object MissingPathAttribution {
         errno: Int,
         source: String,
         target: String,
-        exists: (String) -> Boolean,
+        probe: (String) -> PathProbe,
     ): String {
         if (errno != ENOENT) return ""
         if (source.isEmpty() || target.isEmpty()) return "missing=unknown"
-        val sourceMissing = !exists(source)
-        val targetMissing = !exists(target)
+        val sourceProbe = probe(source)
+        val targetProbe = probe(target)
+        // 任何一侧「读不到」⇒ 归因不可信，只能报 unknown。
+        // 旧实现用 `File.exists()`，它把 stat 失败一并吞成 false ⇒ 两侧都"缺失"⇒
+        // 报出 `missing=source+target`，把读者引向根本不存在的目录问题。
+        // 真机实证（2026-11-02 诊断包 A）：errno=2 的 `missing=source+target` 之后
+        // 21ms 就出现 errno=107(ENOTCONN) —— 同一窗口内 FUSE 已断连，路径当然 stat 不到。
+        if (sourceProbe == PathProbe.UNKNOWN || targetProbe == PathProbe.UNKNOWN) {
+            return "missing=unknown"
+        }
+        val sourceMissing = sourceProbe == PathProbe.ABSENT
+        val targetMissing = targetProbe == PathProbe.ABSENT
         return when {
             sourceMissing && targetMissing -> "missing=source+target"
             sourceMissing -> "missing=source"

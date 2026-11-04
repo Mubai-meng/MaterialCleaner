@@ -99,18 +99,43 @@ class FuseRedirectStatsTest {
     }
 
     @Test
-    fun `outcome 只有真正改写才算命中`() {
+    fun `outcome 区分改写 恒等命中 与真未命中`() {
         assertEquals(
             FuseRedirectStats.Outcome.REDIRECTED,
             FuseRedirectStats.outcome(
-                "/storage/emulated/0/Android/data/x/files", "/storage/emulated/0/Download",
+                "/storage/emulated/0/Android/data/x/files",
+                "/storage/emulated/0/Download",
+                true,
             ),
         )
-        // 规则存在但派生结果与原文相同：与"没匹配到"同类，判 MISS。
+        // 命中恒等 carve-out（PRESERVE）：派生结果与原文相同，但规则**确实**命中了。
+        // 旧实现把它与"没匹配到"同类判 MISS，导致配了 PRESERVE 规则的包命中率恒为 0%。
+        assertEquals(
+            FuseRedirectStats.Outcome.PRESERVED,
+            FuseRedirectStats.outcome(
+                "/storage/emulated/0/Download",
+                "/storage/emulated/0/Download",
+                true,
+            ),
+        )
+        // 派生结果与原文相同且没有任何规则命中 ⇒ 真未命中。
         assertEquals(
             FuseRedirectStats.Outcome.MISS,
-            FuseRedirectStats.outcome("/storage/emulated/0/Download", "/storage/emulated/0/Download"),
+            FuseRedirectStats.outcome(
+                "/storage/emulated/0/Download",
+                "/storage/emulated/0/Download",
+                false,
+            ),
         )
-        assertEquals(FuseRedirectStats.Outcome.MISS, FuseRedirectStats.outcome(null, "/storage/x"))
+        // 该包在该用户下没有任何规则（mountedPath == null）⇒ 未命中。
+        assertEquals(
+            FuseRedirectStats.Outcome.MISS,
+            FuseRedirectStats.outcome(null, "/storage/x", false),
+        )
+        // 防御：mountedPath 为 null 时 matched 不应被采信（两者不可能同时成立）。
+        assertEquals(
+            FuseRedirectStats.Outcome.MISS,
+            FuseRedirectStats.outcome(null, "/storage/x", true),
+        )
     }
 }

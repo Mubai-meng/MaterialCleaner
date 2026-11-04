@@ -247,10 +247,17 @@ public final class HookBridgeRegistrar {
         // 每次都在 gen 递增后恢复 —— 从未指向真实故障。
         // 真正的故障是「linkToDeath 抛异常」（下面 watchRegistryBinder 里的两条 E），
         // 那才代表连监听都建立不起来。降级只改字面量，不新增任何运行时路径。
+        // detail 必须**逐字恒定**：HookErrorJournal 的聚合 key 是
+        // (code, severity, subject, detail) 四元组。旧实现把代次拼进 detail，而代次
+        // 每次重注册都会递增 ⇒ 每次死亡都产生一个新 key ⇒ 永不合并。
+        // 实测（2026-11-02 诊断包 B）：这条**必然且预期**的 app 进程退出事件占了
+        // 6 个槽位、count 全为 1，把真实错误往外挤 —— 正是 HookErrorJournal KDoc
+        // 承诺要消除的形态。代次改走 Entry.generation 字段（快照里独立成 `generation`
+        // 键），信息一点没丢。
         NativeHookStatus.INSTANCE.markHookError(
                 ErrorCodes.INSTANCE.HOOK_JAVA_BINDER_DEAD,
-                "stage=registry_binder_death, generation=" + generation,
-                "HookBridgeRegistrar", HookErrorJournal.SEVERITY_WARN, 0, 0L);
+                "stage=registry_binder_death",
+                "HookBridgeRegistrar", HookErrorJournal.SEVERITY_WARN, 0, generation);
         MediaProviderHooksService.requestReRegister("registry died");
     }
 }

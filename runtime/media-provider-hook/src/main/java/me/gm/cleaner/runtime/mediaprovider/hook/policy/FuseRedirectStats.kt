@@ -96,15 +96,36 @@ object FuseRedirectStats {
         return if (any) out.toString() else "/"
     }
 
-    /** 一次重定向评估的归一化结果。 */
-    enum class Outcome { REDIRECTED, MISS }
+    /**
+     * 一次重定向评估的归一化结果。
+     *
+     * 三态而不是两态：`mountedPath == path` 有两种**成因相反**的情形，混在一起
+     * 会让命中率变成一个无法解读的数字。
+     * - [REDIRECTED]：规则命中且确实改写了路径（MAP）。
+     * - [PRESERVED]：规则命中但结果是恒等（PRESERVE / `X → X` carve-out）——
+     *   规则**正确生效**，不改写就是它要的效果。
+     * - [MISS]：一条规则都没匹配上，或该包在该用户下根本没有规则。
+     */
+    enum class Outcome { REDIRECTED, PRESERVED, MISS }
 
     /**
-     * 归一化：只有"确实改写了路径"才算命中。
+     * 归一化：把「派生路径 + 是否命中过规则」折成三态。
      *
-     * `mountedPath == path`（派生结果与原文相同）不算命中 —— 那表示规则存在但
-     * 对该路径无实际效果，从诊断角度看与"没匹配到"是同一类需要解释的情形。
+     * @param mountedPath 派生结果；`null` 表示该包在该用户下没有任何规则。
+     * @param matched     MountPlanDeriver.resolve 给出的「是否真的命中了某条规则」。
+     *                    只看 [mountedPath] 无法区分 PRESERVED 与 MISS —— 两者都等于原文。
+     *
+     * 真机实证（2026-11-02 诊断包 B）：`com.coloros.gallery3d` 配了
+     * `DCIM→DCIM` / `Pictures→Pictures` / `Download→Download` 三条恒等 carve-out，
+     * 相册访问这三个目录 654 次全部被判成未命中（`redirected=0, missed=654,
+     * lastMissPrefix=/storage/emulated/0/Pictures`），命中率恒为 0%。
+     * 旧 KDoc 把这种情形解释为"规则存在但对该路径无实际效果"——对恒等 carve-out
+     * 恰恰相反：无改写**就是**规则想要的效果，记成未命中等于让实机验证无法证伪。
      */
-    fun outcome(mountedPath: String?, path: String): Outcome =
-        if (mountedPath != null && mountedPath != path) Outcome.REDIRECTED else Outcome.MISS
+    fun outcome(mountedPath: String?, path: String, matched: Boolean): Outcome = when {
+        mountedPath == null -> Outcome.MISS
+        mountedPath != path -> Outcome.REDIRECTED
+        matched -> Outcome.PRESERVED
+        else -> Outcome.MISS
+    }
 }

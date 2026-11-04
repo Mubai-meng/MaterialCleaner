@@ -5,6 +5,7 @@ import me.gm.cleaner.runtime.mediaprovider.hook.bridge.HookDataBusBridge;
 import me.gm.cleaner.runtime.mediaprovider.hook.media.MediaProviderHook;
 import me.gm.cleaner.runtime.mediaprovider.hook.media.MediaProviderHooksService;
 import me.gm.cleaner.runtime.mediaprovider.hook.media.QuerySessionCache;
+import me.gm.cleaner.runtime.mediaprovider.hook.policy.FuseRedirectStats;
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.HookPolicyCache;
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.NativeHookStatus;
 import me.gm.cleaner.runtime.mediaprovider.hook.policy.InaccessibleEvalStats;
@@ -889,13 +890,20 @@ public class FuseJavaGate {
                     " cannot resolve package for uid=" + uid + ", path=" + path, t);
             return path;
         }
-        final var mountedPath = HookPolicyCache.INSTANCE.getMountedPath(packageName, path);
+        // 一次解释同时拿到「派生路径」与「是否命中过规则」。只看派生路径无法区分
+        // 「命中恒等 carve-out（PRESERVE，规则正确生效）」与「一条规则都没匹配上」——
+        // 两者的结果都等于原文，混记成未命中会让命中率恒为 0%（2026-11-02 实测：
+        // 相册 654 次访问全部落在 Pictures/DCIM/Download 的恒等规则上）。
+        final var resolution = HookPolicyCache.INSTANCE.resolveMountedPath(packageName, path);
+        final String mountedPath = resolution == null ? null : resolution.getDerivedPath();
         final boolean redirected = mountedPath != null && !path.equals(mountedPath);
         // 只对**已配置重定向规则**的包记账：否则等于给所有包的文件操作都加一次开销。
         // 记账让"未命中"不再沉默 —— 未命中路径此前既无日志也无计数，
         // 导致"hook 没工作"与"路径不在 target 之下"无法区分（连续三批实机的教训）。
         if (HookPolicyCache.INSTANCE.hasRedirectRules(packageName)) {
-            NativeHookStatus.INSTANCE.recordFuseRedirect(packageName, path, redirected);
+            NativeHookStatus.INSTANCE.recordFuseRedirect(packageName, path,
+                    FuseRedirectStats.INSTANCE.outcome(mountedPath, path,
+                            resolution != null && resolution.getMatched()));
         }
         if (!redirected) {
             return path;

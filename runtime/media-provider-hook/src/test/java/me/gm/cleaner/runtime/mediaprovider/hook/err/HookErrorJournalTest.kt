@@ -205,4 +205,47 @@ class HookErrorJournalTest {
         assertTrue(line.contains("gen=3"))
         assertTrue(line.contains("at=99"))
     }
+
+    /**
+     * 回归（2026-11-02 诊断包 B）：`HOOK.JAVA.BINDER.DEAD` 的 detail 曾把代次拼进去，
+     * 而聚合 key 含 detail ⇒ 代次每次递增都产生新 key ⇒ 同一条**必然且预期**的
+     * app 进程退出事件占了 6 个槽位、count 全为 1（`totalRecorded=6, slotCount=6`），
+     * 把真实错误往外挤。代次改走 [HookErrorJournal.Entry.generation] 字段。
+     */
+    @Test
+    fun `代次不进聚合 key 且合并后取最新代次`() {
+        repeat(6) { i ->
+            HookErrorJournal.record(
+                code = "HOOK.JAVA.BINDER.DEAD",
+                severity = HookErrorJournal.SEVERITY_WARN,
+                detail = "stage=registry_binder_death",
+                subject = "HookBridgeRegistrar",
+                errno = 0,
+                generation = 11_790L + i,
+                nowElapsed = 1_000L + i,
+            )
+        }
+        assertEquals("同一 (code, severity, subject, detail) 只能占一个槽位", 1, HookErrorJournal.size())
+        assertEquals(6L, HookErrorJournal.total())
+        val only = HookErrorJournal.snapshot().single()
+        assertEquals(6L, only.count)
+        assertEquals("代次取最近一次", 11_795L, only.generation)
+        assertEquals("首次时刻不得被刷新", 1_000L, only.firstAtElapsed)
+        assertEquals(1_005L, only.lastAtElapsed)
+    }
+
+    @Test
+    fun `代次不参与 key 但 detail 仍参与`() {
+        // 反向保护：本修复只放开代次，detail 必须继续区分槽位 ——
+        // 否则不同成因的同类错误会被合并成一条，掩盖真实故障。
+        HookErrorJournal.record(
+            code = "C", severity = "W", detail = "stage=a", subject = null,
+            errno = 0, generation = 1L, nowElapsed = 0L,
+        )
+        HookErrorJournal.record(
+            code = "C", severity = "W", detail = "stage=b", subject = null,
+            errno = 0, generation = 2L, nowElapsed = 1L,
+        )
+        assertEquals(2, HookErrorJournal.size())
+    }
 }

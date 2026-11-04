@@ -133,6 +133,26 @@ class BinderDeadSeverityContractTest {
      * 反向保护：per-attempt 失败降 W 之后，**重试预算耗尽**必须升 E ——
      * 否则「Provider 永远不出现」这种真故障会全程只有 W。
      */
+    /**
+     * 聚合守卫（2026-11-02 诊断包 B）：`stage=registry_binder_death` 的 detail
+     * **必须是逐字常量**。
+     *
+     * HookErrorJournal 的聚合 key 是 `(code, severity, subject, detail)`。detail 里
+     * 一旦拼进代次，每次重注册都会产生新 key ⇒ 这条必然且预期的 app 进程退出事件
+     * 永不合并，实测占 6 个槽位、count 全为 1，把真实错误挤出 CAPACITY=50。
+     * 代次必须走 `markHookError` 的最后一个参数（落到 Entry.generation）。
+     */
+    @Test
+    fun `registry binder 死亡的 detail 不得拼接代次`() {
+        val src = source(registrar)
+        val at = src.indexOf("stage=registry_binder_death")
+        assertTrue("锚点缺失：stage=registry_binder_death", at >= 0)
+        val lineEnd = src.indexOf('\n', at).let { if (it < 0) src.length else it }
+        val line = src.substring(at, lineEnd)
+        assertTrue("detail 不得拼接代次：$line", !line.contains("generation"))
+        assertTrue("detail 不得拼接字符串：$line", !line.contains("+"))
+    }
+
     @Test
     fun `重试预算耗尽升级为 E`() {
         val src = source(

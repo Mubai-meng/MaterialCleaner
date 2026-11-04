@@ -29,6 +29,20 @@ data class RuntimeMountPlan(
 }
 
 /**
+ * 一次路径解释的结果：派生路径 + 是否真的命中过某条规则。
+ *
+ * 为什么要多这一位：`derivedPath == path` 有两种**成因相反**的来源 ——
+ * ①命中了恒等 carve-out（`X → X`，PRESERVE）⇒ 规则**正确生效**；
+ * ②一条规则都没匹配上 ⇒ 真未命中。
+ * 只看派生路径无法区分，而 FUSE 重定向的命中率恰好由这一位决定：
+ * 混记成未命中会让配了 PRESERVE 规则的包命中率恒为 0%。
+ */
+data class ResolvedMountedPath(
+    val derivedPath: String,
+    val matched: Boolean,
+)
+
+/**
  * 快照裸规则对到挂载计划的唯一投影桥。
  *
  * 输入契约：规则对由投影器与钩子解析期过滤为规范路径后进入；
@@ -73,11 +87,27 @@ object MountPlanDeriver {
         )
     }
 
-    fun resolveMountedPath(rules: List<RedirectRule>, path: String): String {
-        if (rules.isEmpty()) return path
-        if (!OrderedRedirectInterpreter.isCanonicalAbsolutePath(path)) return path
+    fun resolveMountedPath(rules: List<RedirectRule>, path: String): String =
+        resolve(rules, path).derivedPath
+
+    /**
+     * 解释一次路径访问，并告知**是否命中过规则**（PRESERVE 也算命中）。
+     *
+     * 与 [resolveMountedPath] 共用同一份解释结果，不重复计算。
+     * `matched` 的判据是"解释过程产生过至少一个步骤"，而不是"派生路径变了" ——
+     * 后者对恒等 carve-out 恒为 false（见 [ResolvedMountedPath] 的说明）。
+     */
+    fun resolve(rules: List<RedirectRule>, path: String): ResolvedMountedPath {
+        if (rules.isEmpty()) return ResolvedMountedPath(path, false)
+        if (!OrderedRedirectInterpreter.isCanonicalAbsolutePath(path)) {
+            return ResolvedMountedPath(path, false)
+        }
         val zipped = rules.map { it.source to it.target }
-        return OrderedRedirectInterpreter.interpret(path, toOrderedRules(zipped)).derivedPath
+        val interpretation = OrderedRedirectInterpreter.interpret(path, toOrderedRules(zipped))
+        return ResolvedMountedPath(
+            derivedPath = interpretation.derivedPath,
+            matched = interpretation.steps.isNotEmpty(),
+        )
     }
 
     private fun deriveMountPoints(zipped: List<Pair<String, String>>): List<String> =
