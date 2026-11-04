@@ -173,8 +173,35 @@ ext {
     //      DIR* 标记时直接 abort，整条挂载事务丢失（child_result_timeout）。
     //      改为 raw 配 raw（sys_close），并把 chownRecursively 改成不再跨递归持有
     //      祖先 DIR、ProcInfo 的 fdopen 失败分支改用 libc close。详见 CHANGELOG 6.2.1。
-    versionCode = 621
-    versionName = '6.2.1'
+    // 2026-11-04：6.2.2 / 622 = 第62批（诊断包 A/B 取证）四项可观测性缺陷；
+    //   无新增功能、不改任何已配规则的含义。四条的共同点是「产物说了不实的话」——
+    //   每一条都让实机验证退化成无法证伪的观察，而不是让功能坏掉。
+    //   ① HookErrorJournal 聚合失效：HOOK.JAVA.BINDER.DEAD 的 detail 里拼了
+    //      `generation=`，而聚合 key 是 (code, severity, subject, detail) 四元组
+    //      ⇒ 代次每次递增都开新槽。实测 totalRecorded=6 / slotCount=6，6 条同源
+    //      条目的 count 全为 1 —— 一条**必然且预期**的 app 进程退出事件吃掉 6/50
+    //      个槽位，把真实错误往外挤。detail 改为逐字常量，代次改走 markHookError
+    //      的末位参数（快照里独立成 `generation` 键，信息不丢）。
+    //   ② FUSE 重定向把「恒等 carve-out 命中」记成「未命中」：判据只有
+    //      `mountedPath != path`，而 PRESERVE 规则（X→X）的派生结果必然等于原文
+    //      ⇒ 命中率恒 0%。实测相册 evaluated=654 / redirected=0 / missed=654 /
+    //      lastMissPrefix=/storage/emulated/0/Pictures，而该包配的正是
+    //      DCIM→DCIM、Pictures→Pictures、Download→Download 三条恒等规则。
+    //      新增 MountPlanDeriver.resolve()（带 matched，判据是「解释过程产生过
+    //      步骤」而非「路径变了」）、HookPolicyCache.resolveMountedPath()、
+    //      FuseRedirectStats.Outcome 三态与 preserved 计数；native_hook_status
+    //      快照 schemaVersion 7→8（新增 preserved / lastPreserve*）。
+    //   ③ hooksRetryCount 越过 maxHookRetries：onHooksBinderDied() 不受预算门控，
+    //      预算耗尽后再死一次仍排一轮 ⇒ 计数无上界增长，快照出现 11 > 10 这种
+    //      自相矛盾的状态，"预算耗尽"与"还有余量"再也分不清。抽出 HookRetryBudget
+    //      纯函数并钳制计数；门控结论与旧实现等价。
+    //   ④ errno=2 归因被 FUSE 断连污染：MissingPathAttribution 用 File.exists()
+    //      探测，它把任何 stat 失败吞成 false ⇒ ENOTCONN 时两侧都"缺失" ⇒ 误报
+    //      `missing=source+target`，把读者引向根本不存在的目录问题。实测该行之后
+    //      21ms 就出现 errno=107(ENOTCONN)。探测改三态 PathProbe，只有
+    //      ENOENT/ENOTDIR 判缺失，其余 errno 一律 `missing=unknown`。
+    versionCode = 622
+    versionName = '6.2.2'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 
