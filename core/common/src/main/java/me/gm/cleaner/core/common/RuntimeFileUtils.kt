@@ -264,6 +264,9 @@ object RuntimeFileUtils {
         fuseBypass: Boolean, sources: Array<String>, targets: Array<String>
     ): String
 
+    /** JNI 重载名冲突消解：`c` 已被上面的六参版本占用，reset 用独立短名。 */
+    private external fun d(pid: Int, uid: Int): String
+
     fun bind_mount(
         pid: Int, uid: Int, unmountDataRestriction: Boolean,
         fuseBypass: Boolean, sources: Array<String>, targets: Array<String>
@@ -274,6 +277,28 @@ object RuntimeFileUtils {
         fuseBypass: Boolean, sources: Array<String>, targets: Array<String>
     ): BindMountResult = try {
         BindMountResult.fromJson(c(pid, uid, unmountDataRestriction, fuseBypass, sources, targets))
+    } catch (e: Exception) {
+        BindMountResult(
+            success = false,
+            stage = "jni_exception",
+            errno = 0,
+            error = e.message.orEmpty(),
+        )
+    }
+
+    /**
+     * 冲突处置/复位专用：只进目标 namespace 重建 /storage baseline，不挂任何规则。
+     *
+     * ⚠️ 第 63 批（tombstone_31 / 2026-11-13）实证：不要用
+     * `bind_mount_result(pid, uid, false, false, emptyArray(), emptyArray())`
+     * 表达"什么都不挂"—— 旧 native 实现仍会 fork 进目标 namespace，
+     * 且 JNI 数组读取发生在 **fork 之后**：挂载子进程没有可达的 ART runtime，
+     * `GetArrayLength` 解引用空句柄 ⇒ SIGSEGV @0xc ⇒ 子进程崩溃 ⇒
+     * 父进程 child_result_timeout ⇒ dirty=true ⇒ **误杀目标应用**。
+     * reset 走专用 JNI 入口（`(II)Ljava/lang/String;`），fork 后零 JNI。
+     */
+    fun bind_mount_reset(pid: Int, uid: Int): BindMountResult = try {
+        BindMountResult.fromJson(d(pid, uid))
     } catch (e: Exception) {
         BindMountResult(
             success = false,

@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <unistd.h>
+#include <vector>
 
 #include "android-base/stringprintf.h"
 #include "android-base/unique_fd.h"
@@ -548,6 +549,78 @@ static bool switch_mnt_ns(int pid) {
 }
 
 namespace Mount {
+    /// JNI 数组物化结果：fork 之后子进程要用 source/target、
+    /// 但 fork 出的子进程**没有可达的 ART runtime** —— 任何 env-> 调用都是
+    /// 解引用空句柄。因此必须在 fork 之前把全部 JNI 内容拷成 C++ 对象。
+    ///
+    /// 真机证据（tombstone_31 / 2026-11-13 16:28:06 / PLK110 / 6.2.2）：
+    ///   signal 11 (SIGSEGV), SEGV_MAPERR, fault addr 0xc (read)
+    ///   #00 art::JNI<false>::GetArrayLength(_JNIEnv*, _jarray*)+164
+    ///   #01 libcleaner.so  #02 libcleaner.so
+    ///   #05 RuntimeFileUtils.bind_mount_result+38
+    ///   #07 Mounter.bindMountLocked+686
+    ///   → journal 同步出现
+    ///     MOUNT.ROLLBACK.FAILED subject=andes.oplus.documentsreader/pid:29912
+    ///     stage=child_result_timeout phase=baseline_ready dirty=true targetTerminated=true
+    /// 0xc 正是 mirror::Array::length_ 在 ART 内的偏移；jarray 句柄为 null 时必崩。
+    /// 子进程崩溃 ⇒ RESULT 永不到达 ⇒ 父进程 child_result_timeout ⇒ 判 namespace 已脏
+    /// ⇒ 误杀目标应用。修复：fork 前物化，fork 后零 JNI。
+    struct MountArgs {
+        std::vector<std::string> sources;
+        std::vector<std::string> targets;
+
+        bool valid() const { return sources.size() == targets.size(); }
+
+        size_t size() const { return sources.size(); }
+    };
+
+    /// 把两个 jobjectArray 完整拷成 C++ 容器。任何一步失败都返回 invalid 结果，
+    /// 由调用方在 fork 之前就报 invalid_args，绝不带半成品进子进程。
+    static MountArgs materialize_mount_args(JNIEnv *env, jobjectArray jsources,
+                                            jobjectArray jtargets) {
+        MountArgs args{};
+        if (jsources == nullptr || jtargets == nullptr) {
+            return args;
+        }
+        const jsize sourceCount = env->GetArrayLength(jsources);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            return args;
+        }
+        const jsize targetCount = env->GetArrayLength(jtargets);
+        if (env->ExceptionCheck() || sourceCount != targetCount) {
+            env->ExceptionClear();
+            return args;
+        }
+        args.sources.reserve(static_cast<size_t>(sourceCount));
+        args.targets.reserve(static_cast<size_t>(targetCount));
+        for (jsize i = 0; i < sourceCount; ++i) {
+            auto jsource = (jstring) env->GetObjectArrayElement(jsources, i);
+            auto jtarget = (jstring) env->GetObjectArrayElement(jtargets, i);
+            if (jsource == nullptr || jtarget == nullptr) {
+                env->DeleteLocalRef(jsource);
+                env->DeleteLocalRef(jtarget);
+                return MountArgs{};
+            }
+            const char *source = env->GetStringUTFChars(jsource, nullptr);
+            const char *target = env->GetStringUTFChars(jtarget, nullptr);
+            if (source == nullptr || target == nullptr) {
+                if (source != nullptr) env->ReleaseStringUTFChars(jsource, source);
+                if (target != nullptr) env->ReleaseStringUTFChars(jtarget, target);
+                env->DeleteLocalRef(jsource);
+                env->DeleteLocalRef(jtarget);
+                return MountArgs{};
+            }
+            args.sources.emplace_back(source);
+            args.targets.emplace_back(target);
+            env->ReleaseStringUTFChars(jsource, source);
+            env->ReleaseStringUTFChars(jtarget, target);
+            env->DeleteLocalRef(jsource);
+            env->DeleteLocalRef(jtarget);
+        }
+        return args;
+    }
+
     static MountStatus bind_mount_internal(JNIEnv *env, jint pid, jint uid,
                                            jboolean unmountDataRestriction,
                                            jboolean fuseBypass, jobjectArray jsources,
@@ -559,11 +632,19 @@ namespace Mount {
         const std::string storageSource = "/mnt/runtime/write"_iobfs.c_str();
         const std::string userSource = StringPrintf("/mnt/user/%d"_iobfs.c_str(), user_id);
 
-        if (jsources == nullptr || jtargets == nullptr ||
-            env->GetArrayLength(jsources) != env->GetArrayLength(jtargets)) {
+        // ⚠️ 全部 JNI 读取都在 fork 之前完成（见 materialize_mount_args 的长注释）。
+        const MountArgs args = materialize_mount_args(env, jsources, jtargets);
+        if (!args.valid()) {
             return make_mount_status(-1, "invalid_args", EINVAL, -1, nullptr, nullptr,
                                      MountPhase::PREPARE);
         }
+        // 零规则 + 不需要拆 data restriction ⇒ 挂载子进程无事可做。
+        // 旧实现仍会 fork 进目标 namespace、重建 baseline，然后在空的
+        // "Mount as user wish" 循环后报 success —— 期间任何一步失败（例如
+        // FUSE 已断开导致 umount2 返回 ENOTCONN=107）都会把一次本应"什么都没做"
+        // 的调用记成挂载失败（真机 journal 大量 MOUNT.BYPASS.SKIPPED errno=107
+        // 由此而来）。这类调用点在 Mounter 里是"冲突处置/复位"，语义就是无操作。
+        const bool zeroRuleFastPath = args.size() == 0 && !unmountDataRestriction;
         int wait_errno = 0;
         const ZygoteWaitResult wait_result = wait_zygote(pid, &wait_errno);
         if (wait_result != ZygoteWaitResult::OK) {
@@ -645,6 +726,18 @@ namespace Mount {
             }
         }
         int sock = sv[1];
+        // 子进程只持有 sv[1]：sv[0] 是父进程侧的接收端，fork 语义下子进程拿到的是
+        // 同一份描述符副本，但它**不拥有** —— raw close 会连带 fdsan 表语义混乱
+        // （v1 里子进程尾部的 close(sv[0]) 是死代码，删掉更清楚）。
+        // 零规则快速路径：不进 namespace、不重建 baseline，直接回报成功。
+        // 语义与"做完 baseline 后没有规则可挂"完全等价，且不给目标 namespace
+        // 制造任何副作用（这是冲突处置路径最需要的性质）。
+        if (zeroRuleFastPath) {
+            write_mount_status(sock, make_mount_status(0, "success", 0, -1, nullptr, nullptr,
+                                                       MountPhase::COMPLETED));
+            sys_close(sock);
+            sys__exit(0);
+        }
         // In the child process we switch to the new namespace and start mounting,
         // so that all mount operations will not affect parent process.
         if (!switch_mnt_ns(pid)) {
@@ -808,48 +901,40 @@ namespace Mount {
         }
 #endif // REMOUNT_STORAGE
         // Mount as user wish.
-        for (int i = 0, length = env->GetArrayLength(jsources); i < length; i++) {
-            write_mount_progress_with_index(sock, MountPhase::APPLYING_RULES, i);
-            auto jsource = (jstring) env->GetObjectArrayElement(jsources, i);
-            if (jsource == nullptr) {
-                rollback_and_fail("invalid_source", EINVAL, i);
+        // ⚠️ 数据来自 fork 前物化的 MountArgs，**不再触碰 env** ——
+        // 循环头的 GetArrayLength 就是 tombstone_31 的崩溃点。
+        for (size_t i = 0; i < args.size(); ++i) {
+            const std::string &source = args.sources[i];
+            const std::string &target = args.targets[i];
+            write_mount_progress_with_index(sock, MountPhase::APPLYING_RULES, (int) i);
+            if (!is_storage_path(source.c_str())) {
+                rollback_and_fail("invalid_source", EINVAL, (int) i, source.c_str(),
+                                  target.c_str());
             }
-            const char *source = env->GetStringUTFChars(jsource, nullptr);
-            if (source == nullptr) {
-                rollback_and_fail("invalid_source", EINVAL, i);
+            if (!is_storage_path(target.c_str())) {
+                rollback_and_fail("invalid_target", EINVAL, (int) i, source.c_str(),
+                                  target.c_str());
             }
-            auto jtarget = (jstring) env->GetObjectArrayElement(jtargets, i);
-            if (jtarget == nullptr) {
-                rollback_and_fail("invalid_target", EINVAL, i, source);
-            }
-            const char *target = env->GetStringUTFChars(jtarget, nullptr);
-            if (target == nullptr) {
-                rollback_and_fail("invalid_target", EINVAL, i, source);
-            }
-            if (!is_storage_path(source)) {
-                rollback_and_fail("invalid_source", EINVAL, i, source, target);
-            }
-            if (!is_storage_path(target)) {
-                rollback_and_fail("invalid_target", EINVAL, i, source, target);
-            }
+            // 与旧实现等价的下标切分：source 必须以 /storage 开头（已在
+            // is_storage_path 里校验），切掉 /storage 前缀后拼到 runtime 根。
             const std::string mnt_source = (useSdcardFs ? storageSource : userSource) +
-                                           std::string(source).substr(storage.length(),
-                                                                      strlen(source));
+                                           source.substr(storage.length());
             if (TEMP_FAILURE_RETRY(
-                    mount(mnt_source.c_str(), target, nullptr, MS_BIND | MS_REC, nullptr))) {
+                    mount(mnt_source.c_str(), target.c_str(), nullptr, MS_BIND | MS_REC,
+                          nullptr))) {
                 LOGE("Failed to mount %s to %s: %s"_iobfs.c_str(),
-                     mnt_source.c_str(), target, strerror(errno));
-                rollback_and_fail("mount_rule", errno, i, mnt_source.c_str(), target);
+                     mnt_source.c_str(), target.c_str(), strerror(errno));
+                rollback_and_fail("mount_rule", errno, (int) i, mnt_source.c_str(),
+                                  target.c_str());
             }
-            env->ReleaseStringUTFChars(jsource, source);
-            env->ReleaseStringUTFChars(jtarget, target);
-            env->DeleteLocalRef(jsource);
-            env->DeleteLocalRef(jtarget);
         }
         write_mount_status(sock, make_mount_status(0, "success", 0, -1, nullptr, nullptr,
                                                    MountPhase::COMPLETED));
-        close(sv[0]);
-        close(sv[1]);
+        // ⚠️ 只关 sv[1]。sv[0] 属于父进程，子进程里的那份副本不该由它关
+        // （旧代码在此 close(sv[0]) 是死代码 —— 上面 sys__exit 之后不可达）。
+        // 用 sys_close 而非 libc close：本进程从 Java 侧 fork，fdsan 表整体继承，
+        // libc close 会校验所有权并可能 SIGABRT（见 switch_mnt_ns 的同类注释）。
+        sys_close(sock);
         sys__exit(0);
         return make_mount_status(0, "success");
     }
@@ -868,5 +953,129 @@ namespace Mount {
                                                 jsources, jtargets);
         const auto json = mount_status_to_json(status, pid, uid);
         return env->NewStringUTF(json.c_str());
+    }
+
+    /// 冲突处置专用：重建目标 namespace 的 /storage baseline。
+    /// 与 bind_mount* 的区别是**根本不接受数组参数** —— Mounter 的冲突处置分支
+    /// 只需要"把这个 pid 上的挂载清干净"，传空数组会被零规则快速路径短路成
+    /// 什么都不做（那就失去了 reset 的意义），路径上还必须经过 JNI 数组读取。
+    /// 这里直接传标量，fork 之后零 env-> 调用。
+    jstring bind_mount_reset(JNIEnv *env, jclass clazz, jint pid, jint uid) {
+        /// @see /system/vold/Utils.cpp IsSdcardfsUsed()
+        const bool useSdcardFs = !storage_platform::is_fuse_available();
+        const uid_t user_id = uid / AID_USER_OFFSET;
+        const std::string storage = "/storage"_iobfs.c_str();
+        const std::string storageSource = "/mnt/runtime/write"_iobfs.c_str();
+        const std::string userSource = StringPrintf("/mnt/user/%d"_iobfs.c_str(), user_id);
+
+        int wait_errno = 0;
+        const ZygoteWaitResult wait_result = wait_zygote(pid, &wait_errno);
+        if (wait_result != ZygoteWaitResult::OK) {
+            const char *stage = wait_result == ZygoteWaitResult::GONE
+                                ? "target_gone" : "wait_zygote";
+            const auto status = make_mount_status(
+                    -1, stage, wait_errno == 0 ? ETIMEDOUT : wait_errno, -1, nullptr, nullptr,
+                    MountPhase::PREPARE);
+            return env->NewStringUTF(mount_status_to_json(status, pid, uid).c_str());
+        }
+        unsigned long long target_start_time = 0;
+        if (!read_target_identity(pid, static_cast<uid_t>(uid), &target_start_time)) {
+            const auto status = make_mount_status(
+                    -1, "target_identity", errno == 0 ? ESRCH : errno, -1, nullptr, nullptr,
+                    MountPhase::PREPARE);
+            return env->NewStringUTF(mount_status_to_json(status, pid, uid).c_str());
+        }
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) {
+            const int saved = errno;
+            const auto status = make_mount_status(-1, "socketpair", saved, -1, nullptr, nullptr,
+                                                  MountPhase::NAMESPACE_ENTERED);
+            return env->NewStringUTF(mount_status_to_json(status, pid, uid).c_str());
+        }
+        int child_pid = sys_fork();
+        if (child_pid) {
+            MountStatus status{};
+            if (child_pid == -1) {
+                const int saved_errno = errno;
+                close(sv[0]);
+                close(sv[1]);
+                status = make_mount_status(-1, "fork", saved_errno, -1, nullptr, nullptr,
+                                           MountPhase::NAMESPACE_ENTERED);
+            } else {
+                int sock = sv[0];
+                set_socket_timeout(sock, 1);
+                MountStatus message{};
+                MountPhase last_progress_phase = MountPhase::UNKNOWN;
+                int last_progress_index = -1;
+                bool got_result = false;
+                while (!got_result) {
+                    MountStatus read{};
+                    if (!read_mount_status(sock, &read)) {
+                        sys_kill(child_pid, SIGKILL);
+                        status = make_mount_status(-1, "child_result_timeout",
+                                                   errno == 0 ? ETIMEDOUT : errno);
+                        break;
+                    }
+                    if (static_cast<MountMessageType>(read.message_type)
+                        == MountMessageType::PROGRESS) {
+                        last_progress_phase = static_cast<MountPhase>(read.phase);
+                        last_progress_index = read.index;
+                        continue;
+                    }
+                    status = read;
+                    got_result = true;
+                }
+                close(sv[0]);
+                close(sv[1]);
+                kill_child_if_stuck(child_pid);
+                if (!got_result && last_progress_phase != MountPhase::UNKNOWN) {
+                    copy_status_value(status.stage, sizeof(status.stage), "child_result_timeout");
+                    status.phase = static_cast<int>(last_progress_phase);
+                    status.index = last_progress_index;
+                    if (phase_may_have_dirty_namespace(last_progress_phase)) {
+                        status.namespace_dirty = 1;
+                    }
+                }
+                if (status.namespace_dirty != 0) {
+                    status.target_terminated =
+                            terminate_target_if_same(pid, target_start_time) ? 1 : 0;
+                }
+            }
+            return env->NewStringUTF(mount_status_to_json(status, pid, uid).c_str());
+        }
+        int sock = sv[1];
+        if (!switch_mnt_ns(pid)) {
+            fail_child(sock, "setns", errno == 0 ? EPERM : errno, -1, nullptr, nullptr,
+                       MountPhase::NAMESPACE_ENTERED);
+        }
+        unsigned long long confirmed_start_time = 0;
+        if (!read_target_identity(pid, static_cast<uid_t>(uid), &confirmed_start_time) ||
+            confirmed_start_time != target_start_time) {
+            fail_child(sock, "target_identity", errno == 0 ? ESRCH : errno, -1,
+                       nullptr, nullptr, MountPhase::NAMESPACE_ENTERED);
+        }
+        write_mount_progress(sock, MountPhase::NAMESPACE_ENTERED);
+        write_mount_progress(sock, MountPhase::MUTATING_BASELINE);
+        const auto baseline = restore_storage_baseline(
+                useSdcardFs, storage, storageSource, userSource);
+        if (baseline.ok != 0) {
+            const auto recovery = restore_storage_baseline(
+                    useSdcardFs, storage, storageSource, userSource);
+            if (recovery.ok != 0) {
+                LOGE("Failed to restore storage baseline after %s: %s"_iobfs.c_str(),
+                     baseline.stage, strerror(recovery.err));
+                fail_child(sock, "baseline_recovery_failed", recovery.err, recovery.index,
+                           recovery.source, recovery.target, MountPhase::MUTATING_BASELINE,
+                           true);
+            }
+            fail_child(sock, baseline.stage, baseline.err, baseline.index,
+                       baseline.source, baseline.target, MountPhase::MUTATING_BASELINE);
+        }
+        write_mount_status(sock, make_mount_status(0, "success", 0, -1, nullptr, nullptr,
+                                                   MountPhase::COMPLETED));
+        sys_close(sock);
+        sys__exit(0);
+        // 不可达：与 bind_mount_internal 的收尾同构，但本函数返回 jstring。
+        return nullptr;
     }
 }  // namespace Mount

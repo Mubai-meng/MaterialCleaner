@@ -129,6 +129,13 @@ namespace ProcInfo {
     }
 
     jintArray check_mounts(JNIEnv *env, jclass clazz, jint pid, jobjectArray jtargets) {
+        // ⚠️ GetArrayLength(null) 必崩：fault addr 0xc = mirror::Array::length_ 偏移
+        // （与 Mount.cpp tombstone_31 同款）。虽然当前调用点都传非空数组，
+        // 但本函数与 Mounter 一样跑在 root 进程，崩了没有 Java 层 catch 可兜，
+        // 入口先做 null 防御（null 视为空数组 → 返回空结果）。
+        if (jtargets == nullptr) {
+            return env->NewIntArray(0);
+        }
         int length = env->GetArrayLength(jtargets);
         if (length == 0) {
             return env->NewIntArray(0);

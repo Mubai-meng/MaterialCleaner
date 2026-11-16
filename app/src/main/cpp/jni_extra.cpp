@@ -17,6 +17,7 @@ jint JNI_OnLoad_Extra(JNIEnv *env, jclass clazz) {
     auto a = AY_OBFUSCATE("a"); // "a" - short method name
     auto b = AY_OBFUSCATE("b"); // "b" - short method name
     auto c = AY_OBFUSCATE("c"); // "c" - short method name
+    auto d = AY_OBFUSCATE("d"); // "d" - short method name (bind_mount_reset)
     JNINativeMethod methods[] = {
             {b, AY_OBFUSCATE("(Ljava/lang/String;)I"),                     (void *) FileUtils::rm_dir}, // "(Ljava/lang/String;)I"
             {a, AY_OBFUSCATE( // "([Ljava/lang/String;I)Z"
@@ -33,6 +34,8 @@ jint JNI_OnLoad_Extra(JNIEnv *env, jclass clazz) {
                         "(IIZZ[Ljava/lang/String;[Ljava/lang/String;)Z"), (void *) Mount::bind_mount},
             {c, AY_OBFUSCATE( // "(IIZZ[Ljava/lang/String;[Ljava/lang/String;)Ljava/lang/String;"
                         "(IIZZ[Ljava/lang/String;[Ljava/lang/String;)Ljava/lang/String;"), (void *) Mount::bind_mount_status},
+            {d, AY_OBFUSCATE( // "(II)Ljava/lang/String;"
+                        "(II)Ljava/lang/String;"),                        (void *) Mount::bind_mount_reset},
     };
     return env->RegisterNatives(clazz, methods, NELEM(methods));
 }

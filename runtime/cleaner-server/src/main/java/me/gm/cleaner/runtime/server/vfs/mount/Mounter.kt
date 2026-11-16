@@ -118,6 +118,11 @@ class Mounter {
             ?.let { it.sources.zip(it.targets).hashCode() }
 
         if (plan == null || plan.isEmpty()) {
+            // 第 63 批（tombstone_31）：native 已把 JNI 数组读取物化到 fork 之前，
+            // 空数组调用不再触发挂载子进程 SIGSEGV。此处保留原调用而非短路成
+            // noop，因为 unmountDataRestriction 在 sdcardfs 设备上可能为 true
+            // （需要真实的 Android/data 限制卸载）；FUSE 设备上 native 侧
+            // 零规则快速路径会跳过无谓的 namespace 切换。
             val result = RuntimeFileUtils.bind_mount_result(
                 pid, uid,
                 !isFuseBpfEnabled && recordExternalAppSpecificStorage, false,
@@ -638,14 +643,11 @@ class Mounter {
             mountRetryCount.remove(procInfo.pid)
         }
         totalAttempts.incrementAndGet()
-        val reset = RuntimeFileUtils.bind_mount_result(
-            pid = procInfo.pid,
-            uid = procInfo.uid,
-            unmountDataRestriction = false,
-            fuseBypass = false,
-            sources = emptyArray(),
-            targets = emptyArray(),
-        )
+        // 第 63 批：冲突处置需要**真实**的 baseline 重建（清掉同 pid 上旧包挂载），
+        // 不能传空数组（空数组在旧实现里同样会 fork 后 JNI 崩溃，见 tombstone_31；
+        // 在新实现里会被零规则快速路径短路成什么都不做，失去 reset 语义）。
+        // 改走专用 reset JNI 入口：fork 后零 JNI，只重建 baseline。
+        val reset = RuntimeFileUtils.bind_mount_reset(procInfo.pid, procInfo.uid)
         failureCount.incrementAndGet()
         val packageSummary = conflictingPackages.sorted().joinToString(",")
         val resetSummary = if (reset.success) "baseline restored" else "reset=${reset.reason}"
@@ -804,13 +806,9 @@ class Mounter {
                 Log.w("MC_REDIRECT", "[Mounter] skip reset for dead pid=$pid pkg=$packageName")
                 return@forEach
             }
-            val result = RuntimeFileUtils.bind_mount_result(
-                pid, uid,
-                unmountDataRestriction = false,
-                fuseBypass = false,
-                sources = emptyArray(),
-                targets = emptyArray()
-            )
+            // 第 63 批：reset 必须真实重建 baseline（清掉旧挂载）。空数组走
+            // bind_mount_result 会被零规则快速路径短路成无操作，复位失效。
+            val result = RuntimeFileUtils.bind_mount_reset(pid, uid)
             if (!result.success) {
                 Log.w(
                     "MC_REDIRECT",
