@@ -11,7 +11,6 @@ import me.gm.cleaner.core.config.SecurityHelper.write
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.IOException
 import java.util.Locale
 
 object AppLabelCache {
@@ -69,8 +68,14 @@ object AppLabelCache {
         }
     }
 
-    fun getPackageLabel(packageInfo: PackageInfo): String =
-        getPackageLabelFromCache(packageInfo, true)!!
+    fun getPackageLabel(packageInfo: PackageInfo): String = try {
+        getPackageLabelFromCache(packageInfo, true)
+            ?: getPackageLabelFromPackageManager(packageInfo.applicationInfo)
+    } catch (e: Exception) {
+        // 标签只影响展示；末级兜底，避免 PackageManager / 缓存异常打崩调用方。
+        Log.w(TAG, "getPackageLabel failed for ${packageInfo.packageName}", e)
+        packageInfo.packageName
+    }
 
     /** 无 [PackageInfo] 时按 packageName 直接取持久化标签，本地降级路径使用。 */
     @Synchronized
@@ -129,8 +134,10 @@ object AppLabelCache {
             }
             val encryptedFile = SecurityHelper.encryptedFile(labelFile)
             encryptedFile.write(json.toString().toByteArray())
-        } catch (e: IOException) {
-            Log.e(TAG, "Failed to write label cache", e)
+        } catch (e: Exception) {
+            // 与读取同理：keystore 失效时写入也可能抛 GeneralSecurityException。
+            // labelCache 已在方法开头赋值，本次会话继续用内存缓存，不向上抛。
+            Log.e(TAG, "Failed to write label cache, kept in memory only", e)
         }
     }
 
@@ -148,9 +155,13 @@ object AppLabelCache {
                 try {
                     val encryptedFile = SecurityHelper.encryptedFile(labelFile)
                     JSONObject(encryptedFile.read().toString())
-                } catch (e: IOException) {
-                    JSONObject()
-                } catch (e: RuntimeException) {
+                } catch (e: Exception) {
+                    // EncryptedFile.read() 在密钥与密文不匹配时抛 AEADBadTagException
+                    // （GeneralSecurityException），既不是 IOException 也不是
+                    // RuntimeException。标签缓存是可重建的派生数据：丢弃坏文件并按空
+                    // 缓存处理，绝不让异常穿到 UI 协程（第 64 批实机 JVM 崩溃）。
+                    Log.w(TAG, "Failed to read label cache, discarding ${labelFile.name}", e)
+                    labelFile.delete()
                     JSONObject()
                 }
             }

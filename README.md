@@ -1,8 +1,8 @@
-# MaterialCleaner（质感清理）
+# ReMap
 
 基于 **bind mount + Xposed Hook** 的 Android 存储重定向工具。它把应用对共享存储的访问导向你指定的目录，同时对「不可访问」「只读」路径施加访问保护；规则按应用配置，可导出、导入与随包模板套用。
 
-本仓库是面向 **OnePlus 15（PLK110）/ ColorOS 17 / Android 17** 的适配分支，应用内「检查更新」与「关于」均指向本仓库。上游项目见 [firesahc/MaterialCleaner](https://github.com/firesahc/MaterialCleaner)。当前版本 **6.2.3（versionCode 623）**。
+本仓库是面向 **OnePlus 15（PLK110）/ ColorOS 17 / Android 17** 的 MaterialCleaner 适配分支，应用名为 **ReMap**（旧名「质感清理」），应用内「检查更新」与「关于」均指向本仓库。上游项目见 [firesahc/MaterialCleaner](https://github.com/firesahc/MaterialCleaner)。当前版本 **6.2.4（versionCode 624）**。
 
 ## 运行环境
 
@@ -55,7 +55,7 @@
 
 1. 从 [Releases](https://github.com/Mubai-meng/MaterialCleaner/releases) 下载签名 APK，文件名形如 `Cleaner_<版本>-arm64-v8a-release-signed.apk`。
 2. 直接覆盖安装旧版即可，规则与设置全部保留，无需卸载。
-3. 打开 LSPosed Manager → 模块 → 启用 MaterialCleaner。
+3. 打开 LSPosed Manager → 模块 → 启用 ReMap。
 4. 作用域勾选本机 MediaProvider 包，常见为 `com.android.providers.media.module`、`com.google.android.providers.media.module` 或 `com.android.providers.media`。
 5. 重启设备。
 
@@ -104,7 +104,7 @@ adb shell am start -n me.gm.cleaner/.client.ui.ServiceSettingsActivity
 ./gradlew :app:assembleArm64Release
 ```
 
-- 产物：`app/build/outputs/apk/release/Cleaner_6.2.3-release.apk`；文件名带版本号，不带 ABI 与 `signed` 后缀。ABI 由任务名收敛，普通 `assembleRelease` 产出全 ABI 通用包。
+- 产物：`app/build/outputs/apk/release/Cleaner_6.2.4-release.apk`；文件名带版本号，不带 ABI 与 `signed` 后缀。ABI 由任务名收敛，普通 `assembleRelease` 产出全 ABI 通用包。
 - 仓库不含签名配置，发布 APK 需自行使用密钥做 V2 + V3 签名。
 - `buildXposedMainJar` 会把 Hook runtime 及随行模块经 d8 打成 `assets/main.jar`，并执行锚点类门禁。
 - 改代码请同步递增 `ext.versionCode` / `ext.versionName` 并更新 `CHANGELOG.md`。

@@ -217,8 +217,10 @@ ext {
     //      的副作用来源）。
     //   ④ 子进程尾部不再 raw close 父进程侧 sv[0]，socket fd 归属厘清；
     //      check_mounts 入口补 null 防御（GetArrayLength(null) 同款 SEGV@0xc）。
-    versionCode = 623
-    versionName = '6.2.3'
+    // 2026-11-19：6.2.4 / 624 —— 应用更名 ReMap；主页标题改为「存储重定向」；
+    // 修复 AppLabelCache 加密缓存解密失败（AEADBadTagException）打崩进程。
+    versionCode = 624
+    versionName = '6.2.4'
     javaVersion = JavaVersion.VERSION_17
     ndkVersion = '26.1.10909125'
 

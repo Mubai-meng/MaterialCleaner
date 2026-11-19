@@ -1,3 +1,23 @@
+# ReMap 6.2.4
+
+安装包 `Cleaner_6.2.4-arm64-v8a-release-signed.apk`，仅 arm64-v8a，支持 Android 8.0 及以上。已安装 6.2.0 / 6.2.1 / 6.2.2 / 6.2.3 的可直接覆盖安装，不需要卸载，规则与设置全部保留。
+
+本版包含两部分：**应用更名**与**一处崩溃修复**。本版**不新增功能、不改任何已配规则的含义**。
+
+## 应用更名
+
+- 应用名改为 **ReMap**（桌面图标、系统应用列表、LSPosed 模块列表）。
+- 主页标题由「质感清理」改为「存储重定向」（英文 `Storage Redirect`，繁体 `儲存重定向`）。
+- 包名 `me.gm.cleaner` 未变，可直接覆盖安装。桌面旧图标名可能因启动器缓存短暂仍是旧值，重启桌面或重新添加图标后更新。
+
+## 修复：打开「文件系统记录」闪退
+
+- 现象：进入「文件系统记录」时进程崩溃，栈顶为 `AppLabelCache.getPackageLabel` → `readLabel` → Keystore 解密抛 `AEADBadTagException`（底层 `KeyStoreException: Signature/MAC verification failed (-30)`）。
+- 根因：`readLabel()` 只捕获 `IOException` 与 `RuntimeException`，而 `AEADBadTagException` 属于 `GeneralSecurityException`，异常穿出协程打崩进程。触发条件是密钥与密文不匹配（备份恢复 / 密钥重置 / 写入中断），与规则、挂载无关。
+- 修复：把应用名缓存当作可重建的派生数据 —— 读取失败即删除损坏文件并返回空缓存，写入失败仅保留内存缓存，取标签失败兜底返回包名，绝不让异常冒泡到界面。损坏的 `label/` 缓存会在下次进入时自动删除重建。
+
+---
+
 # MaterialCleaner 6.2.3
 
 安装包 `Cleaner_6.2.3-arm64-v8a-release-signed.apk`，仅 arm64-v8a，支持 Android 8.0 及以上。已安装 6.2.0 / 6.2.1 / 6.2.2 的可直接覆盖安装，不需要卸载，规则与设置全部保留。

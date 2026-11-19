@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 主页 -->
-    <string name="app_name">质感清理</string>
+    <string name="app_name">ReMap</string>
     <string name="delimiter">、</string>
     <string name="yes">是</string>
     <string name="no">否</string>
@@ -227,7 +227,7 @@
     <string name="service_need_reboot">已安装更新，请重启手机</string>
     <string name="service_exception_logcat_shutdown">日志猫已退出，请重启 Cleaner 服务</string>
 
-    <string name="service_settings">质感清理</string>
+    <string name="service_settings">存储重定向</string>
     <string name="file_picker_title">选择文件</string>
     <string name="file_picker_unselected">选定的文件</string>
     <string name="file_picker_hint">路径</string>
